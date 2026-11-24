@@ -1,16 +1,18 @@
 # Gravity Steward
 
-**Codex-powered tool approvals for Antigravity on Windows.**
+**Tool approvals for Antigravity on Windows via Codex CLI.**
 
-Gravity Steward uses Codex Guardian to review Antigravity tool requests. Antigravity executes approved actions and continues to enforce your explicit permission rules. The tray panel shows review outcomes, token usage, and configurable cost estimates.
+Gravity Steward integrates with your local Codex CLI. When CLI review is enabled, Gravity Steward uses Codex CLI to call the `codex-auto-review` model for Antigravity tool requests. Antigravity executes approved actions and continues to enforce your explicit permission rules. The tray panel shows review outcomes, token usage, and configurable cost estimates.
 
 [Download for Windows](https://github.com/CarlosZ16420/gravity-steward/releases/latest) · [中文](README.md) · [Report an issue](https://github.com/CarlosZ16420/gravity-steward/issues)
 
 ## Quick start
 
-1. Open Antigravity at least once on Windows x64 and sign in to a Codex account with access to the review model.
+1. Open Antigravity at least once on Windows x64. Install Codex CLI and sign in to Codex CLI (`codex login`) with an account that can use the `codex-auto-review` model.
 2. Download and fully extract the Windows ZIP. Verify it against the accompanying `checksums.sha256`.
-3. Exit Antigravity. Run `GravitySteward.exe`, choose the install or repair option (「安装 / 修复插件」), then reopen Antigravity.
+3. Fully exit Antigravity. In PowerShell, run `.\scripts\Install.ps1 -ReviewerBackend Cli` from the extracted folder to enable Codex CLI review, then reopen Antigravity.
+
+Run `GravitySteward.exe` to open the panel and view review results. The panel's install or repair option (「安装 / 修复插件」) defaults to Native Guardian for reviews and uses the Codex CLI sign-in.
 
 The Windows package bundles the .NET runtime. The panel UI is in Simplified Chinese. Detailed logging is off by default. When enabled, local logs may include paths, conversation content, and tool arguments. Model reviews send the context required for review to Codex.
 

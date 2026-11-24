@@ -2,9 +2,9 @@
 
 # Gravity Steward
 
-**让 Codex 审核 Antigravity 的工具请求。**
+**通过 Codex CLI 审核 Antigravity 的工具请求。**
 
-Codex-powered tool approvals for Antigravity on Windows.
+Tool approvals for Antigravity on Windows via Codex CLI.
 
 ![Windows x64](https://img.shields.io/badge/Windows-x64-2558a8?style=flat-square)
 ![Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-26735d?style=flat-square)
@@ -15,19 +15,21 @@ Codex-powered tool approvals for Antigravity on Windows.
 
 </div>
 
-当 Antigravity 请求运行命令或修改文件时，Gravity Steward 可以把请求交给 Codex Guardian 审核。Antigravity 仍负责执行，并保留你设置的显式允许、询问和拒绝规则。
+Gravity Steward 接入本机的 Codex CLI。启用 CLI 审批后，插件通过 Codex CLI 调用 `codex-auto-review` 模型，审核 Antigravity 的工具请求。Antigravity 负责执行，并保留你设置的显式允许、询问和拒绝规则。
 
 ## 快速开始
 
-1. 在 Windows x64 上打开过一次 Antigravity，并登录可使用审核模型的 Codex 账号。
+1. 在 Windows x64 上至少打开一次 Antigravity。安装 Codex CLI，并用有权使用 `codex-auto-review` 审核模型的账号登录 Codex CLI（`codex login`）。
 2. 从 [Releases](https://github.com/CarlosZ16420/gravity-steward/releases/latest) 下载 `gravity-steward-*-windows-x64.zip`，完整解压到可写目录。
-3. 完全退出 Antigravity，运行 `GravitySteward.exe`。确认面板识别到了 Antigravity 和 Codex，点击「安装 / 修复插件」，然后重新启动 Antigravity。
+3. 完全退出 Antigravity，在解压目录的 PowerShell 中运行 `.\scripts\Install.ps1 -ReviewerBackend Cli` 启用 Codex CLI 审批，然后重新打开 Antigravity。
+
+运行 `GravitySteward.exe` 可以打开面板查看审批结果。面板的「安装 / 修复插件」默认使用 Native Guardian 审批，并复用 Codex CLI 的登录状态。
 
 Windows 包自带 .NET 运行时。下载后可对照同页的 `checksums.sha256` 核对 ZIP。升级前先退出 Antigravity，卸载可运行包内的 `scripts/Uninstall.ps1`。
 
 ## 功能介绍
 
-- **工具审批**。用 Codex Guardian 审核需要判断的请求，把拒绝原因反馈给 Antigravity。经过校验的部分只读请求交由 Antigravity 原生规则处理。
+- **工具审批**。把模型审核的拒绝原因反馈给 Antigravity。经过校验的部分只读请求交由 Antigravity 原生规则处理。
 - **托盘与统计**。从面板查看今日及近 7 日的审批、用量和可配置的成本估算。
 - **日志与更新**。详细日志默认关闭。启用后，日志保存在本机，可能包含路径、对话或工具参数。模型审核会向 Codex 服务发送审核所需的上下文。面板可检查 GitHub Releases 并校验更新包。
 
