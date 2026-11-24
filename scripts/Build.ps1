@@ -2,6 +2,7 @@
 param([switch]$SkipTests,[switch]$SkipPanelSelfTest)
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'Review-Mode.ps1')
+. (Join-Path $PSScriptRoot 'Locked-DotnetRuntime.ps1')
 $taskRoot = Split-Path $PSScriptRoot -Parent
 $taskParentRoot = Split-Path $taskRoot -Parent
 
@@ -26,6 +27,7 @@ if (!(Test-Path -LiteralPath $taskDotnet)) { $taskDotnet = (Get-Command dotnet).
 Push-Location $taskRoot
 try {
     & (Join-Path $PSScriptRoot 'Check-PublicHygiene.ps1')
+    $taskRuntime = Get-LockedDotnetRuntime
     & node (Join-Path $PSScriptRoot 'Prepare-Policy.mjs')
     if ($LASTEXITCODE -ne 0) { throw 'Policy preparation failed' }
     & (Join-Path $PSScriptRoot 'Build-Guardian.ps1')
@@ -76,17 +78,18 @@ try {
     New-Item -ItemType Directory -Path $taskPolicy -Force | Out-Null
     Copy-Item -Path (Join-Path $taskRoot 'policy/effective-codex/*') -Destination $taskPolicy -Recurse -Force
 
-    # Bundle only Microsoft.NETCore.App; native Win32 panel has zero .NET Desktop dependency.
-    $taskDotnetRoot = Split-Path $taskDotnet -Parent
-    $taskRuntime = Join-Path $taskBundle 'runtime'
-    New-Item -ItemType Directory -Path $taskRuntime -Force | Out-Null
-    Copy-Item -LiteralPath $taskDotnet -Destination (Join-Path $taskRuntime 'dotnet.exe') -Force
-    foreach ($taskNotice in @('LICENSE.txt', 'ThirdPartyNotices.txt')) {
-        Copy-Item -LiteralPath (Join-Path $taskDotnetRoot $taskNotice) -Destination $taskRuntime
+    # The build SDK is independent of the runtime shipped with the framework-dependent app.
+    $taskRuntimeArchive = [IO.Compression.ZipFile]::OpenRead($taskRuntime.archivePath)
+    try {
+        $taskRuntimeFiles = Get-LockedDotnetRuntimeFiles -Archive $taskRuntimeArchive -Version $taskRuntime.version
+        foreach ($taskRuntimeFile in $taskRuntimeFiles.Values) {
+            $taskTarget = Join-Path $taskBundle ('runtime/' + $taskRuntimeFile.FullName)
+            [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($taskTarget)) | Out-Null
+            [IO.Compression.ZipFileExtensions]::ExtractToFile($taskRuntimeFile, $taskTarget)
+        }
+    } finally {
+        $taskRuntimeArchive.Dispose()
     }
-    Copy-Item -LiteralPath (Join-Path $taskDotnetRoot 'host') -Destination $taskRuntime -Recurse -Force
-    New-Item -ItemType Directory -Path (Join-Path $taskRuntime 'shared') -Force | Out-Null
-    Copy-Item -LiteralPath (Join-Path $taskDotnetRoot 'shared/Microsoft.NETCore.App') -Destination (Join-Path $taskRuntime 'shared') -Recurse -Force
 
     $taskPublishedBundle = [IO.Path]::GetFullPath((Join-Path $taskRoot 'artifacts/codex-approval'))
     $taskOldBundle = [IO.Path]::GetFullPath((Join-Path $taskRoot ('.local/build-backups/' + [Guid]::NewGuid().ToString('N') + '/codex-approval')))

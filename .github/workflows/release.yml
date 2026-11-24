@@ -57,5 +57,6 @@ jobs:
           path: |
             artifacts/gravity-steward-*-windows-x64.zip
             artifacts/release-manifest.json
+            artifacts/release-build-info.json
             artifacts/checksums.sha256
           if-no-files-found: error
