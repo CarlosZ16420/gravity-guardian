@@ -9,7 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cwctype>
-#include <thread>
+#include <memory>
 
 namespace panel {
 
@@ -533,13 +533,21 @@ bool JsonValue::GetBool(std::string_view key, bool fallback) const {
 
 namespace {
 
-void DrainPipe(HANDLE hPipe, std::string& out) {
+using UniqueHandle = std::unique_ptr<void, decltype(&CloseHandle)>;
+constexpr size_t kMaxCapturedOutput = 4 * 1024 * 1024;
+
+void ReadAvailableOutput(HANDLE pipe, std::string& out) {
+    DWORD available = 0;
+    if (!PeekNamedPipe(pipe, nullptr, 0, nullptr, &available, nullptr)) return;
+
     char buf[4096];
-    DWORD read = 0;
-    while (ReadFile(hPipe, buf, sizeof(buf), &read, nullptr) && read > 0) {
-        if (out.size() < 4 * 1024 * 1024) {
-            out.append(buf, read);
-        }
+    // Read only the current buffer, so a descendant holding the pipe open cannot delay the caller.
+    while (available > 0) {
+        DWORD read = 0;
+        const DWORD chunk = std::min(available, static_cast<DWORD>(sizeof(buf)));
+        if (!ReadFile(pipe, buf, chunk, &read, nullptr) || read == 0) break;
+        out.append(buf, std::min<size_t>(read, kMaxCapturedOutput - out.size()));
+        available -= read;
     }
 }
 
@@ -552,23 +560,36 @@ CommandResult RunHiddenCommand(
     DWORD timeoutMs) {
     CommandResult res{};
     SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
-    HANDLE outRead = nullptr, outWrite = nullptr;
-    HANDLE errRead = nullptr, errWrite = nullptr;
-    if (!CreatePipe(&outRead, &outWrite, &sa, 0)) return res;
-    if (!CreatePipe(&errRead, &errWrite, &sa, 0)) {
-        CloseHandle(outRead); CloseHandle(outWrite);
-        return res;
-    }
-    SetHandleInformation(outRead, HANDLE_FLAG_INHERIT, 0);
-    SetHandleInformation(errRead, HANDLE_FLAG_INHERIT, 0);
+    HANDLE read = nullptr, write = nullptr;
+    if (!CreatePipe(&read, &write, &sa, 64 * 1024)) return res;
+    UniqueHandle outRead(read, CloseHandle), outWrite(write, CloseHandle);
+    if (!CreatePipe(&read, &write, &sa, 64 * 1024)) return res;
+    UniqueHandle errRead(read, CloseHandle), errWrite(write, CloseHandle);
+    HANDLE input = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_EXISTING, 0, nullptr);
+    if (input == INVALID_HANDLE_VALUE) return res;
+    UniqueHandle stdIn(input, CloseHandle);
 
-    STARTUPINFOW si{};
-    si.cb = sizeof(si);
-    si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
-    si.wShowWindow = SW_HIDE;
-    si.hStdOutput = outWrite;
-    si.hStdError = errWrite;
-    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    // Parallel commands may create pipes at the same time. Each child gets only its own streams.
+    HANDLE inherited[] = {stdIn.get(), outWrite.get(), errWrite.get()};
+    SIZE_T attrSize = 0;
+    InitializeProcThreadAttributeList(nullptr, 1, 0, &attrSize);
+    if (attrSize == 0) return res;
+    auto attrBuffer = std::make_unique<BYTE[]>(attrSize);
+    auto attributes = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attrBuffer.get());
+    if (!InitializeProcThreadAttributeList(attributes, 1, 0, &attrSize)) return res;
+    std::unique_ptr<_PROC_THREAD_ATTRIBUTE_LIST, decltype(&DeleteProcThreadAttributeList)>
+        attrList(attributes, DeleteProcThreadAttributeList);
+    if (!UpdateProcThreadAttribute(attrList.get(), 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+                                   inherited, sizeof(inherited), nullptr, nullptr)) return res;
+
+    STARTUPINFOEXW si{};
+    si.StartupInfo.cb = sizeof(si);
+    si.StartupInfo.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+    si.StartupInfo.wShowWindow = SW_HIDE;
+    si.StartupInfo.hStdOutput = outWrite.get();
+    si.StartupInfo.hStdError = errWrite.get();
+    si.StartupInfo.hStdInput = stdIn.get();
+    si.lpAttributeList = attrList.get();
 
     std::wstring cmdLine = L"\"" + exe + L"\"";
     if (!args.empty()) cmdLine += L" " + args;
@@ -580,39 +601,38 @@ CommandResult RunHiddenCommand(
         nullptr,
         nullptr,
         TRUE,
-        CREATE_NO_WINDOW,
+        CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT,
         nullptr,
         workDir.empty() ? nullptr : workDir.c_str(),
-        &si,
+        &si.StartupInfo,
         &pi);
 
-    CloseHandle(outWrite);
-    CloseHandle(errWrite);
-
-    if (!ok) {
-        CloseHandle(outRead);
-        CloseHandle(errRead);
-        return res;
-    }
+    outWrite.reset();
+    errWrite.reset();
+    if (!ok) return res;
 
     res.started = true;
-    std::thread tOut([&]() { DrainPipe(outRead, res.stdoutUtf8); });
-    std::thread tErr([&]() { DrainPipe(errRead, res.stderrUtf8); });
-
-    DWORD waitRes = WaitForSingleObject(pi.hProcess, timeoutMs);
-    if (waitRes == WAIT_TIMEOUT) {
-        res.timedOut = true;
-        TerminateProcess(pi.hProcess, 1);
-        WaitForSingleObject(pi.hProcess, 2000);
-    }
-    GetExitCodeProcess(pi.hProcess, &res.exitCode);
-
-    tOut.join();
-    tErr.join();
-    CloseHandle(outRead);
-    CloseHandle(errRead);
+    UniqueHandle process(pi.hProcess, CloseHandle);
     CloseHandle(pi.hThread);
-    CloseHandle(pi.hProcess);
+    const ULONGLONG deadline = GetTickCount64() + timeoutMs;
+    DWORD waitResult;
+    do {
+        ReadAvailableOutput(outRead.get(), res.stdoutUtf8);
+        ReadAvailableOutput(errRead.get(), res.stderrUtf8);
+        const ULONGLONG now = GetTickCount64();
+        const DWORD waitMs = now < deadline ? static_cast<DWORD>(std::min<ULONGLONG>(deadline - now, 10)) : 0;
+        waitResult = WaitForSingleObject(process.get(), waitMs);
+    } while (waitResult == WAIT_TIMEOUT && GetTickCount64() < deadline);
+    if (waitResult == WAIT_TIMEOUT) {
+        res.timedOut = true;
+        TerminateProcess(process.get(), 1);
+        WaitForSingleObject(process.get(), 2000);
+    }
+
+    res.exitCode = 1;
+    GetExitCodeProcess(process.get(), &res.exitCode);
+    ReadAvailableOutput(outRead.get(), res.stdoutUtf8);
+    ReadAvailableOutput(errRead.get(), res.stderrUtf8);
     return res;
 }
 

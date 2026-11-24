@@ -25,7 +25,9 @@ Gravity Steward 接入本机的 Codex CLI。启用 CLI 审批后，插件通过 
 
 运行 `GravitySteward.exe` 可以打开面板查看审批结果。面板的「安装 / 修复插件」默认使用 Native Guardian 审批，并复用 Codex CLI 的登录状态。
 
-Windows 包自带 .NET 运行时。下载后可对照同页的 `checksums.sha256` 核对 ZIP。升级前先退出 Antigravity，卸载可运行包内的 `scripts/Uninstall.ps1`。
+Windows 包自带 .NET 运行时。下载后可对照同页的 `checksums.sha256` 核对 ZIP。升级或卸载前先完全退出 Antigravity。
+
+在面板点击「完整卸载」，确认后会关闭面板，移除已安装的插件和开机启动项，并永久删除本地审批日志、统计、设置、缓存和备份。也可运行包内的 `scripts/Uninstall.ps1 -PurgeData`。手动下载的 ZIP 和解压目录可自行删除。
 
 ## 功能介绍
 

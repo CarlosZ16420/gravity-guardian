@@ -106,5 +106,59 @@ public static class NativeTranscriptTests
                 throw new Exception("Ancestor evidence was lost or superseded branch evidence leaked");
             await Reject(abandoned,84);
         });
+        await test("complete native tool results may be recorded out of slot order",async()=>{
+            var current=Call("read_file",new(){["Path"]="current.cs"});
+            var header=new[]{
+                Json.Encode(new{step_index=0,source="USER_EXPLICIT",type="USER_INPUT",content="Read project files."}),
+                new JsonObject{["step_index"]=1294,["source"]="MODEL",["type"]="PLANNER_RESPONSE",
+                    ["tool_calls"]=new JsonArray(Call("update_focus"),Call("write_file"),Call("edit_file"),Call("edit_file"))}.ToJsonString()
+            };
+            string Result(int step,string status,string source="MODEL")=>Json.Encode(new{step_index=step,source,type="GENERIC",status});
+            var results=new[]{Result(1298,"INVALID"),Result(1295,"DONE"),Result(1296,"ERROR"),Result(1297,"ERROR")};
+            var laterProposal=new JsonObject{["step_index"]=1299,["source"]="MODEL",["type"]="PLANNER_RESPONSE",
+                ["tool_calls"]=new JsonArray(current.DeepClone())}.ToJsonString();
+            async Task WriteResults(IEnumerable<string> resultRows)=>
+                await File.WriteAllTextAsync(path,string.Join("\n",header.Concat(resultRows).Append(laterProposal))+"\n");
+
+            await WriteResults(results);
+            var evidence=await NativeTranscript.ReadAsync(path,1300,current,default);
+            if(evidence.Segment!=1||evidence.Method!="exact_tool_arguments_preceding_native_step"||
+                !Enumerable.Range(2,6).All(evidence.ActiveNonUserPositions!.Contains))
+                throw new Exception("Out-of-order results changed the active segment or discarded evidence");
+            await Reject(Call("read_file",new(){["Path"]="other.cs"}),1300);
+
+            await WriteResults(results.Take(3));
+            await Reject(current,1300);
+            await WriteResults(results.Append(Result(1298,"INVALID")));
+            await Reject(current,1300);
+            await WriteResults(results.Take(3).Append(Result(1297,"ERROR","SYSTEM")));
+            await Reject(current,1300);
+        });
+        await test("pending native siblings can be reviewed while same-batch results arrive out of order",async()=>{
+            var write=Call("write_file",new(){["Path"]="draft.txt",["Content"]="draft"});
+            var edit=Call("edit_file",new(){["Path"]="draft.txt",["Target"]="draft",["Replacement"]="revision"});
+            await Write(new(Call("update_focus"),write.DeepClone(),edit.DeepClone(),Call("edit_file",new(){["Target"]=""})));
+            var proposal=await File.ReadAllTextAsync(path);
+            string Result(int step,string status)=>Json.Encode(new{step_index=step,source="MODEL",type="GENERIC",status});
+            var earlyResults=new[]{Result(5,"INVALID"),Result(2,"DONE")};
+            await File.AppendAllLinesAsync(path,earlyResults);
+            var evidence=await NativeTranscript.ReadAsync(path,3,write,default);
+            if(evidence.Segment!=1||evidence.Method!="indexed_native_tool_batch"||!evidence.ActiveNonUserPositions!.SetEquals([2,4]))
+                throw new Exception("Pending write lost its proposal or included a future sibling result");
+            await Reject(edit,3);
+            await File.AppendAllLinesAsync(path,[Result(3,"ERROR")]);
+            evidence=await NativeTranscript.ReadAsync(path,4,edit,default);
+            if(!evidence.ActiveNonUserPositions!.SetEquals([2,4,5]))
+                throw new Exception("Pending edit did not retain earlier siblings");
+            await Reject(write,3);
+            foreach(var invalidTail in new[]{
+                Result(2,"DONE"), Result(5,"INVALID"), Result(3,"RUNNING"),
+                Json.Encode(new{step_index=6,source="USER_EXPLICIT",type="USER_INPUT",content="Stop and do not write."})
+            })
+            {
+                await File.WriteAllTextAsync(path,proposal+string.Join("\n",earlyResults.Append(invalidTail))+"\n");
+                await Reject(edit,4);
+            }
+        });
     }
 }

@@ -8,6 +8,8 @@ public sealed record NativeEvidence(List<NativeRow> Rows,int Segment,int Cutoff,
 
 public static class NativeTranscript
 {
+    internal static bool IsExplicitUser(JsonObject row) =>
+        Json.Text(row, "type") == "USER_INPUT" && Json.Text(row, "source") == "USER_EXPLICIT";
     // Native transcripts omit empty args and may omit the Hook's transport-only ID.
     // Keep every other field so unknown action data cannot silently compare equal.
     public static JsonObject NormalizeToolCall(JsonObject call)
@@ -39,7 +41,7 @@ public static class NativeTranscript
         using var verifier=new StreamReader(verify,new UTF8Encoding(false,true));
         if(await verifier.ReadToEndAsync(ct)!=raw)throw new IOException("Transcript changed during snapshot read");
         if(raw.Length>0&&!raw.EndsWith('\n'))throw new InvalidDataException("Transcript has an incomplete final physical record");
-        var rows=new List<NativeRow>();var activeNonUser=new List<NativeRow>();int previous=-1,segment=1,position=0;
+        var rows=new List<NativeRow>();int position=0;
         foreach(var line in raw.Split('\n'))
         {
             position++;if(line.Length==0)continue;
@@ -58,19 +60,27 @@ public static class NativeTranscript
                 foreach(var nativeCall in calls)
                     _=NormalizeToolCall(nativeCall as JsonObject??throw new InvalidDataException("Unknown native tool-call contract"));
             }
-            bool user=type=="USER_INPUT"&&source=="USER_EXPLICIT";
-            if(index<previous)
+            rows.Add(new(row,position,index,0,IsExplicitUser(row)));
+        }
+        var activeNonUser=new List<NativeRow>();int previous=-1,segment=1,batchEnd=-1;
+        for(int i=0;i<rows.Count;i++)
+        {
+            var entry=rows[i];
+            var type=Json.Text(entry.Value,"type");
+            if(entry.Step<previous&&i>batchEnd)
             {
-                bool validRollback=user||(index>0&&type is ("SYSTEM_MESSAGE" or "PLANNER_RESPONSE" or "ERROR_MESSAGE")&&rows.Any(r=>r.Step<=index));
+                bool validRollback=entry.IsUser||(entry.Step>0&&type is ("SYSTEM_MESSAGE" or "PLANNER_RESPONSE" or "ERROR_MESSAGE")&&
+                    rows.Take(i).Any(r=>r.Step<=entry.Step));
                 if(!validRollback)
                     throw new InvalidDataException("Unexplained transcript step rollback; current retry segment cannot be established");
-                segment=position;
-                activeNonUser.RemoveAll(r=>r.Step>=index);
+                segment=entry.Position;
+                activeNonUser.RemoveAll(r=>r.Step>=entry.Step);
             }
-            var entry=new NativeRow(row,position,index,segment,user);
-            rows.Add(entry);
-            if(!user)activeNonUser.Add(entry);
-            previous=index;
+            rows[i]=entry=entry with {Segment=segment};
+            if(!entry.IsUser)activeNonUser.Add(entry);
+            previous=i<=batchEnd?Math.Max(previous,entry.Step):entry.Step;
+            if(type=="PLANNER_RESPONSE"&&Json.Text(entry.Value,"source")=="MODEL"&&entry.Value["tool_calls"] is JsonArray {Count:>1} batch)
+                batchEnd=FindBatchResultEnd(rows,i,batch.Count,step);
         }
         var action=ReviewAdapter.Canonical(NormalizeToolCall(call));
         var matches=activeNonUser.Where(r=>r.Step<step&&Json.Text(r.Value,"source")=="MODEL"&&Json.Text(r.Value,"type")=="PLANNER_RESPONSE"&&
@@ -97,5 +107,27 @@ public static class NativeTranscript
         else throw new InvalidDataException("Current request cannot be uniquely bound to the active native segment");
         var activePositions=activeNonUser.Where(r=>r.Step<step&&r.Position<=cutoff).Select(r=>r.Position).ToHashSet();
         return new(rows,segment,cutoff,userCutoff,method,Json.Hash(raw),activePositions);
+    }
+
+    private static int FindBatchResultEnd(List<NativeRow> rows,int proposalIndex,int count,int pendingStep)
+    {
+        var proposal=rows[proposalIndex];
+        int available=Math.Min(count,rows.Count-proposalIndex-1);
+        var seen=new HashSet<int>();
+        for(int i=1;i<=available;i++)
+        {
+            var result=rows[proposalIndex+i];
+            int slot=result.Step-proposal.Step;
+            if(slot<1||slot>count||!seen.Add(slot)||Json.Text(result.Value,"source")!="MODEL"||Json.Text(result.Value,"type")!="GENERIC"||
+                Json.Text(result.Value,"status") is not ("DONE" or "ERROR" or "INVALID")||result.Value.ContainsKey("tool_calls"))return -1;
+        }
+        // An unfinished batch must be at the transcript tail, with the current call still pending in that batch.
+        if(available<count)
+        {
+            int pendingSlot=pendingStep-proposal.Step;
+            return pendingSlot>0&&pendingSlot<=count&&!seen.Contains(pendingSlot)?proposalIndex+available:-1;
+        }
+        int next=proposalIndex+available+1;
+        return next==rows.Count||!seen.Contains(rows[next].Step-proposal.Step)||Json.Text(rows[next].Value,"type")!="GENERIC"?next-1:-1;
     }
 }

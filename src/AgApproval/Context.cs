@@ -74,6 +74,9 @@ public static class ReviewContext
         var states=ReviewAdapter.FileStates(action,native);var rules=ReadRules(workspace,cwd,args,states);
         var authorizationRevision=Json.Hash(ReviewAdapter.Canonical(new JsonArray(modelUsers.Select(r=>(JsonNode)new JsonObject{
             ["content"]=r!["content"]?.DeepClone(),["truncation"]=r["truncation"]?.DeepClone()}).ToArray())));
+        var projectAuthorizations = ProjectAuthorizations.Active(settings, workspace);
+        if (projectAuthorizations.Count > 0)
+            authorizationRevision = Json.Hash(authorizationRevision + ReviewAdapter.Canonical(projectAuthorizations));
         var effectiveKnownPermissions=permissions.DeepClone().AsObject();effectiveKnownPermissions.Remove("sources");
         var environmentRevision=Json.Hash(ReviewAdapter.Canonical(new JsonObject{["workspaces"]=workspace.DeepClone(),["cwd"]=cwd,["permission_context"]=effectiveKnownPermissions}));
         var materialRevision=Json.Hash(ReviewAdapter.Canonical(new JsonObject{["action"]=fingerprint,["environment"]=environmentRevision,["rules"]=rules.DeepClone(),["files"]=states.DeepClone()}));
@@ -95,6 +98,7 @@ public static class ReviewContext
             ["action_type"]=ReviewAdapter.Describe(tool),["user_instructions"]=modelUsers,["project_rules"]=rules,["permission_context"]=permissions,["referenced_file_states"]=states,
             ["native_binding"]=new JsonObject{["segment_id"]="segment:"+parsed.Segment,["cutoff_position"]=parsed.Cutoff,["binding_method"]=parsed.Method,["raw_transcript_sha256"]=parsed.RawHash},
             ["conversation_evidence"]=new JsonArray(),["transcript_omitted_records"]=0,["transcript_omitted_positions"]=new JsonArray(),["planned_action"]=action,["additional_hook_scope"]=unknownScope};
+        if (projectAuthorizations.Count > 0) doc["project_authorizations"] = projectAuthorizations;
         if(!native)
         {
             int budget=settings.MaxContextBytes+settings.MaxInputBytes;

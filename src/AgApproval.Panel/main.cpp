@@ -110,13 +110,13 @@ enum class WorkKind {
     InitialRefresh,
     RefreshAll,
     ServiceEnsure,
+    LaunchAntigravity,
     DetectEnv,
     ToggleDetailedLogs,
     CompactLogs,
     CheckAndMaybeUpdate,
     DownloadUpdate,
-    InstallOrRepair,
-    Uninstall
+    InstallOrRepair
 };
 
 struct WorkResult {
@@ -158,6 +158,7 @@ struct App {
     std::atomic<bool> busyRefresh{false};
     std::atomic<bool> busyUpdate{false};
     std::atomic<bool> busyAction{false};
+    bool uninstallPromptOpen = false;
     bool statsRunning = false;
     bool statsPending = false;
     bool statsLoaded = false;
@@ -597,7 +598,9 @@ void QueryCoreSnapshot(const PanelConfig& cfg, RuntimeState& snap, bool runDetec
             snap.serviceDetail = snap.serviceRunning ? L"审批服务运行中" : L"审批服务未运行";
         } else {
             snap.serviceRunning = false;
-            snap.serviceDetail = L"审批服务未启动";
+            snap.serviceDetail = st.timedOut || st.stderrUtf8.starts_with("OperationCanceledException:")
+                ? L"审批服务未响应"
+                : L"无法读取审批服务状态";
         }
     } else {
         snap.serviceRunning = false;
@@ -706,7 +709,10 @@ void SyncControlsToUi() {
     SendMessageW(g_app.chkAutostart, BM_SETCHECK, cfgCopy.autostart ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(g_app.chkAutoUpdate, BM_SETCHECK, cfgCopy.autoUpdate ? BST_CHECKED : BST_UNCHECKED, 0);
 
-    std::wstring verText = L"当前版本: v" + s.serviceVersion;
+    std::wstring verText = L"面板 v" PANEL_VERSION_WIDE;
+    if (s.pluginInstalled && s.serviceVersion != PANEL_VERSION_WIDE) {
+        verText += L" · 插件 v" + s.serviceVersion;
+    }
     if (!g_app.updateCfg.repository.empty()) {
         verText += L" · 更新源: GitHub";
     }
@@ -720,7 +726,7 @@ void SyncControlsToUi() {
     std::wstring cxText = cfgCopy.codexPath.empty() ? L"未检测到" : s.codexSummary + L" · " + cfgCopy.codexPath;
     SetWindowTextW(g_app.lblCodexPath, cxText.c_str());
 
-    EnableWindow(g_app.btnUninstall, s.pluginInstalled);
+    EnableWindow(g_app.btnUninstall, FileExists(JoinPath(cfgCopy.dataDirectory, L"installation.json")));
     UpdateTrayAppearance();
     ResizePanelToContent();
     InvalidateRect(g_app.hwnd, nullptr, FALSE);
@@ -771,7 +777,10 @@ void StartCheckUpdateWorker(bool allowAutoApply) {
     }
     UpdateConfig updCopy = g_app.updateCfg;
     RuntimeState baseSnap = g_app.state;
-    std::wstring currentVer = baseSnap.serviceVersion.empty() ? PANEL_VERSION_WIDE : baseSnap.serviceVersion;
+    std::wstring currentVer = PANEL_VERSION_WIDE;
+    if (CompareSemVer(baseSnap.serviceVersion, currentVer) > 0) {
+        currentVer = baseSnap.serviceVersion;
+    }
     bool installed = baseSnap.pluginInstalled;
 
     std::thread([cfgCopy, updCopy, baseSnap, currentVer, allowAutoApply, installed]() mutable {
@@ -982,7 +991,17 @@ void StartCompactLogsWorker() {
     }).detach();
 }
 
-void StartInstallScriptWorker(bool uninstall) {
+std::wstring GetLifecycleScriptPath(const PanelConfig& cfg, const std::wstring& exeDir, const wchar_t* name) {
+    const auto relative = JoinPath(L"scripts", name);
+    // Use the script shipped with the running panel when a portable package is opened over an older installation.
+    for (const auto& root : {exeDir, GetDirectoryName(exeDir), cfg.bundleDirectory, cfg.pluginDirectory}) {
+        const auto script = JoinPath(root, relative);
+        if (FileExists(script)) return script;
+    }
+    return {};
+}
+
+void StartInstallScriptWorker() {
     if (g_app.busyAction.exchange(true)) return;
     PanelConfig cfgCopy;
     {
@@ -991,40 +1010,71 @@ void StartInstallScriptWorker(bool uninstall) {
     }
     RuntimeState snapBase = g_app.state;
     std::wstring exeDir = GetDirectoryName(GetExecutablePath());
-    std::thread([cfgCopy, snapBase, exeDir, uninstall]() mutable {
+    std::thread([cfgCopy, snapBase, exeDir]() mutable {
         wchar_t sysDir[MAX_PATH]{};
         GetSystemDirectoryW(sysDir, static_cast<DWORD>(std::size(sysDir)));
         std::wstring psExe = JoinPath(sysDir, L"WindowsPowerShell\\v1.0\\powershell.exe");
 
-        std::wstring script = JoinPath(cfgCopy.bundleDirectory, uninstall ? L"scripts\\Uninstall.ps1" : L"scripts\\Install.ps1");
-        if (!FileExists(script)) {
-            script = JoinPath(exeDir, uninstall ? L"scripts\\Uninstall.ps1" : L"scripts\\Install.ps1");
-        }
-        if (uninstall && !FileExists(script)) {
-            script = JoinPath(cfgCopy.pluginDirectory, L"scripts\\Uninstall.ps1");
-        }
-        std::wstring args = L"-NoProfile -ExecutionPolicy Bypass -File \"" + script + L"\" -DataDirectory \"" + cfgCopy.dataDirectory + L"\"";
-        if (!uninstall) {
-            args = L"-NoProfile -ExecutionPolicy Bypass -File \"" + script + L"\" -GeminiRoot \"" + cfgCopy.geminiRoot +
-                   L"\" -DataDirectory \"" + cfgCopy.dataDirectory + L"\"";
-            if (!cfgCopy.antigravityPath.empty()) args += L" -AntigravityPath \"" + cfgCopy.antigravityPath + L"\"";
-            if (!cfgCopy.codexPath.empty()) args += L" -CodexPath \"" + cfgCopy.codexPath + L"\"";
-        }
+        std::wstring script = GetLifecycleScriptPath(cfgCopy, exeDir, L"Install.ps1");
+        std::wstring args = L"-NoProfile -ExecutionPolicy Bypass -File \"" + script + L"\" -GeminiRoot \"" + cfgCopy.geminiRoot +
+                            L"\" -DataDirectory \"" + cfgCopy.dataDirectory + L"\"";
+        if (!cfgCopy.antigravityPath.empty()) args += L" -AntigravityPath \"" + cfgCopy.antigravityPath + L"\"";
+        if (!cfgCopy.codexPath.empty()) args += L" -CodexPath \"" + cfgCopy.codexPath + L"\"";
 
         CommandResult cr = RunHiddenCommand(psExe, args, GetDirectoryName(script), 45000);
         QueryCoreSnapshot(cfgCopy, snapBase, false, true);
         auto res = std::make_unique<WorkResult>();
-        res->kind = uninstall ? WorkKind::Uninstall : WorkKind::InstallOrRepair;
+        res->kind = WorkKind::InstallOrRepair;
         res->ok = cr.started && !cr.timedOut && cr.exitCode == 0;
         res->snapshot = std::move(snapBase);
         if (res->ok) {
-            res->message = uninstall ? L"插件已卸载并恢复 Antigravity 原始权限配置。" : L"插件已成功安装并启用审批服务。";
+            res->message = L"插件已成功安装并启用审批服务。";
         } else {
-            res->message = (uninstall ? L"卸载失败：\n" : L"安装失败：\n") + Utf8ToWide(cr.stderrUtf8 + "\n" + cr.stdoutUtf8);
+            res->message = L"安装失败：\n" + Utf8ToWide(cr.stderrUtf8 + "\n" + cr.stdoutUtf8);
         }
         g_app.busyAction = false;
         PostWorkResult(std::move(res));
     }).detach();
+}
+
+void StartUninstallAndExit(HWND hwnd) {
+    if (g_app.busyAction || g_app.busyUpdate || g_app.busyRefresh || g_app.statsRunning) {
+        MessageBoxW(hwnd, L"请等当前操作结束后再卸载。", L"完整卸载", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    PanelConfig cfg;
+    {
+        std::lock_guard<std::mutex> lk(g_app.cfgMutex);
+        cfg = g_app.cfg;
+    }
+    if (IsProcessRunningByPath(cfg.antigravityPath)) {
+        MessageBoxW(hwnd, L"请先完全退出 Antigravity，再卸载。", L"完整卸载", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    const std::wstring exePath = GetExecutablePath();
+    const auto script = GetLifecycleScriptPath(cfg, GetDirectoryName(exePath), L"Uninstall.ps1");
+    if (script.empty()) {
+        MessageBoxW(hwnd, L"找不到卸载脚本。请从完整解压的安装包重新打开面板。", L"完整卸载", MB_OK | MB_ICONERROR);
+        return;
+    }
+    g_app.uninstallPromptOpen = true;
+    const int answer = MessageBoxW(hwnd,
+        L"面板将退出。卸载会移除已安装的插件，并永久删除本地审批日志、统计、设置和备份。\n\n确认完整卸载吗？",
+        L"完整卸载 Gravity Steward", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
+    g_app.uninstallPromptOpen = false;
+    if (answer != IDYES) return;
+
+    wchar_t systemDir[MAX_PATH]{};
+    GetSystemDirectoryW(systemDir, static_cast<DWORD>(std::size(systemDir)));
+    std::wstring powershell = JoinPath(systemDir, L"WindowsPowerShell\\v1.0\\powershell.exe");
+    std::wstring args = L"-NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"" + script +
+        L"\" -DataDirectory \"" + cfg.dataDirectory + L"\" -PurgeData -WaitPid " + std::to_wstring(GetCurrentProcessId()) +
+        L" -PanelExecutablePath \"" + exePath + L"\" -ShowResult";
+    if (!LaunchDetached(powershell, args, systemDir, true)) {
+        MessageBoxW(hwnd, L"无法启动卸载程序。", L"完整卸载", MB_OK | MB_ICONERROR);
+        return;
+    }
+    DestroyWindow(hwnd);
 }
 
 void LaunchAntigravityAction() {
@@ -1037,19 +1087,21 @@ void LaunchAntigravityAction() {
         MessageBoxW(g_app.hwnd, L"未找到 Antigravity.exe，请先点击下方“更改...”指定路径。", L"启动 Antigravity", MB_OK | MB_ICONINFORMATION);
         return;
     }
-    // Ensure approval host is running before launching Antigravity (wait briefly if installed).
-    if (g_app.state.pluginInstalled && !g_app.state.serviceRunning) {
-        std::wstring dotnet = GetDotnetExe(cfgCopy);
-        std::wstring dll = GetAssemblyDll(cfgCopy);
-        std::wstring appCfg = JoinPath(cfgCopy.pluginDirectory, L"approval.json");
-        RunHiddenCommand(dotnet, L"\"" + dll + L"\" ensure --config \"" + appCfg + L"\"", cfgCopy.pluginDirectory, 8000);
-    }
-    // Launch Antigravity directly in its clean native environment (no proxy overrides, no wrapper .bat).
-    if (!LaunchDetached(cfgCopy.antigravityPath, L"", GetDirectoryName(cfgCopy.antigravityPath), false)) {
-        MessageBoxW(g_app.hwnd, L"无法启动 Antigravity.exe，请检查文件路径和权限。", L"启动失败", MB_OK | MB_ICONERROR);
-        return;
-    }
-    StartRefreshWorker(false, false, true);
+    if (g_app.busyAction.exchange(true)) return;
+    const bool ensureService = g_app.state.pluginInstalled && !g_app.state.serviceRunning;
+    std::thread([cfgCopy, ensureService]() {
+        if (ensureService) {
+            const auto dotnet = GetDotnetExe(cfgCopy);
+            const auto dll = GetAssemblyDll(cfgCopy);
+            const auto appCfg = JoinPath(cfgCopy.pluginDirectory, L"approval.json");
+            RunHiddenCommand(dotnet, L"\"" + dll + L"\" ensure --config \"" + appCfg + L"\"", cfgCopy.pluginDirectory, 8000);
+        }
+        auto result = std::make_unique<WorkResult>();
+        result->kind = WorkKind::LaunchAntigravity;
+        result->ok = LaunchDetached(cfgCopy.antigravityPath, L"", GetDirectoryName(cfgCopy.antigravityPath), false);
+        g_app.busyAction = false;
+        PostWorkResult(std::move(result));
+    }).detach();
 }
 
 void ShowPanelWindow() {
@@ -1128,7 +1180,7 @@ void CreateChildControls(HWND hwnd) {
     g_app.btnDetectEnv = button(L"检测", ID_BTN_DETECT_ENV);
     g_app.btnBrowseCodex = button(L"更改…", ID_BTN_BROWSE_CODEX);
     g_app.btnInstallRepair = button(L"安装 / 修复插件", ID_BTN_INSTALL_REPAIR);
-    g_app.btnUninstall = button(L"卸载并还原配置", ID_BTN_UNINSTALL);
+    g_app.btnUninstall = button(L"完整卸载", ID_BTN_UNINSTALL);
 
     g_app.btnPreferences = button(L"偏好设置", ID_BTN_PREFERENCES);
     g_app.chkDetailedLogs = button(L"详细调试日志（仅 Debug 时开启）", ID_CHK_DETAILED_LOGS, BS_CHECKBOX);
@@ -1640,6 +1692,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 SyncControlsToUi();
                 MessageBoxW(hwnd, res->message.c_str(), L"详细日志设置失败", MB_OK | MB_ICONERROR);
             }
+        } else if (res->kind == WorkKind::LaunchAntigravity) {
+            if (res->ok) StartRefreshWorker(false, false, true);
+            else MessageBoxW(hwnd, L"无法启动 Antigravity.exe，请检查文件路径和权限。", L"启动失败", MB_OK | MB_ICONERROR);
         } else if (res->kind == WorkKind::CheckAndMaybeUpdate || res->kind == WorkKind::DownloadUpdate) {
             g_app.state.updateChecked = res->snapshot.updateChecked;
             g_app.state.updateAvailable = res->snapshot.updateAvailable;
@@ -1649,6 +1704,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             g_app.state.downloadedZipPath = res->snapshot.downloadedZipPath;
             SyncControlsToUi();
             if (res->triggerImmediateApply) {
+                if (g_app.uninstallPromptOpen) {
+                    g_app.state.waitingAntigravityExit = true;
+                    SetTimer(hwnd, ID_TIMER_DEFERRED_UPDATE, 5000, nullptr);
+                    return 0;
+                }
                 ExecutePendingUpdateAndExit();
                 return 0;
             }
@@ -1661,7 +1721,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 }
             } else if (res->kind == WorkKind::CheckAndMaybeUpdate && !res->snapshot.updateAvailable && IsWindowVisible(hwnd) && !res->message.empty()) {
                 // Only show "already up to date" when user explicitly triggered check? Let's show unobtrusive title or message only on explicit check via status text
-                SetWindowTextW(g_app.lblVersionInfo, (L"当前版本: v" + g_app.state.serviceVersion + L"（已是最新）").c_str());
+                SetWindowTextW(g_app.lblVersionInfo, L"面板 v" PANEL_VERSION_WIDE L"（已是最新）");
             }
         } else {
             // Preserve update state across stats/service refreshes
@@ -1677,15 +1737,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             g_app.state.availableUpdate = updMan;
             g_app.state.downloadedZipPath = dlZip;
             SyncControlsToUi();
-            if (res->kind == WorkKind::CompactLogs || res->kind == WorkKind::InstallOrRepair || res->kind == WorkKind::Uninstall)
+            if (res->kind == WorkKind::CompactLogs || res->kind == WorkKind::InstallOrRepair)
                 StartStatsWorker();
-            if ((res->kind == WorkKind::CompactLogs || res->kind == WorkKind::InstallOrRepair || res->kind == WorkKind::Uninstall || !res->ok) && !res->message.empty()) {
+            if ((res->kind == WorkKind::CompactLogs || res->kind == WorkKind::InstallOrRepair || !res->ok) && !res->message.empty()) {
                 MessageBoxW(hwnd, res->message.c_str(), res->ok ? L"操作完成" : L"操作提示", MB_OK | (res->ok ? MB_ICONINFORMATION : MB_ICONWARNING));
             }
         }
         return 0;
     }
     case WM_TIMER:
+        if (g_app.uninstallPromptOpen) return 0;
         if (wParam == ID_TIMER_REFRESH) {
             if (IsWindowVisible(hwnd)) StartRefreshWorker(false, false, true);
         } else if (wParam == ID_TIMER_DEFERRED_UPDATE) {
@@ -1713,7 +1774,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             break;
         case ID_BTN_SERVICE_ACTION:
             if (g_app.state.pluginInstalled) StartServiceWorker();
-            else StartInstallScriptWorker(false);
+            else StartInstallScriptWorker();
             break;
         case ID_BTN_REFRESH:
         case ID_MENU_REFRESH:
@@ -1812,17 +1873,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             break;
         }
         case ID_BTN_INSTALL_REPAIR:
-            StartInstallScriptWorker(false);
+            StartInstallScriptWorker();
             break;
-        case ID_BTN_UNINSTALL: {
-            int ans = MessageBoxW(
-                hwnd,
-                L"卸载将停止审批服务、移除 Antigravity 插件注册并恢复安装前的权限模式。\n本地统计日志和备份将保留在数据目录。\n\n确认卸载吗？",
-                L"确认卸载插件",
-                MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2);
-            if (ans == IDYES) StartInstallScriptWorker(true);
+        case ID_BTN_UNINSTALL:
+            StartUninstallAndExit(hwnd);
             break;
-        }
         case ID_MENU_OPEN:
             ShowPanelWindow();
             break;
@@ -1894,7 +1949,22 @@ int RunSelfTest(const std::wstring& localFeedDir) {
                "BCrypt SHA-256 vector mismatch")) return 1;
     WriteStdoutUtf8("PASS Windows CNG BCrypt SHA-256\n");
 
-    // 4. Optional local update feed verification
+    // A helper can exit while a background process still owns its output handles.
+    wchar_t systemDir[MAX_PATH]{};
+    GetSystemDirectoryW(systemDir, static_cast<UINT>(std::size(systemDir)));
+    const auto shell = JoinPath(systemDir, L"cmd.exe");
+    const auto powershell = JoinPath(systemDir, L"WindowsPowerShell\\v1.0\\powershell.exe");
+    const auto startedAt = GetTickCount64();
+    const auto command = RunHiddenCommand(shell,
+        L"/d /q /c echo panel-output & echo panel-error 1>&2 & start \"\" /b \"" + powershell +
+        L"\" -NoProfile -NonInteractive -Command \"Start-Sleep -Seconds 5\"", systemDir, 2500);
+    if (!check(command.started && !command.timedOut && command.exitCode == 0 && GetTickCount64() - startedAt < 3500 &&
+               command.stdoutUtf8.find("panel-output") != std::string::npos &&
+               command.stderrUtf8.find("panel-error") != std::string::npos,
+               "hidden command did not finish while a background process held its output")) return 1;
+    WriteStdoutUtf8("PASS hidden command returns with inherited output handles open\n");
+
+    // Optional local update feed verification
     if (!localFeedDir.empty()) {
         UpdateConfig ucfg{};
         ucfg.localFeedDirectory = localFeedDir;

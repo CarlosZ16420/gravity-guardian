@@ -34,11 +34,11 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "Gravity Steward\0"
             VALUE "FileDescription", "Gravity Steward for Antigravity\0"
-            VALUE "FileVersion", "0.6.1.0\0"
+            VALUE "FileVersion", PANEL_VERSION_UTF8 ".0\0"
             VALUE "InternalName", "CodexApprovalPanel\0"
             VALUE "OriginalFilename", "CodexApprovalPanel.exe\0"
             VALUE "ProductName", "Gravity Steward\0"
-            VALUE "ProductVersion", "0.6.1.0\0"
+            VALUE "ProductVersion", PANEL_VERSION_UTF8 ".0\0"
         END
     END
     BLOCK "VarFileInfo"

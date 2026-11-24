@@ -27,6 +27,11 @@
     "additional_hook_scope"
   ],
   "properties": {
+    "project_authorizations": {
+      "type": "object",
+      "propertyNames": { "pattern": "^[a-f0-9]{12}$" },
+      "additionalProperties": { "type": "string", "minLength": 1, "maxLength": 2048 }
+    },
     "schema_version": {
       "const": "2.0"
     },

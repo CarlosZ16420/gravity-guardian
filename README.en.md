@@ -16,6 +16,8 @@ Run `GravitySteward.exe` to open the panel and view review results. The panel's 
 
 The Windows package bundles the .NET runtime. The panel UI is in Simplified Chinese. Detailed logging is off by default. When enabled, local logs may include paths, conversation content, and tool arguments. Model reviews send the context required for review to Codex.
 
+To uninstall, fully exit Antigravity and choose 「完整卸载」 in the panel. This removes the installed plugin and its startup entry and permanently deletes local logs, statistics, settings, caches, and backups. You can also run `scripts/Uninstall.ps1 -PurgeData` from the package. You can delete the downloaded ZIP and extracted folder separately.
+
 ## Build from source
 
 Use Windows x64 with PowerShell 7, the .NET 10 SDK, Node.js 22+, stable Rust, and MSVC C++ build tools. Run `./scripts/Build.ps1` to build and test the project.

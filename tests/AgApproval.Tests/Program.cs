@@ -30,6 +30,11 @@ if(args.Length==4&&args[0]=="--prepare-corpus")
 }
 if((args.Length is 3 or 4)&&args[0]=="--accept-native-model")return await NativeModelAcceptance.RunAsync(args[1],args[2],args.Length==4?int.Parse(args[3]):6);
 if(args.Length==4&&args[0]=="--replay-native-upgrade")return await NativeTranscriptTests.ReplayAsync(args[1],args[2],args[3]);
+if (args.Length == 3 && args[0] == "--live-project-grant")
+{
+    await ProjectAuthorizationTests.RunAsync(Settings.Load(args[1]), Path.GetFullPath(args[2]), true);
+    return 0;
+}
 if(args.Length==3&&args[0]=="--review-corpus")
 {
     var corpusSettings=Settings.Load(args[1]);await ReviewCorpus.RunAsync(corpusSettings,args[2]);return 0;
@@ -815,6 +820,8 @@ await Test("recoverable transcript binding anomaly still allows deterministic na
     finally{await File.WriteAllTextAsync(transcript,original);}
 });
 await NativeTranscriptTests.RunAsync(scratch,Test);
+await Test("project authorizations survive chat and process boundaries", () =>
+    ProjectAuthorizationTests.RunAsync(System.Text.Json.JsonSerializer.Deserialize<Settings>(Json.Encode(settings),Json.Options)!, scratch, false));
 await SessionTests.RunAsync(settings,policy,Payload,Test);
 await NativeGuardianTests.RunAsync(settings,policy,Test);
 await PanelCoreTests.RunAsync(settings,scratch,Test);

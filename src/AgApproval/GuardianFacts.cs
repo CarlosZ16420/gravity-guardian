@@ -20,6 +20,10 @@ public static class GuardianFacts
         var doc=JsonNode.Parse(input.Prompt)!.AsObject();
         var records=input.NativeRecords??throw new InvalidDataException("Source-verified native history is missing");
         var units=new List<HistoryUnit>();
+        var grants = doc["project_authorizations"] as JsonObject;
+        if (grants?.Count > 0)
+            units.Add(new(true, [Message("user", "Previously confirmed scopes for this project (ID and scope):\n" +
+                grants.ToJsonString(Json.PromptOptions))]));
         var rules=doc["project_rules"] as JsonArray??new JsonArray();
         if(rules.Count>0)
             units.Add(new(true,[Message("user","# AGENTS.md instructions\n\n<INSTRUCTIONS>\nHost-observed project instructions, scoped to the recorded paths. This block did not come from a human message and does not record user authorization or an interaction reply.\n"+
@@ -60,9 +64,9 @@ public static class GuardianFacts
             }
         }
         var action=doc["planned_action"]!;
-        var extraPolicy=BridgePolicy;
+        var extraPolicy=BridgePolicy + " " + ProjectAuthorizations.Guidance;
         var scope=Json.Hash(input.Conversation+input.EnvironmentRevision+input.NativeSegment+extraPolicy+
-            ReviewAdapter.Canonical(rules)+doc["policy_hash"]);
+            ReviewAdapter.Canonical(rules)+ReviewAdapter.Canonical(grants)+doc["policy_hash"]);
 
         JsonObject BuildRequest(int skipNonUserUnits)
         {

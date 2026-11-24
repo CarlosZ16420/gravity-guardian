@@ -224,13 +224,20 @@ $taskRestoreSidecar = if ($taskPreviousManifest) { $taskPreviousManifest.oldSide
 $taskModeChanges = if ($taskPreviousManifest.reviewModeChanges) { @($taskPreviousManifest.reviewModeChanges) } else { @() }
 if ($ReviewMode -eq 'Codex') { $taskModeChanges = @(Set-CodexReviewMode -ConfigRoot $taskConfigRoot -BackupDirectory $taskBackup -PreviousChanges $taskModeChanges) }
 
-@{
+$taskManifest = @{
     installedAt = [DateTime]::UtcNow.ToString('O'); pluginDirectory = $taskPlugin; configRoot = $taskConfigRoot
     geminiRoot = [IO.Path]::GetFullPath($GeminiRoot); antigravityPath = $taskResolvedAntigravity; codexPath = $taskResolvedCodex
     backupDirectory = $taskRestoreBackup; latestUpgradeBackup = $taskBackup
     hadPreviousPlugin = $taskRestorePreviousPlugin; oldSidecar = $taskRestoreSidecar; sidecarId = $taskSidecarId
     reviewMode = $ReviewMode; reviewModeChanges = @($taskModeChanges)
-} | ConvertTo-Json -Depth 20 | Set-Utf8NoBom -LiteralPath (Join-Path $taskData 'installation.json') -Encoding utf8
+}
+# A prior background-only installation may have installed or modified a desktop launcher.
+foreach ($key in @('launcherPath', 'installedLauncherHash', 'launcherExisted')) {
+    if ($taskPreviousManifest -and $taskPreviousManifest.ContainsKey($key)) {
+        $taskManifest[$key] = $taskPreviousManifest[$key]
+    }
+}
+$taskManifest | ConvertTo-Json -Depth 20 | Set-Utf8NoBom -LiteralPath (Join-Path $taskData 'installation.json') -Encoding utf8
 
 # Sync panel-settings.json while preserving existing panel preferences.
 $taskPanelPath = Join-Path $taskData 'panel-settings.json'
