@@ -1,0 +1,137 @@
+[CmdletBinding()]
+param()
+$ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'Review-Mode.ps1')
+
+$taskRoot = Split-Path $PSScriptRoot -Parent
+$taskSandbox = Join-Path $taskRoot ('.local/update-test/' + [Guid]::NewGuid().ToString('N'))
+$taskGemini = Join-Path $taskSandbox '.gemini'
+$taskConfig = Join-Path $taskGemini 'config'
+$taskData = Join-Path $taskSandbox 'data'
+$taskFeed = Join-Path $taskSandbox 'feed'
+New-Item -ItemType Directory -Path $taskConfig, $taskData, $taskFeed -Force | Out-Null
+
+# Minimal native Antigravity config fixture
+@{ userSettings = @{ permissionPreset = 'AGENT_PERMISSION_PRESET_DEFAULT'; enableTerminalSandbox = $true; autoExecutionPolicy = 'CASCADE_COMMANDS_AUTO_EXECUTION_PROCEED_IN_SANDBOX' }; sidecars = @{} } |
+    ConvertTo-Json -Depth 10 | Set-Utf8NoBom -LiteralPath (Join-Path $taskConfig 'config.json') -Encoding utf8
+
+# 1. Install the current package into an isolated directory.
+& (Join-Path $PSScriptRoot 'Install.ps1') -GeminiRoot $taskGemini -DataDirectory $taskData -CodexPath $env:ComSpec -AntigravityPath $env:ComSpec
+$taskPlugin = Join-Path $taskConfig 'plugins/codex-approval'
+$taskRuntime = Join-Path $taskPlugin 'runtime/dotnet.exe'
+$taskAssembly = Join-Path $taskPlugin 'scripts/ag-approval.dll'
+$taskApprovalPath = Join-Path $taskPlugin 'approval.json'
+$taskBaseVersion = (Get-Content -Encoding UTF8 -LiteralPath (Join-Path $taskPlugin 'plugin.json') -Raw | ConvertFrom-Json).version
+$taskBaseParts = [version]$taskBaseVersion
+$taskNextVersion = '{0}.{1}.{2}' -f $taskBaseParts.Major, $taskBaseParts.Minor, ($taskBaseParts.Build + 1)
+
+# Customize enableDetailedLogs=true, write a log file and denial-guard sentinel to verify preservation across upgrade
+& $taskRuntime $taskAssembly set-logging --config $taskApprovalPath --enabled true | Out-Null
+if ($LASTEXITCODE -ne 0) { throw 'Failed to enable detailed logs before update test' }
+
+$taskLogsDir = Join-Path $taskData 'logs'
+New-Item -ItemType Directory -Path $taskLogsDir -Force | Out-Null
+$taskSentinelLog = Join-Path $taskLogsDir '2026-11-21.000.jsonl'
+[IO.File]::WriteAllText($taskSentinelLog, '{"at":"2026-11-21T02:00:00Z","event":"review_completed","requestId":"upd-sentinel","status":"approved"}' + "`n")
+$taskGuardDir = Join-Path $taskData 'denial-guard'
+New-Item -ItemType Directory -Path $taskGuardDir -Force | Out-Null
+[IO.File]::WriteAllText((Join-Path $taskGuardDir 'sentinel.json'), '{"keep":true}')
+
+# 2. Build a synthetic next-patch package and local feed.
+& (Join-Path $PSScriptRoot 'Package.ps1') | Out-Null
+$taskBaseZip = Get-Item -LiteralPath (Join-Path $taskRoot "artifacts/gravity-steward-$taskBaseVersion-windows-x64.zip")
+if (!$taskBaseZip) { throw 'Packaged release zip not found' }
+
+$taskSynthExtract = Join-Path $taskSandbox 'synth-extract'
+Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
+[IO.Compression.ZipFile]::ExtractToDirectory($taskBaseZip.FullName, $taskSynthExtract)
+$taskSynthRoot = (Get-ChildItem -LiteralPath $taskSynthExtract -Filter 'package-manifest.json' -Recurse -File | Select-Object -First 1).Directory.FullName
+
+# Set the synthetic plugin and manifest to the next version.
+$taskSynthPluginJson = Join-Path $taskSynthRoot 'artifacts/codex-approval/plugin.json'
+$taskPj = Get-Content -Encoding UTF8 -LiteralPath $taskSynthPluginJson -Raw | ConvertFrom-JsonHashtable
+$taskPj.version = $taskNextVersion
+$taskPj | ConvertTo-Json -Depth 6 | Set-Utf8NoBom -LiteralPath $taskSynthPluginJson -Encoding utf8
+
+$taskSynthManifestPath = Join-Path $taskSynthRoot 'package-manifest.json'
+$taskSynthFiles = @(Get-ChildItem -LiteralPath $taskSynthRoot -Recurse -File | Where-Object { $_.FullName -ne $taskSynthManifestPath } | ForEach-Object {
+    @{ path = (Get-RelativePathCompat $taskSynthRoot $_.FullName).Replace('\', '/'); sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant() }
+})
+@{ version = $taskNextVersion; builtAt = [DateTime]::UtcNow.ToString('O'); files = $taskSynthFiles } |
+    ConvertTo-Json -Depth 8 | Set-Utf8NoBom -LiteralPath $taskSynthManifestPath -Encoding utf8
+
+$taskNextName = "gravity-steward-$taskNextVersion-windows-x64.zip"
+$taskNextZip = Join-Path $taskFeed $taskNextName
+$zipStream = [IO.File]::Open($taskNextZip, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+try {
+    $arc = [IO.Compression.ZipArchive]::new($zipStream, [IO.Compression.ZipArchiveMode]::Create, $false)
+    try {
+        foreach ($item in Get-ChildItem -LiteralPath $taskSynthRoot -Recurse -File) {
+            $entryName = ("gravity-steward-$taskNextVersion/" + (Get-RelativePathCompat $taskSynthRoot $item.FullName)).Replace('\', '/')
+            $entry = $arc.CreateEntry($entryName, [IO.Compression.CompressionLevel]::Optimal)
+            $in = [IO.File]::OpenRead($item.FullName)
+            try { $out = $entry.Open(); try { $in.CopyTo($out) } finally { $out.Dispose() } } finally { $in.Dispose() }
+        }
+    } finally { $arc.Dispose() }
+} finally { $zipStream.Dispose() }
+
+$taskNextSha = (Get-FileHash -LiteralPath $taskNextZip -Algorithm SHA256).Hash.ToLowerInvariant()
+@{
+    version = $taskNextVersion
+    publishedAt = [DateTime]::UtcNow.ToString('O')
+    assetName = $taskNextName
+    downloadUrl = ''
+    sha256 = $taskNextSha
+    sizeBytes = (Get-Item -LiteralPath $taskNextZip).Length
+} | ConvertTo-Json -Depth 6 | Set-Utf8NoBom -LiteralPath (Join-Path $taskFeed 'release-manifest.json') -Encoding utf8
+
+try {
+    # Test A: Panel self-test against local feed (verifies SemVer detection + BCrypt SHA-256)
+    $taskPanelExe = Join-Path $taskPlugin 'app/CodexApprovalPanel.exe'
+    $taskPanelOut = & $taskPanelExe --self-test --local-feed $taskFeed | ForEach-Object { $_ }
+    $taskPanelOut | ForEach-Object { Write-Host $_ }
+    if ($LASTEXITCODE -ne 0 -or !($taskPanelOut -join "`n").Contains('PASS local update feed check')) {
+        throw 'Panel local update feed self-test failed'
+    }
+
+    # Test B: Reject corrupt SHA-256 without changing the installed version.
+    $taskRejected = $false
+    try {
+        & (Join-Path $PSScriptRoot 'Apply-Update.ps1') -PackageZip $taskNextZip -ExpectedSha256 ('0' * 64) -PluginDirectory $taskPlugin -DataDirectory $taskData -SkipProcessCheck | Out-Null
+    } catch {
+        $taskRejected = $true
+    }
+    if (!$taskRejected) { throw 'Apply-Update accepted a mismatched SHA-256 hash' }
+    if ((Get-Content -Encoding UTF8 -LiteralPath (Join-Path $taskPlugin 'plugin.json') -Raw | ConvertFrom-Json).version -ne $taskBaseVersion) {
+        throw "Corrupt update modified existing $taskBaseVersion installation"
+    }
+    Write-Host 'PASS update transaction rejected mismatched SHA-256 without modifying installed plugin'
+
+    # Test C: A valid update preserves config, logs, and denial protection.
+    $taskApplyRes = & (Join-Path $PSScriptRoot 'Apply-Update.ps1') -PackageZip $taskNextZip -ExpectedSha256 $taskNextSha -PluginDirectory $taskPlugin -DataDirectory $taskData -SkipProcessCheck
+    $taskApplyRes | ForEach-Object { Write-Host $_ }
+
+    $taskNewVer = (Get-Content -Encoding UTF8 -LiteralPath (Join-Path $taskPlugin 'plugin.json') -Raw | ConvertFrom-Json).version
+    if ($taskNewVer -ne $taskNextVersion) { throw "Expected upgraded plugin.json version $taskNextVersion, got $taskNewVer" }
+
+    $taskPostApproval = Get-Content -Encoding UTF8 -LiteralPath $taskApprovalPath -Raw | ConvertFrom-Json
+    if (!$taskPostApproval.enableDetailedLogs) { throw 'Upgrade lost enableDetailedLogs=true user preference' }
+    if (!(Test-Path -LiteralPath $taskSentinelLog) -or ![IO.File]::ReadAllText((Join-Path $taskGuardDir 'sentinel.json')).Contains('keep')) {
+        throw 'Upgrade lost user logs or denial-guard state'
+    }
+
+    $taskStatusRaw = & $taskRuntime $taskAssembly status --config $taskApprovalPath
+    if ($LASTEXITCODE -ne 0) { throw 'Upgraded host status command failed' }
+    $taskStatus = ($taskStatusRaw -join [Environment]::NewLine) | ConvertFrom-Json
+    if ($taskStatus.status -ne 'running' -or !$taskStatus.detailedLogs) {
+        throw 'Upgraded host not running with preserved detailedLogs setting'
+    }
+    Write-Host "PASS end-to-end self-update $taskBaseVersion -> $taskNextVersion preserved user config, logs, and running host"
+} finally {
+    # Cleanly stop isolated test host
+    try {
+        [IO.File]::WriteAllText((Join-Path $taskData 'uninstalled'), 'test cleanup')
+        & $taskRuntime $taskAssembly stop --config $taskApprovalPath 2>$null | Out-Null
+    } catch {}
+}
+$global:LASTEXITCODE = 0

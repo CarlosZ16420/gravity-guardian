@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:codex-approval:review-session-delta:1",
+  "title": "Reviewer session transport; reconstruct review-input v2 before evaluation",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["transport_version","mode","sequence","previous_snapshot_sha256","evidence_update","active_evidence","current_review","snapshot_sha256"],
+  "$defs": {
+    "evidence": {
+      "type":"object",
+      "required":["record_id","native_position","source","type","role","is_authenticated_user_input","truncation"],
+      "properties": {
+        "record_id":{"type":"string"},"native_position":{"type":"integer","minimum":1},
+        "source":{"type":"string"},"type":{"type":"string"},
+        "role":{"enum":["assistant","unclassified_evidence"]},"is_authenticated_user_input":{"const":false},
+        "truncation":{"type":"object","required":["upstream_fields","bridge_content_truncated"],"properties":{"upstream_fields":{"type":"array","items":{"type":"string"}},"bridge_content_truncated":{"type":"boolean"}}}
+      }
+    }
+  },
+  "properties": {
+    "transport_version": {"const":"review-session-delta-v1"},
+    "mode": {"enum":["full","delta"]},
+    "sequence": {"type":"integer","minimum":1},
+    "previous_snapshot_sha256": {"type":["string","null"],"pattern":"^[a-f0-9]{64}$"},
+    "snapshot_sha256": {"type":"string","pattern":"^[a-f0-9]{64}$"},
+    "evidence_update": {"type":"array","items":{"type":"object","additionalProperties":false,"required":["sha256","record"],"properties":{"sha256":{"type":"string","pattern":"^[a-f0-9]{64}$"},"record":{"$ref":"#/$defs/evidence"}}}},
+    "active_evidence": {"type":"array","items":{"type":"object","additionalProperties":false,"required":["record_id","sha256"],"properties":{"record_id":{"type":"string"},"sha256":{"type":"string","pattern":"^[a-f0-9]{64}$"}}}},
+    "current_review": {"type":"object","required":["schema_version","planned_action","user_instructions","project_rules","permission_context","binding_hash","transcript_omitted_records","transcript_omitted_positions"],"properties":{"schema_version":{"const":"2.0"},"user_instructions":{"type":"array","minItems":1},"planned_action":{"type":"object"},"conversation_evidence":false}}
+  }
+}

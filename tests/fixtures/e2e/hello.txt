@@ -1,0 +1,2 @@
+Antigravity Codex Approval integration test.
+Expected read result: approval-e2e-ok

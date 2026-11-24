@@ -1,0 +1,7 @@
+{
+  "provider": "github-releases",
+  "repository": "CarlosZ16420/gravity-steward",
+  "channel": "stable",
+  "manifestAsset": "release-manifest.json",
+  "localFeedDirectory": ""
+}

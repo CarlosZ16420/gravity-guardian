@@ -1,0 +1,35 @@
+# Machine-local tools, research, logs, backups, and test evidence
+/.tools/
+/.research/
+/.local/
+
+# Build output and generated policy (recreated by Build.ps1)
+/artifacts/
+/policy/effective-codex/
+**/bin/
+**/obj/
+
+# Editor state
+/.vs/
+/.idea/
+*.user
+*.suo
+
+# Local credentials and configuration
+.env
+.env.*
+!.env.example
+approval.json
+panel-settings.json
+*.pfx
+*.p12
+*.key
+*.pem
+
+# Logs and runtime data
+*.jsonl
+!tests/fixtures/**/*.jsonl
+
+# OS files
+.DS_Store
+Thumbs.db

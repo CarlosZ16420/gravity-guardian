@@ -1,0 +1,7 @@
+{
+  "codex-approval": {
+    "PreToolUse": [{"matcher":"*","hooks":[{"type":"command","command":".\\runtime\\dotnet.exe .\\scripts\\ag-approval.dll review --config .\\approval.json","timeout":120}]}],
+    "PostToolUse": [{"matcher":"*","hooks":[{"type":"command","command":".\\runtime\\dotnet.exe .\\scripts\\ag-approval.dll post --config .\\approval.json","timeout":5}]}],
+    "SessionStart": [{"type":"command","command":".\\runtime\\dotnet.exe .\\scripts\\ag-approval.dll session --config .\\approval.json","timeout":5}]
+  }
+}

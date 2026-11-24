@@ -1,0 +1,12 @@
+{
+  "source": "https://github.com/openai/codex",
+  "fetchedAt": "2026-11-03T04:03:03.6201409Z",
+  "commit": "fbf5f0d3a716d08c254d3e4941d5b12eaff5afe7",
+  "files": {
+    "policy.md": "codex-rs/prompts/templates/guardian/policy.md",
+    "policy_template.md": "codex-rs/prompts/templates/guardian/policy_template.md",
+    "assessment.rs": "codex-rs/ext/guardian-reviewer/src/assessment.rs",
+    "guardian.rs": "codex-rs/prompts/src/model_messages/guardian.rs",
+    "LICENSE": "LICENSE"
+  }
+}

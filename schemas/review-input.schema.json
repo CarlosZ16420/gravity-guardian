@@ -1,0 +1,567 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:codex-approval:review-input:2.0",
+  "title": "Antigravity sourced review input v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "request_id",
+    "action_sha256",
+    "action_fingerprint",
+    "authorization_revision",
+    "evidence_revision",
+    "binding_hash",
+    "policy_hash",
+    "adapter",
+    "action_type",
+    "user_instructions",
+    "conversation_evidence",
+    "project_rules",
+    "referenced_file_states",
+    "permission_context",
+    "native_binding",
+    "transcript_omitted_records",
+    "transcript_omitted_positions",
+    "planned_action",
+    "additional_hook_scope"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "2.0"
+    },
+    "request_id": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{32}$"
+    },
+    "action_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "action_fingerprint": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "authorization_revision": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "evidence_revision": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "binding_hash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "policy_hash": {
+      "type": "string",
+      "pattern": "^([a-f0-9]{64})?$"
+    },
+    "adapter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "instruction_hash",
+        "transport_version",
+        "source",
+        "instructions"
+      ],
+      "properties": {
+        "version": {
+          "const": "antigravity-evidence-v2.0"
+        },
+        "instruction_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "transport_version": {
+          "const": "cli-four-fields-v1"
+        },
+        "source": {
+          "const": "plugin_fixed_adapter_not_user"
+        },
+        "instructions": {
+          "type": "string"
+        }
+      }
+    },
+    "action_type": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "interpretation"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "command_execution",
+            "terminal_continuation",
+            "file_read",
+            "file_write",
+            "network_access",
+            "interaction",
+            "unknown_tool"
+          ]
+        },
+        "interpretation": {
+          "type": "string"
+        }
+      }
+    },
+    "user_instructions": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "allOf": [
+          {
+            "$ref": "#/$defs/message"
+          },
+          {
+            "properties": {
+              "is_authenticated_user_input": {
+                "const": true
+              },
+              "role": {
+                "const": "user"
+              },
+              "source": {
+                "const": "USER_EXPLICIT"
+              },
+              "type": {
+                "const": "USER_INPUT"
+              }
+            }
+          }
+        ]
+      }
+    },
+    "conversation_evidence": {
+      "type": "array",
+      "items": {
+        "allOf": [
+          {
+            "$ref": "#/$defs/message"
+          },
+          {
+            "properties": {
+              "is_authenticated_user_input": {
+                "const": false
+              },
+              "role": {
+                "enum": [
+                  "assistant",
+                  "unclassified_evidence"
+                ]
+              }
+            }
+          }
+        ]
+      }
+    },
+    "project_rules": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "source",
+          "path",
+          "scope",
+          "sha256",
+          "content"
+        ],
+        "properties": {
+          "source": {
+            "const": "verified_workspace_file"
+          },
+          "path": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string"
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "content": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "referenced_file_states": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "path",
+          "exists"
+        ],
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "exists": {
+            "type": "boolean"
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "content_binding": {
+            "type": "string"
+          },
+          "size_bytes": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      }
+    },
+    "permission_context": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "snapshot_version",
+        "sources",
+        "global_settings",
+        "matching_projects",
+        "configured_permission_preset",
+        "mounted_workspace_paths",
+        "coverage",
+        "runtime_effective_scope_complete",
+        "unknowns",
+        "precedence"
+      ],
+      "properties": {
+        "snapshot_version": {
+          "const": "1.0"
+        },
+        "sources": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "path",
+              "sha256"
+            ],
+            "properties": {
+              "kind": {
+                "enum": [
+                  "global_config",
+                  "project_config"
+                ]
+              },
+              "path": {
+                "type": "string"
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              }
+            }
+          }
+        },
+        "global_settings": {
+          "type": "object"
+        },
+        "matching_projects": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "configured_permission_preset": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mounted_workspace_paths": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          }
+        },
+        "coverage": {
+          "const": "persisted_configuration_and_hook_request"
+        },
+        "runtime_effective_scope_complete": {
+          "const": false
+        },
+        "unknowns": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          }
+        },
+        "precedence": {
+          "type": "string"
+        }
+      }
+    },
+    "native_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "segment_id",
+        "cutoff_position",
+        "binding_method",
+        "raw_transcript_sha256"
+      ],
+      "properties": {
+        "segment_id": {
+          "type": "string"
+        },
+        "cutoff_position": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "binding_method": {
+          "enum": [
+            "exact_tool_arguments_preceding_native_step",
+          "indexed_native_tool_batch",
+            "single_segment_frontier_hook_request",
+            "active_branch_frontier_hook_request",
+          "historical_v1_conversion_not_live_approval"
+          ]
+        },
+        "raw_transcript_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    },
+    "transcript_omitted_records": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "transcript_omitted_positions": {
+      "type": "array",
+      "items": {
+        "type": "integer",
+        "minimum": 1
+      },
+      "uniqueItems": true
+    },
+    "planned_action": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "toolCall",
+        "stepIdx",
+        "conversationId",
+        "workspacePaths",
+        "cwd",
+        "working_directory_source"
+      ],
+      "properties": {
+        "toolCall": {
+          "type": "object",
+          "required": [
+            "name",
+            "args"
+          ],
+          "properties": {
+            "name": {
+              "type": "string",
+              "minLength": 1
+            },
+            "args": {
+              "type": "object"
+            }
+          }
+        },
+        "stepIdx": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "conversationId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "workspacePaths": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          }
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "working_directory_source": {
+          "enum": [
+            "tool_arguments",
+            "first_mounted_workspace_fallback_not_runtime_verified"
+          ]
+        }
+      }
+    },
+    "additional_hook_scope": {
+      "type": "object"
+    }
+  },
+  "$defs": {
+    "message": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "record_id",
+        "step_index",
+        "source",
+        "type",
+        "is_authenticated_user_input",
+        "role",
+        "native_position",
+        "native_segment",
+        "created_at",
+        "truncation"
+      ],
+      "properties": {
+        "record_id": {
+          "type": "string"
+        },
+        "step_index": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "source": {
+          "type": "string",
+          "minLength": 1
+        },
+        "type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "is_authenticated_user_input": {
+          "type": "boolean"
+        },
+        "role": {
+          "enum": [
+            "user",
+            "assistant",
+            "unclassified_evidence"
+          ]
+        },
+        "native_position": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "native_segment": {
+          "type": "string"
+        },
+        "created_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "content": {
+          "type": "string"
+        },
+        "original_content": {
+          "type": "string"
+        },
+        "host_metadata": {
+          "type": "string"
+        },
+        "envelope_version": {
+          "const": "observed-user-request-v1"
+        },
+        "tool_calls": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "status": {
+          "type": "string"
+        },
+        "error": {
+          "type": "string"
+        },
+        "truncated_fields": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "truncation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "upstream_fields",
+            "bridge_content_truncated"
+          ],
+          "properties": {
+            "upstream_fields": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "bridge_content_truncated": {
+              "type": "boolean"
+            }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "is_authenticated_user_input": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "source": {
+                "const": "USER_EXPLICIT"
+              },
+              "type": {
+                "const": "USER_INPUT"
+              },
+              "role": {
+                "const": "user"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "role": {
+                "const": "user"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "is_authenticated_user_input": {
+                "const": true
+              },
+              "source": {
+                "const": "USER_EXPLICIT"
+              },
+              "type": {
+                "const": "USER_INPUT"
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

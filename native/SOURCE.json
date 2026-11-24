@@ -1,0 +1,13 @@
+{
+  "repository": "https://github.com/openai/codex.git",
+  "tag": "rust-v0.166.0",
+  "commit": "6ff1e1ca3b30fc8b914720681fcf5fe62e95f856",
+  "v8Repository": "https://github.com/seanh-oai/rusty_v8",
+  "v8Commit": "350c5a859a9b3c84ab8701b3ad51e3b7699b30c0",
+  "v8ArchiveSha256": "e2e7f9961af59dbb749a60ac0a3c34c9680f6b86dd04277f2715356b5a52feab",
+  "protocol": "ag-guardian-v3",
+  "model": "codex-auto-review",
+  "effort": "low",
+  "license": "Apache-2.0; see bundled upstream LICENSE and NOTICE",
+  "bootstrapSource": "codex-rs/thread-manager-sample/src/main.rs at the pinned commit"
+}

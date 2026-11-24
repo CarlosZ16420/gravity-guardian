@@ -1,0 +1,25 @@
+{
+  "source": "https://github.com/openai/codex",
+  "fetchedAt": "2026-11-03T04:03:03.6201409Z",
+  "commit": "fbf5f0d3a716d08c254d3e4941d5b12eaff5afe7",
+  "files": {
+    "policy.md": "codex-rs/prompts/templates/guardian/policy.md",
+    "policy_template.md": "codex-rs/prompts/templates/guardian/policy_template.md",
+    "assessment.rs": "codex-rs/ext/guardian-reviewer/src/assessment.rs",
+    "guardian.rs": "codex-rs/prompts/src/model_messages/guardian.rs",
+    "LICENSE": "LICENSE"
+  },
+  "derivedResources": [
+    "output-contract.txt",
+    "output.schema.json",
+    "rejection-feedback.txt"
+  ],
+  "sha256": {
+    "policy_template.md": "37441097e4e825e0b195c32c985817ea07da15bb5c20fa753d87b22e2fe47e73",
+    "policy.md": "e6b0cf0a2e1c4cabc0a37ac2a0bc424ddd7c89e85d049e32d281a8db6e8d3ce6",
+    "output-contract.txt": "671f628da7434b81da8a3bdbd82eec9e977bbc754820ff5b3b0387e2cbf2928c",
+    "output.schema.json": "f159164ac073893ac8a2624276a8a6e0e53b63dbb6cff5b1ec77c97220637159",
+    "rejection-feedback.txt": "d5806a65057f78bd706bec98e797cccee91129e13ad19dae41f01b464becd455",
+    "LICENSE": "d17f227e4df5da1600391338865ce0f3055211760a36688f816941d58232d8dc"
+  }
+}

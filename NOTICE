@@ -1,0 +1,17 @@
+Gravity Steward
+Copyright 2026 CarlosZ16420
+
+Licensed under the Apache License, Version 2.0. See LICENSE.
+Source: https://github.com/CarlosZ16420/gravity-steward
+
+--------------------------------------------------------------------------------
+Third-Party Notices:
+
+This product includes policy extraction, schema contracts, and native Guardian
+components derived from OpenAI Codex (https://github.com/openai/codex),
+licensed under the Apache License, Version 2.0.
+Copyright 2025 OpenAI
+See policy/upstream-codex/LICENSE and native/ for upstream license details.
+
+Prebuilt Windows packages bundle the Microsoft .NET 10 runtime. Its license and
+third-party notices are in artifacts/codex-approval/runtime/.

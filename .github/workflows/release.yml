@@ -1,0 +1,61 @@
+name: Windows build
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-build-and-test:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 10 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Setup Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run public hygiene check
+        shell: pwsh
+        run: .\scripts\Check-PublicHygiene.ps1
+
+      - name: Build and run automated tests
+        shell: pwsh
+        run: .\scripts\Build.ps1
+
+      - name: Run isolated installation regression
+        shell: pwsh
+        run: .\scripts\Test-Installation.ps1
+
+      - name: Run offline update & rollback regression
+        shell: pwsh
+        run: .\scripts\Test-Update.ps1
+
+      - name: Package release artifacts
+        shell: pwsh
+        run: .\scripts\Package.ps1
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: gravity-steward-windows-x64
+          path: |
+            artifacts/gravity-steward-*-windows-x64.zip
+            artifacts/release-manifest.json
+            artifacts/checksums.sha256
+          if-no-files-found: error

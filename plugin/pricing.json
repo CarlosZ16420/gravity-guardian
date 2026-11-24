@@ -1,0 +1,10 @@
+{
+  "profileName": "gpt-6-luna-low-2x-estimate",
+  "displayLabel": "GPT-6 Luna 低思考 × 2（估算）",
+  "multiplier": 2.0,
+  "inputPerMillionUsd": 0.10,
+  "cachedInputPerMillionUsd": 0.01,
+  "outputPerMillionUsd": 0.50,
+  "updatedAt": "2026-11-21",
+  "note": "估算计价：暂按 OpenAI GPT-6 Luna 低思考模式标准价（输入 $0.10/1M，缓存输入 $0.01/1M，输出含推理 $0.50/1M）的 2 倍折算，后续核实准确计价后可直接修改本文件。"
+}

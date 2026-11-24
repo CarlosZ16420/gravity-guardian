@@ -1,0 +1,14 @@
+[package]
+name = "ag-guardian-host"
+version = "0.6.1"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+codex-core-api = { workspace = true }
+codex-guardian-context = { workspace = true }
+codex-guardian-reviewer = { workspace = true }
+codex-guardian-v2 = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
