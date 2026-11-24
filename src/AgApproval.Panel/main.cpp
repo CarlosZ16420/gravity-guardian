@@ -369,16 +369,13 @@ void InitPathsAndConfig(const std::wstring& optPlugin, const std::wstring& optDa
     cfg.dataDirectory = !optData.empty() ? optData : JoinPath(cfg.geminiRoot, L"codex-approval-data");
     cfg.pluginDirectory = !optPlugin.empty() ? optPlugin : JoinPath(cfg.geminiRoot, L"config\\plugins\\codex-approval");
 
-    // Pick bundleDirectory (contains runtime/dotnet.exe & scripts/ag-approval.dll)
+    // Either distribution may be installed or opened as a portable panel.
     std::wstring nestedBundle = JoinPath(exeDir, L"artifacts\\codex-approval");
-    if (FileExists(JoinPath(cfg.pluginDirectory, L"scripts\\ag-approval.dll")) &&
-        FileExists(JoinPath(cfg.pluginDirectory, L"runtime\\dotnet.exe"))) {
+    if (FileExists(JoinPath(cfg.pluginDirectory, L"scripts\\ag-approval.dll"))) {
         cfg.bundleDirectory = cfg.pluginDirectory;
-    } else if (FileExists(JoinPath(parentDir, L"scripts\\ag-approval.dll")) &&
-               FileExists(JoinPath(parentDir, L"runtime\\dotnet.exe"))) {
+    } else if (FileExists(JoinPath(parentDir, L"scripts\\ag-approval.dll"))) {
         cfg.bundleDirectory = parentDir;
-    } else if (FileExists(JoinPath(nestedBundle, L"scripts\\ag-approval.dll")) &&
-               FileExists(JoinPath(nestedBundle, L"runtime\\dotnet.exe"))) {
+    } else if (FileExists(JoinPath(nestedBundle, L"scripts\\ag-approval.dll"))) {
         cfg.bundleDirectory = nestedBundle;
     } else {
         cfg.bundleDirectory = cfg.pluginDirectory;
@@ -415,10 +412,42 @@ void InitPathsAndConfig(const std::wstring& optPlugin, const std::wstring& optDa
     g_app.cfg = std::move(cfg);
 }
 
+std::wstring GetDistribution(const std::wstring& bundle) {
+    std::string raw;
+    JsonValue metadata;
+    if (ReadFileUtf8(JoinPath(bundle, L"distribution.json"), raw) &&
+        JsonValue::Parse(raw, metadata) && metadata.GetWide("type") == L"lite") {
+        return L"lite";
+    }
+    return L"standalone";
+}
+
+std::wstring GetBundleDotnet(const std::wstring& bundle) {
+    if (GetDistribution(bundle) == L"standalone") return JoinPath(bundle, L"runtime\\dotnet.exe");
+    std::string raw;
+    JsonValue sidecar;
+    if (ReadFileUtf8(JoinPath(bundle, L"sidecars\\reviewer\\sidecar.json"), raw) && JsonValue::Parse(raw, sidecar)) {
+        return sidecar.GetWide("command");
+    }
+    const auto resolver = JoinPath(bundle, L"scripts\\Resolve-Runtime.ps1");
+    if (!FileExists(resolver)) return {};
+    wchar_t system[MAX_PATH]{};
+    GetSystemDirectoryW(system, static_cast<DWORD>(std::size(system)));
+    const auto powershell = JoinPath(system, L"WindowsPowerShell\\v1.0\\powershell.exe");
+    const auto result = RunHiddenCommand(powershell,
+        L"-NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"" + resolver + L"\" -Bundle \"" + bundle + L"\"",
+        bundle, 10000);
+    if (!result.started || result.timedOut || result.exitCode != 0) return {};
+    auto runtime = Utf8ToWide(result.stdoutUtf8);
+    const auto end = runtime.find_last_not_of(L"\r\n");
+    if (end == std::wstring::npos) return {};
+    runtime.resize(end + 1);
+    return runtime;
+}
+
 std::wstring GetDotnetExe(const PanelConfig& cfg) {
-    std::wstring p1 = JoinPath(cfg.pluginDirectory, L"runtime\\dotnet.exe");
-    if (FileExists(p1)) return p1;
-    return JoinPath(cfg.bundleDirectory, L"runtime\\dotnet.exe");
+    if (FileExists(JoinPath(cfg.pluginDirectory, L"scripts\\ag-approval.dll"))) return GetBundleDotnet(cfg.pluginDirectory);
+    return GetBundleDotnet(cfg.bundleDirectory);
 }
 
 std::wstring GetAssemblyDll(const PanelConfig& cfg) {
@@ -464,7 +493,7 @@ StatsResult QueryApprovalStats(const PanelConfig& cfg, const std::optional<DateR
     std::wstring exeDir = GetDirectoryName(GetExecutablePath());
     // Use the core shipped with this panel for its read-only statistics, even with an older installed plugin.
     for (const auto& bundle : {GetDirectoryName(exeDir), JoinPath(exeDir, L"artifacts\\codex-approval")}) {
-        auto bundledDotnet = JoinPath(bundle, L"runtime\\dotnet.exe");
+        auto bundledDotnet = GetBundleDotnet(bundle);
         auto bundledDll = JoinPath(bundle, L"scripts\\ag-approval.dll");
         if (FileExists(bundledDotnet) && FileExists(bundledDll)) {
             dotnet = std::move(bundledDotnet);
@@ -552,7 +581,7 @@ void StartStatsWorker() {
 }
 
 std::optional<bool> RunTakeoverCommand(const PanelConfig& cfg, std::optional<bool> enabled = std::nullopt) {
-    const auto dotnet = JoinPath(cfg.pluginDirectory, L"runtime\\dotnet.exe");
+    const auto dotnet = GetBundleDotnet(cfg.pluginDirectory);
     const auto dll = JoinPath(cfg.pluginDirectory, L"scripts\\ag-approval.dll");
     const auto approvalCfg = JoinPath(cfg.pluginDirectory, L"approval.json");
     std::wstring args = L"\"" + dll + L"\" takeover --config \"" + approvalCfg + L"\"";
@@ -594,7 +623,8 @@ void QueryCoreSnapshot(const PanelConfig& cfg, RuntimeState& snap, bool runDetec
     std::wstring dll = GetAssemblyDll(cfg);
     if (!FileExists(dotnet) || !FileExists(dll)) {
         snap.serviceRunning = false;
-        snap.serviceDetail = L"缺少内置运行组件";
+        snap.serviceDetail = GetDistribution(cfg.bundleDirectory) == L"lite" ?
+            L"Lite 需要可用的 x64 .NET 10 运行时" : L"缺少内置运行组件";
         return;
     }
 
@@ -812,7 +842,7 @@ void StartCheckUpdateWorker(bool allowAutoApply) {
         res->snapshot = std::move(baseSnap);
         res->snapshot.updateChecked = true;
 
-        UpdateCheckResult check = CheckForUpdate(updCopy, currentVer);
+        UpdateCheckResult check = CheckForUpdate(updCopy, currentVer, GetDistribution(cfgCopy.pluginDirectory));
         if (!check.ok) {
             res->ok = false;
             res->message = check.error;
@@ -2039,6 +2069,21 @@ int RunSelfTest(const std::wstring& localFeedDir) {
         RemoveDirectoryW(stage.c_str());
         if (!check(dlOk && exists, ("Local feed download/verify failed: " + WideToUtf8(dlErr)).c_str())) return 1;
         WriteStdoutUtf8("PASS local update feed check and BCrypt SHA-256 verification\n");
+
+        std::string manifestRaw;
+        JsonValue manifestDoc;
+        if (ReadFileUtf8(JoinPath(localFeedDir, L"release-manifest.json"), manifestRaw) &&
+            JsonValue::Parse(manifestRaw, manifestDoc) && manifestDoc.Get("distributions")) {
+            const auto lite = CheckForUpdate(ucfg, PANEL_VERSION_WIDE, L"lite");
+            if (!check(lite.ok && lite.hasUpdate && lite.manifest.assetName != chk.manifest.assetName,
+                       "Local feed did not select the Lite asset")) return 1;
+            dlOk = DownloadAndVerifyUpdate(ucfg, lite.manifest, stage, zipOut, dlErr);
+            exists = dlOk && FileExists(zipOut);
+            if (!zipOut.empty()) DeleteFileW(zipOut.c_str());
+            RemoveDirectoryW(stage.c_str());
+            if (!check(dlOk && exists, ("Lite download/verify failed: " + WideToUtf8(dlErr)).c_str())) return 1;
+            WriteStdoutUtf8("PASS local feed selected and verified separate Lite asset\n");
+        }
     }
 
     return 0;

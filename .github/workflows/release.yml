@@ -42,13 +42,17 @@ jobs:
         shell: pwsh
         run: .\scripts\Test-Installation.ps1
 
+      - name: Package release artifacts
+        shell: pwsh
+        run: .\scripts\Package.ps1
+
       - name: Run offline update & rollback regression
         shell: pwsh
         run: .\scripts\Test-Update.ps1
 
-      - name: Package release artifacts
+      - name: Verify both distributions and rollback
         shell: pwsh
-        run: .\scripts\Package.ps1
+        run: .\scripts\Test-Distributions.ps1
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4

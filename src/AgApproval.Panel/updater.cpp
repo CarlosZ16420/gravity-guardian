@@ -356,7 +356,7 @@ UpdateConfig LoadUpdateConfig(const std::wstring& path) {
     return cfg;
 }
 
-UpdateCheckResult CheckForUpdate(const UpdateConfig& config, const std::wstring& currentVersion) {
+UpdateCheckResult CheckForUpdate(const UpdateConfig& config, const std::wstring& currentVersion, const std::wstring& distribution) {
     UpdateCheckResult res{};
     std::string manifestRaw;
     if (!config.localFeedDirectory.empty()) {
@@ -394,6 +394,22 @@ UpdateCheckResult CheckForUpdate(const UpdateConfig& config, const std::wstring&
     res.manifest.minAntigravityVersion = doc.GetWide("minAntigravityVersion");
     res.manifest.releaseNotes = doc.GetWide("releaseNotes");
 
+    if (distribution == L"lite") {
+        const auto* choices = doc.Get("distributions");
+        const auto* asset = choices ? choices->Get("lite") : nullptr;
+        if (!asset || asset->kind != JsonValue::Kind::Object) {
+            res.error = L"此版本的更新源未提供 Lite 安装包";
+            return res;
+        }
+        res.manifest.assetName = TrimWide(asset->GetWide("assetName"));
+        res.manifest.downloadUrl = TrimWide(asset->GetWide("downloadUrl"));
+        res.manifest.sha256 = TrimWide(asset->GetWide("sha256"));
+        res.manifest.sizeBytes = static_cast<uint64_t>(std::max<int64_t>(0, asset->GetInt64("sizeBytes", 0)));
+        if (res.manifest.sizeBytes == 0) {
+            res.error = L"Lite 更新清单未提供有效的安装包大小";
+            return res;
+        }
+    }
     if (res.manifest.version.empty() || !IsSafeFileName(res.manifest.assetName) || !IsValidSha256Hex(res.manifest.sha256)) {
         res.error = L"更新清单缺少必要字段（version / assetName / sha256）";
         return res;
@@ -441,6 +457,14 @@ bool DownloadAndVerifyUpdate(
         }
     }
 
+    WIN32_FILE_ATTRIBUTE_DATA info{};
+    if (manifest.sizeBytes &&
+        (!GetFileAttributesExW(partZip.c_str(), GetFileExInfoStandard, &info) ||
+         ((static_cast<uint64_t>(info.nFileSizeHigh) << 32) | info.nFileSizeLow) != manifest.sizeBytes)) {
+        DeleteFileW(partZip.c_str());
+        outError = L"更新包大小与清单不一致";
+        return false;
+    }
     std::wstring actualSha;
     if (!ComputeFileSha256Hex(partZip, actualSha, outError)) {
         DeleteFileW(partZip.c_str());
@@ -478,6 +502,12 @@ bool LaunchApplyUpdate(
     std::wstring updatesDir = JoinPath(dataDir, L"updates");
     EnsureDirectoryTree(updatesDir);
     std::wstring stagedScript = JoinPath(updatesDir, L"apply-update.ps1");
+    const auto helperName = L"Review-Mode.ps1";
+    const auto helperSource = JoinPath(GetDirectoryName(applyScriptSource), helperName);
+    if (!CopyFileW(helperSource.c_str(), JoinPath(updatesDir, helperName).c_str(), FALSE)) {
+        outError = L"无法复制更新所需的 PowerShell 脚本";
+        return false;
+    }
     if (!CopyFileW(applyScriptSource.c_str(), stagedScript.c_str(), FALSE)) {
         outError = L"无法复制更新事务脚本";
         return false;

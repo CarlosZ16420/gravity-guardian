@@ -1,10 +1,23 @@
 [CmdletBinding()]
-param([switch]$SkipTests,[switch]$SkipPanelSelfTest)
+param(
+    [switch]$SkipTests,
+    [switch]$SkipPanelSelfTest,
+    [ValidateSet('Default','Baseline','Symbols','Thin','ThinSingleUnit','ThinSize')]
+    [string]$GuardianTuning = 'Default'
+)
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'Review-Mode.ps1')
 . (Join-Path $PSScriptRoot 'Locked-DotnetRuntime.ps1')
 $taskRoot = Split-Path $PSScriptRoot -Parent
 $taskParentRoot = Split-Path $taskRoot -Parent
+$taskReleaseVersion = (Get-Content -LiteralPath (Join-Path $taskRoot 'plugin/plugin.json') -Raw | ConvertFrom-Json).version
+$taskCoreProject = [xml](Get-Content -LiteralPath (Join-Path $taskRoot 'src/AgApproval/AgApproval.csproj') -Raw)
+$taskPanelVersion = Get-Content -LiteralPath (Join-Path $taskRoot 'src/AgApproval.Panel/version.h') -Raw
+if ($taskReleaseVersion -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$' -or
+    $taskCoreProject.Project.PropertyGroup.Version -cne $taskReleaseVersion -or
+    $taskPanelVersion -notmatch ('(?m)^#define PANEL_VERSION_WIDE L"' + [regex]::Escape($taskReleaseVersion) + '"\s*$')) {
+    throw 'Release versions disagree between plugin.json, AgApproval.csproj, and panel version.h'
+}
 
 $taskToolsDir = if (Test-Path -LiteralPath (Join-Path $taskRoot '.tools/dotnet/dotnet.exe')) {
     Join-Path $taskRoot '.tools'
@@ -30,7 +43,7 @@ try {
     $taskRuntime = Get-LockedDotnetRuntime
     & node (Join-Path $PSScriptRoot 'Prepare-Policy.mjs')
     if ($LASTEXITCODE -ne 0) { throw 'Policy preparation failed' }
-    & (Join-Path $PSScriptRoot 'Build-Guardian.ps1')
+    & (Join-Path $PSScriptRoot 'Build-Guardian.ps1') -ReleaseTuning $GuardianTuning
     & $taskDotnet restore 'tests/AgApproval.Tests/AgApproval.Tests.csproj' --configfile (Join-Path $taskRoot 'NuGet.Config') --nologo
     if ($LASTEXITCODE -ne 0) { throw 'Offline dependency restore failed' }
     & $taskDotnet build 'src/AgApproval/AgApproval.csproj' -c Release --no-restore --nologo
@@ -51,21 +64,32 @@ try {
     }
 
     & (Join-Path $PSScriptRoot 'Build-Panel.ps1') -SkipSelfTest:$SkipPanelSelfTest
+    $taskPanelBinary = Join-Path $taskRoot '.local/panel-build/CodexApprovalPanel.exe'
+    if ((Get-Item -LiteralPath $taskPanelBinary).VersionInfo.ProductVersion -cne "$taskReleaseVersion.0") {
+        throw 'Built panel product version differs from the release version'
+    }
 
     $taskBundle = Join-Path $taskRoot ('.local/build-bundle/' + [Guid]::NewGuid().ToString('N') + '/codex-approval')
     New-Item -ItemType Directory -Path $taskBundle -Force | Out-Null
     Copy-Item -Path (Join-Path $taskRoot 'plugin/*') -Destination $taskBundle -Recurse -Force
-    Copy-Item -LiteralPath (Join-Path $taskRoot '.local/guardian-host-build') -Destination (Join-Path $taskBundle 'native') -Recurse
+    $taskNative = Join-Path $taskBundle 'native'
+    $taskNativeBuild = if ($GuardianTuning -eq 'Default') {
+        Join-Path $taskRoot '.local/guardian-host-build'
+    } else { Join-Path $taskRoot ".local/guardian-profiles/$GuardianTuning" }
+    New-Item -ItemType Directory -Path $taskNative -Force | Out-Null
+    foreach ($taskNativeFile in @('ag-guardian-host.exe', 'SOURCE.json', 'UPSTREAM-LICENSE', 'UPSTREAM-NOTICE')) {
+        Copy-Item -LiteralPath (Join-Path $taskNativeBuild $taskNativeFile) -Destination $taskNative
+    }
 
     $taskApp = Join-Path $taskBundle 'app'
     New-Item -ItemType Directory -Path $taskApp -Force | Out-Null
-    Copy-Item -LiteralPath (Join-Path $taskRoot '.local/panel-build/CodexApprovalPanel.exe') -Destination (Join-Path $taskApp 'CodexApprovalPanel.exe') -Force
+    Copy-Item -LiteralPath $taskPanelBinary -Destination (Join-Path $taskApp 'CodexApprovalPanel.exe') -Force
 
     $taskPrograms = Join-Path $taskBundle 'scripts'
     New-Item -ItemType Directory -Path $taskPrograms -Force | Out-Null
-    & $taskDotnet publish 'src/AgApproval/AgApproval.csproj' -c Release --no-restore --self-contained false -p:DebugType=None -p:DebugSymbols=false -o $taskPrograms --nologo
+    & $taskDotnet publish 'src/AgApproval/AgApproval.csproj' -c Release --no-restore --self-contained false -p:UseAppHost=false -p:DebugType=None -p:DebugSymbols=false -o $taskPrograms --nologo
     if ($LASTEXITCODE -ne 0) { throw 'Publish failed' }
-    foreach ($taskScript in @('Apply-Update.ps1', 'Install.ps1', 'Uninstall.ps1', 'Review-Mode.ps1')) {
+    foreach ($taskScript in @('Apply-Update.ps1', 'Install.ps1', 'Uninstall.ps1', 'Review-Mode.ps1', 'Resolve-Runtime.ps1')) {
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot $taskScript) -Destination (Join-Path $taskPrograms $taskScript) -Force
     }
 

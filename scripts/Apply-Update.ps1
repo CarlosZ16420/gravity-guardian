@@ -9,7 +9,11 @@ param(
     [switch]$SkipProcessCheck
 )
 $ErrorActionPreference = 'Stop'
-. (Join-Path $PSScriptRoot 'Review-Mode.ps1')
+$taskHelpers = Join-Path $PSScriptRoot 'Review-Mode.ps1'
+if (!(Test-Path -LiteralPath $taskHelpers -PathType Leaf)) {
+    $taskHelpers = Join-Path $PluginDirectory 'scripts/Review-Mode.ps1'
+}
+. $taskHelpers
 
 function Write-Utf8NoBom([string]$Path, [string]$Text) {
     [IO.File]::WriteAllText($Path, $Text, [Text.UTF8Encoding]::new($false))
@@ -42,6 +46,27 @@ function Get-RelPath([string]$BaseDir, [string]$TargetPath) {
         throw ('Path escaped base directory: ' + $TargetPath)
     }
     return $full.Substring($prefix.Length)
+}
+
+function Read-GuardianUpdateIdentity([string]$Executable) {
+    if (!(Test-ApprovalX64Executable $Executable)) { throw 'Updated Guardian executable could not start' }
+    $start = [Diagnostics.ProcessStartInfo]::new($Executable, '--version')
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    try { $process = [Diagnostics.Process]::Start($start) }
+    catch { throw "Updated Guardian executable could not start: $($_.Exception.Message)" }
+    try {
+        $output = $process.StandardOutput.ReadToEndAsync()
+        $stderr = $process.StandardError.ReadToEndAsync()
+        if (!$process.WaitForExit(10000)) {
+            $process.Kill()
+            throw 'Updated Guardian identity check timed out'
+        }
+        if ($process.ExitCode -ne 0) { throw 'Updated Guardian executable could not start' }
+        $output.GetAwaiter().GetResult() | ConvertFrom-Json
+    } finally { $process.Dispose() }
 }
 
 $taskPlugin = [IO.Path]::GetFullPath($PluginDirectory)
@@ -105,7 +130,7 @@ try {
     }
 
     $taskNewBundle = Join-Path $taskReleaseRoot 'artifacts/codex-approval'
-    foreach ($req in @('plugin.json', 'scripts/ag-approval.dll', 'runtime/dotnet.exe', 'app/CodexApprovalPanel.exe')) {
+    foreach ($req in @('plugin.json', 'hooks.json', 'scripts/ag-approval.dll', 'app/CodexApprovalPanel.exe', 'native/ag-guardian-host.exe', 'native/SOURCE.json')) {
         if (!(Test-Path -LiteralPath (Join-Path $taskNewBundle $req) -PathType Leaf)) {
             throw ('Incomplete update bundle, missing: ' + $req)
         }
@@ -113,6 +138,20 @@ try {
 
     if (!(Test-Path -LiteralPath $taskPlugin -PathType Container)) {
         throw ('Existing plugin installation not found at: ' + $taskPlugin)
+    }
+    $taskDistribution = Get-ApprovalDistribution $taskNewBundle
+    if ($taskManifest.distribution -and $taskManifest.distribution -cne $taskDistribution) { throw 'Package distribution metadata disagrees' }
+    $taskPluginIdentity = Get-Content -Encoding UTF8 -LiteralPath (Join-Path $taskNewBundle 'plugin.json') -Raw | ConvertFrom-Json
+    if ($taskPluginIdentity.name -cne 'codex-approval' -or $taskPluginIdentity.version -cne $taskManifest.version) {
+        throw 'Update plugin identity differs from the verified package manifest'
+    }
+    $taskNewBundleRuntime = Resolve-ApprovalRuntime $taskNewBundle
+    $taskNewRuntime = if ($taskDistribution -eq 'lite') { $taskNewBundleRuntime } else { Join-Path $taskPlugin 'runtime/dotnet.exe' }
+    $taskOldRuntime = Resolve-ApprovalRuntime $taskPlugin -Installed
+    $taskNewGuardian = Join-Path $taskNewBundle 'native/ag-guardian-host.exe'
+    $taskNativeSource = Get-Content -Encoding UTF8 -LiteralPath (Join-Path $taskNewBundle 'native/SOURCE.json') -Raw | ConvertFrom-Json
+    if ((Get-FileHash -LiteralPath $taskNewGuardian -Algorithm SHA256).Hash -ine $taskNativeSource.binarySha256) {
+        throw 'Updated Guardian SHA-256 differs from native/SOURCE.json'
     }
 
     # Read existing state to preserve user configuration and detect customized pricing.
@@ -123,11 +162,12 @@ try {
     $taskOldApproval = ConvertTo-HashtableCompat (Get-Content -Encoding UTF8 -LiteralPath $taskOldApprovalPath -Raw | ConvertFrom-Json)
 
     $taskOldSidecarPath = Join-Path $taskPlugin 'sidecars/reviewer/sidecar.json'
-    $taskOldSidecarText = if (Test-Path -LiteralPath $taskOldSidecarPath -PathType Leaf) {
-        [IO.File]::ReadAllText($taskOldSidecarPath, [Text.Encoding]::UTF8)
+    $taskSidecar = if (Test-Path -LiteralPath $taskOldSidecarPath -PathType Leaf) {
+        Get-Content -Encoding UTF8 -LiteralPath $taskOldSidecarPath -Raw | ConvertFrom-JsonHashtable
     } else {
-        @{ command = (Join-Path $taskPlugin 'runtime/dotnet.exe'); args = @((Join-Path $taskPlugin 'scripts/ag-approval.dll'), 'supervise', '--config', (Join-Path $taskPlugin 'approval.json')); restart_policy = 'on-failure'; display_name = 'Codex Approval'; description = 'Native codex-auto-review permission reviewer' } | ConvertTo-Json -Depth 8
+        @{ args = @((Join-Path $taskPlugin 'scripts/ag-approval.dll'), 'supervise', '--config', $taskOldApprovalPath); restart_policy = 'on-failure'; display_name = 'Codex Approval'; description = 'Native codex-auto-review permission reviewer' }
     }
+    $taskSidecar.command = $taskNewRuntime
 
     $taskInstPath = Join-Path $taskData 'installation.json'
     $taskInst = if (Test-Path -LiteralPath $taskInstPath -PathType Leaf) {
@@ -157,6 +197,11 @@ try {
 
     # Prepare clean staging directory with preserved config.
     Copy-Item -LiteralPath $taskNewBundle -Destination $taskStageDir -Recurse
+    # Probe the verified binary from staging to avoid exceeding CreateProcess's path limit in the extracted ZIP tree.
+    $taskNewIdentity = Read-GuardianUpdateIdentity (Join-Path $taskStageDir 'native/ag-guardian-host.exe')
+    if ($taskNewIdentity.protocol -cne $taskNativeSource.protocol -or
+        $taskNewIdentity.upstreamCommit -cne $taskNativeSource.upstreamCommit) { throw 'Updated Guardian identity preflight failed' }
+    Set-ApprovalHookRuntime -Bundle $taskStageDir -Runtime $taskNewRuntime
     $taskNewPricingPath = Join-Path $taskStageDir 'pricing.json'
     $taskNewDefaultPricingSha = if (Test-Path -LiteralPath $taskNewPricingPath -PathType Leaf) {
         (Get-FileHash -LiteralPath $taskNewPricingPath -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -171,48 +216,58 @@ try {
 
     $taskStageSidecarDir = Join-Path $taskStageDir 'sidecars/reviewer'
     New-Item -ItemType Directory -Path $taskStageSidecarDir -Force | Out-Null
-    Write-Utf8NoBom (Join-Path $taskStageSidecarDir 'sidecar.json') $taskOldSidecarText
+    Write-Utf8NoBom (Join-Path $taskStageSidecarDir 'sidecar.json') ($taskSidecar | ConvertTo-Json -Depth 8)
 
-    # Stop old host & sidecar cleanly.
-    $taskOldRuntime = Join-Path $taskPlugin 'runtime/dotnet.exe'
-    $taskOldAssembly = Join-Path $taskPlugin 'scripts/ag-approval.dll'
-    $taskStopMarker = Join-Path $taskData 'uninstalled'
-    Write-Utf8NoBom $taskStopMarker 'upgrade in progress'
-    Start-Sleep -Milliseconds 2200
-
-    $taskOldHostId = $null
-    $taskPrevErr = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-    try {
-        $taskOldStatus = & $taskOldRuntime $taskOldAssembly status --config $taskOldApprovalPath 2>$null
-        if ($LASTEXITCODE -eq 0 -and $taskOldStatus) {
-            $taskOldHostId = (($taskOldStatus -join [Environment]::NewLine) | ConvertFrom-Json).pid
-        }
-        & $taskOldRuntime $taskOldAssembly stop --config $taskOldApprovalPath 2>$null | Out-Null
-    } catch {} finally { $ErrorActionPreference = $taskPrevErr }
-
-    if ($taskOldHostId) {
-        $taskOldProc = $null
-        try { $taskOldProc = [Diagnostics.Process]::GetProcessById([int]$taskOldHostId) } catch [ArgumentException] {}
-        if ($taskOldProc) {
-            try {
-                if (!$taskOldProc.WaitForExit(10000)) { throw 'Old approval host did not exit in time' }
-            } finally { $taskOldProc.Dispose() }
-        }
-    }
-
-    Get-Process -Name 'CodexApprovalPanel' -ErrorAction SilentlyContinue | Where-Object {
-        $_.Path -and [IO.Path]::GetFullPath($_.Path).StartsWith($taskPlugin + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)
-    } | ForEach-Object {
-        try { $_.Kill(); $_.WaitForExit(5000) } catch {}
-    }
-
-    # Backup old plugin before replacing.
     $taskBackupRoot = Join-Path $taskData ('backups/upgrade-' + [DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss') + '-' + [Guid]::NewGuid().ToString('N').Substring(0,6))
     New-Item -ItemType Directory -Path $taskBackupRoot -Force | Out-Null
     $taskBackupPlugin = Join-Path $taskBackupRoot 'replaced-plugin'
-    Move-Item -LiteralPath $taskPlugin -Destination $taskBackupPlugin
+    $taskBackupInst = Join-Path $taskBackupRoot 'installation.json.original'
+    if ($taskInst) { Copy-Item -LiteralPath $taskInstPath -Destination $taskBackupInst }
 
+    # Stop old host & sidecar cleanly.
+    $taskOldAssembly = Join-Path $taskPlugin 'scripts/ag-approval.dll'
+    $taskStopMarker = Join-Path $taskData 'uninstalled'
+    $taskOldMoved = $false
+    $taskNewStartAttempted = $false
+    $taskInstTemp = Join-Path $taskBackupRoot 'installation.json.new'
     try {
+        $taskMarker = [IO.File]::Open($taskStopMarker, [IO.FileMode]::CreateNew)
+        $taskMarker.Dispose()
+    } catch [IO.IOException] {
+        throw 'Could not claim the service stop marker; another installation change may be in progress'
+    }
+    try {
+        Start-Sleep -Milliseconds 2200
+
+        $taskOldHostId = $null
+        $taskPrevErr = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+        try {
+            $taskOldStatus = & $taskOldRuntime $taskOldAssembly status --config $taskOldApprovalPath 2>$null
+            if ($LASTEXITCODE -eq 0 -and $taskOldStatus) {
+                $taskOldHostId = (($taskOldStatus -join [Environment]::NewLine) | ConvertFrom-Json).pid
+            }
+            & $taskOldRuntime $taskOldAssembly stop --config $taskOldApprovalPath 2>$null | Out-Null
+        } catch {} finally { $ErrorActionPreference = $taskPrevErr }
+
+        if ($taskOldHostId) {
+            $taskOldProc = $null
+            try { $taskOldProc = [Diagnostics.Process]::GetProcessById([int]$taskOldHostId) } catch [ArgumentException] {}
+            if ($taskOldProc) {
+                try {
+                    if (!$taskOldProc.WaitForExit(10000)) { throw 'Old approval host did not exit in time' }
+                } finally { $taskOldProc.Dispose() }
+            }
+        }
+
+        Get-Process -Name 'CodexApprovalPanel' -ErrorAction SilentlyContinue | Where-Object {
+            $_.Path -and [IO.Path]::GetFullPath($_.Path).StartsWith($taskPlugin + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)
+        } | ForEach-Object {
+            try { $_.Kill(); $_.WaitForExit(5000) } catch {}
+        }
+
+        Move-Item -LiteralPath $taskPlugin -Destination $taskBackupPlugin
+        $taskOldMoved = $true
+
         Copy-Item -LiteralPath $taskStageDir -Destination $taskPlugin -Recurse
         $taskStageFiles = @(Get-ChildItem -LiteralPath $taskStageDir -Recurse -File -Force)
         foreach ($f in $taskStageFiles) {
@@ -230,16 +285,19 @@ try {
         if (Test-Path -LiteralPath $taskStopMarker) { Remove-Item -LiteralPath $taskStopMarker -Force }
 
         # Start new host and verify status.
-        $taskNewRuntime = Join-Path $taskPlugin 'runtime/dotnet.exe'
         $taskNewAssembly = Join-Path $taskPlugin 'scripts/ag-approval.dll'
         $taskNewConfig = Join-Path $taskPlugin 'approval.json'
         $taskServiceLogs = Join-Path $taskData 'service'
         New-Item -ItemType Directory -Path $taskServiceLogs -Force | Out-Null
         $taskStartupId = [DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss') + '-' + [Guid]::NewGuid().ToString('N').Substring(0,6)
         $taskStartupArgs = @(('"' + $taskNewAssembly + '"'), 'ensure', '--config', ('"' + $taskNewConfig + '"'))
+        $taskNewStartAttempted = $true
         $taskStartup = Start-Process -FilePath $taskNewRuntime -ArgumentList $taskStartupArgs -WorkingDirectory $taskPlugin -WindowStyle Hidden -RedirectStandardOutput (Join-Path $taskServiceLogs ($taskStartupId + '.stdout.log')) -RedirectStandardError (Join-Path $taskServiceLogs ($taskStartupId + '.stderr.log')) -PassThru
         try {
-            if (!$taskStartup.WaitForExit(20000)) { throw 'Updated approval host startup timed out' }
+            if (!$taskStartup.WaitForExit(20000)) {
+                $taskStartup.Kill()
+                throw 'Updated approval host startup timed out'
+            }
             if ($null -ne $taskStartup.ExitCode -and $taskStartup.ExitCode -ne 0) { throw 'Updated approval host could not start' }
         } finally { $taskStartup.Dispose() }
 
@@ -250,32 +308,64 @@ try {
         if ($LASTEXITCODE -ne 0 -or !$taskStatusRaw) { throw 'Updated approval host failed health check' }
         $taskStatusJson = ($taskStatusRaw -join [Environment]::NewLine) | ConvertFrom-Json
         if ($taskStatusJson.status -ne 'running') { throw 'Updated approval host is not running' }
+        if ($taskStatusJson.version -cne [string]$taskManifest.version) { throw 'Running approval host differs from the verified update version' }
+        $taskHandshake = & $taskNewRuntime $taskNewAssembly check-guardian --config $taskNewConfig | ConvertFrom-Json
+        if ($LASTEXITCODE -ne 0 -or !$taskHandshake.ok) { throw 'Updated native Guardian failed its handshake' }
+        $taskDetection = & $taskNewRuntime $taskNewAssembly detect --config $taskNewConfig --data-dir $taskData | ConvertFrom-Json
+        if ($LASTEXITCODE -ne 0 -or $taskDetection.nativeAuth.storeError -eq 'guardian_probe_unavailable' -or
+            $taskDetection.nativeAuth.status -cnotin @('credentials_found','credentials_missing','store_unavailable')) {
+            throw 'Updated native Guardian failed to report authentication status'
+        }
 
         if ($taskInst) {
             $taskInst['latestUpgradeBackup'] = $taskBackupRoot
             $taskInst['updatedAt'] = [DateTime]::UtcNow.ToString('O')
             $taskInst['version'] = [string]$taskManifest.version
+            $taskInst['distribution'] = $taskDistribution
+            $taskInst['dotnetPath'] = $taskNewRuntime
             if ($taskNewDefaultPricingSha) { $taskInst['defaultPricingSha256'] = $taskNewDefaultPricingSha }
-            Write-Utf8NoBom $taskInstPath ($taskInst | ConvertTo-Json -Depth 20)
+            Write-Utf8NoBom $taskInstTemp ($taskInst | ConvertTo-Json -Depth 20)
+            [IO.File]::Replace($taskInstTemp, $taskInstPath, $taskBackupInst)
         }
     } catch {
         $errMsg = $_.Exception.Message
         Write-Utf8NoBom $taskErrorLog ("[" + [DateTime]::UtcNow.ToString('O') + "] Update failed, rolling back: " + $errMsg)
         try {
-            if (Test-Path -LiteralPath $taskPlugin) {
+            if ($taskNewStartAttempted) {
+                Write-Utf8NoBom $taskStopMarker 'rollback in progress'
+                $prevPreference = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+                try {
+                    $rollbackStatus = & $taskNewRuntime $taskNewAssembly status --config $taskNewConfig 2>$null
+                    $rollbackPid = if ($LASTEXITCODE -eq 0 -and $rollbackStatus) { ($rollbackStatus | ConvertFrom-Json).pid }
+                    & $taskNewRuntime $taskNewAssembly stop --config $taskNewConfig 2>$null | Out-Null
+                    if ($rollbackPid) {
+                        $rollbackProcess = Get-Process -Id $rollbackPid -ErrorAction SilentlyContinue
+                        if ($rollbackProcess -and !$rollbackProcess.WaitForExit(10000)) { throw 'New service did not stop for rollback' }
+                    }
+                } finally { $ErrorActionPreference = $prevPreference }
+            }
+            if ($taskOldMoved -and (Test-Path -LiteralPath $taskPlugin)) {
                 $failedDir = Join-Path $taskBackupRoot 'failed-new-plugin'
                 Move-Item -LiteralPath $taskPlugin -Destination $failedDir -Force
             }
             if (Test-Path -LiteralPath $taskBackupPlugin) {
                 Move-Item -LiteralPath $taskBackupPlugin -Destination $taskPlugin -Force
             }
+            if (Test-Path -LiteralPath $taskBackupInst -PathType Leaf) { Copy-Item -LiteralPath $taskBackupInst -Destination $taskInstPath -Force }
             if (Test-Path -LiteralPath $taskStopMarker) { Remove-Item -LiteralPath $taskStopMarker -Force }
             $taskServiceLogs = Join-Path $taskData 'service'
             New-Item -ItemType Directory -Path $taskServiceLogs -Force | Out-Null
             $rbArgs = @(('"' + $taskOldAssembly + '"'), 'ensure', '--config', ('"' + $taskOldApprovalPath + '"'))
             $rbProc = Start-Process -FilePath $taskOldRuntime -ArgumentList $rbArgs -WorkingDirectory $taskPlugin -WindowStyle Hidden -RedirectStandardOutput (Join-Path $taskServiceLogs 'rollback.stdout.log') -RedirectStandardError (Join-Path $taskServiceLogs 'rollback.stderr.log') -PassThru
-            try { [void]$rbProc.WaitForExit(15000) } finally { $rbProc.Dispose() }
-        } catch {}
+            try {
+                if (!$rbProc.WaitForExit(15000) -or $rbProc.ExitCode -ne 0) { throw 'Previous approval service could not restart' }
+            } finally { $rbProc.Dispose() }
+            $rollbackHealth = & $taskOldRuntime $taskOldAssembly status --config $taskOldApprovalPath | ConvertFrom-Json
+            if ($LASTEXITCODE -ne 0 -or $rollbackHealth.status -ne 'running') { throw 'Previous approval service failed its rollback health check' }
+        } catch {
+            Add-Content -LiteralPath $taskErrorLog -Value $_.Exception.Message
+            throw "Update failed: $errMsg. Automatic rollback failed: $($_.Exception.Message). Backup: $taskBackupRoot"
+        }
         throw
     }
 
@@ -284,11 +374,11 @@ try {
     if ($RelaunchPanel) {
         $panelExe = Join-Path $taskPlugin 'app/CodexApprovalPanel.exe'
         if (Test-Path -LiteralPath $panelExe -PathType Leaf) {
-            Start-Process -FilePath $panelExe -WorkingDirectory (Split-Path $panelExe -Parent) | Out-Null
+            Start-Process -FilePath $panelExe -WorkingDirectory (Split-Path $panelExe -Parent) -ArgumentList @('--plugin-dir', ('"' + $taskPlugin + '"'), '--data-dir', ('"' + $taskData + '"')) | Out-Null
         }
     }
 
-    @{ ok = $true; version = [string]$taskManifest.version; pluginDirectory = $taskPlugin } | ConvertTo-Json -Compress
+    @{ ok = $true; version = [string]$taskManifest.version; distribution = $taskDistribution; pluginDirectory = $taskPlugin } | ConvertTo-Json -Compress
 } finally {
     Remove-Item -LiteralPath $taskExtractDir -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $taskStageDir -Recurse -Force -ErrorAction SilentlyContinue

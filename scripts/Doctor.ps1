@@ -35,7 +35,8 @@ $taskHooks=Get-Content -Encoding UTF8 -LiteralPath (Join-Path $taskPlugin 'hooks
 $taskOuterTimeout=$taskHooks.'codex-approval'.PreToolUse[0].hooks[0].timeout
 Write-Host ('Deadlines (review/client/native hook): '+$taskConfig.reviewTimeoutSeconds+'/'+$taskConfig.hookTimeoutSeconds+'/'+$taskOuterTimeout+' seconds')
 if($taskConfig.reviewTimeoutSeconds -ge $taskConfig.hookTimeoutSeconds -or $taskConfig.hookTimeoutSeconds -ge $taskOuterTimeout){Write-Warning 'Nested approval deadlines are out of order; the outer hook may discard the reviewer result.'}
-$taskRuntime = Join-Path $taskPlugin 'runtime/dotnet.exe'
+$taskRuntime = Resolve-ApprovalRuntime $taskPlugin -Installed
+Write-Host ('Distribution: ' + (Get-ApprovalDistribution $taskPlugin) + '; .NET: ' + $taskRuntime)
 $taskAssembly = Join-Path $taskPlugin 'scripts/ag-approval.dll'
 $taskConfigPath = Join-Path $taskPlugin 'approval.json'
 if(!$SkipGuardianAuthCheck){

@@ -20,12 +20,17 @@ async fn final_native_prompt_roundtrip() -> anyhow::Result<()> {
 
     let mut history = fixture["history"].as_array().context("missing history")?.clone();
     annotate_user_history(&mut history)?;
-    for expected in ["allow", "deny"] {
+    let repetitions = std::env::var("AG_TEST_PROMPT_REPETITIONS")
+        .ok().and_then(|value| value.parse::<usize>().ok()).unwrap_or(1);
+    ensure!((1..=50).contains(&repetitions), "invalid fixture repetition count");
+    for expected in (0..repetitions).flat_map(|_| ["allow", "deny"]) {
         let NewThread { thread_id, thread, .. } = manager.start_thread(StartThreadOptions::new(config.clone())).await?;
+        let started = Instant::now();
         let result = thread.assess_external_guardian(
             json!(history), fixture["action"].clone(), json!({"fixture": true}), 15_000,
             CancellationToken::new(),
         ).await;
+        println!("native_review_ms={:.3}", started.elapsed().as_secs_f64() * 1000.0);
         retire(&manager, Parent { thread, id: thread_id, history: Vec::new(), policy: String::new(),
             touched: Instant::now(), reviews: 0, last_input: 0 }).await;
         let result = result?;

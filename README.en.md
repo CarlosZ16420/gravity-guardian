@@ -14,7 +14,7 @@ Gravity Steward ships Native Guardian, which calls the `codex-auto-review` model
 
 Run `GravitySteward.exe` to install or repair the plugin (「安装 / 修复插件」), view review results, or check local credentials under 「Guardian 登录」. Upgrades migrate old CLI reviewer settings to Guardian and preserve custom credential directories and historical review statistics. The [validation record](docs/guardian-0.172.0-validation.md) covers tested credential setups.
 
-The Windows package bundles the .NET runtime. The panel UI is in Simplified Chinese. Detailed logging is off by default. When enabled, local logs may include paths, conversation content, and tool arguments. Model reviews send the context required for review to Codex.
+Standalone keeps the original ZIP name and bundles the x64 .NET 10 runtime. Lite has `-lite-` in its ZIP name and uses the installed x64 .NET 10 runtime. You can install it with `winget install Microsoft.DotNet.Runtime.10 --architecture x64`. To switch editions, extract the desired ZIP and run Install / Repair from that folder. The panel UI is in Simplified Chinese. Detailed logging is off by default. When enabled, local logs may include paths, conversation content, and tool arguments. Model reviews send the context required for review to Codex.
 
 Manage standing project authorizations in Antigravity chat. Confirmed scopes carry over to new chats and restarts for the same project. [Chat commands](plugin/README.md)
 
@@ -24,7 +24,7 @@ To uninstall, fully exit Antigravity and choose 「完整卸载」 in the panel.
 
 ## Build from source
 
-Use Windows x64 with PowerShell 7, the .NET 10 SDK, Node.js 22+, stable Rust, and MSVC C++ build tools. Run `./scripts/Build.ps1` to build and test the project.
+Use Windows x64 with PowerShell 7, the .NET 10 SDK, Node.js 22+, stable Rust, and MSVC C++ build tools. Run `./scripts/Build.ps1`, then `./scripts/Package.ps1` to build both editions and `./scripts/Test-Distributions.ps1` to verify installation and updates.
 
 Gravity Steward is an independent open-source project. See [Apache-2.0](LICENSE) and [NOTICE](NOTICE).
 

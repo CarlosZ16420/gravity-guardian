@@ -19,6 +19,8 @@ public sealed class NativeGuardianReviewer(Settings settings,Policy policy) : IR
     private long dispatches;
     private string? binaryIdentity;
     private JsonObject? runtime;
+    internal async Task CheckHandshakeAsync(CancellationToken ct) => await EnsureAsync(ct);
+
     public async Task<string> ReviewAsync(ReviewInput input,CancellationToken ct)
     {
         var budgetMs=Math.Min(input.ReviewBudgetMs??int.MaxValue,settings.ReviewTimeoutSeconds*1000);

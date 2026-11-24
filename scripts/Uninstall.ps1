@@ -110,7 +110,7 @@ if ($taskLauncher) {
             # Older manifests did not distinguish a new launcher from a missing backup.
             # Preserve the verified launcher and strip the installer's approval startup block.
             $taskLauncherText = [IO.File]::ReadAllText($taskLauncher)
-            $taskLine = '"{0}" "{1}" ensure --config "{2}"' -f (Join-Path $taskPlugin 'runtime/dotnet.exe'), (Join-Path $taskPlugin 'scripts/ag-approval.dll'), $taskApproval
+            $taskLine = '"{0}" "{1}" ensure --config "{2}"' -f (Resolve-ApprovalRuntime $taskPlugin -Installed), (Join-Path $taskPlugin 'scripts/ag-approval.dll'), $taskApproval
             $taskBlock = (@($taskLine, 'if errorlevel 1 (', '  echo Codex automatic approval is unavailable. Antigravity has not been started.', '  pause', '  exit /b 1', ')') -join "`r`n") + "`r`n"
             if (!$taskLauncherText.Contains($taskBlock)) { throw 'Launcher backup is missing and its approval startup block could not be identified' }
             $taskCleanLauncher = $taskLauncherText.Replace($taskBlock, '')
@@ -135,7 +135,9 @@ if (Get-Process -Name Antigravity -ErrorAction SilentlyContinue | Where-Object {
 }) { throw 'Fully exit Antigravity before uninstalling the plugin' }
 
 [IO.File]::WriteAllText($taskStopMarker, 'disabled')
-$taskRuntime = Join-Path $taskPlugin 'runtime/dotnet.exe'
+$taskRuntime = if (Test-Path -LiteralPath $taskPlugin) {
+    try { Resolve-ApprovalRuntime $taskPlugin -Installed } catch { Write-Warning $_.Exception.Message }
+}
 $taskAssembly = Join-Path $taskPlugin 'scripts/ag-approval.dll'
 $taskGuardian = Join-Path $taskPlugin 'native/ag-guardian-host.exe'
 $taskDataPanel = Join-Path $taskData 'panel/CodexApprovalPanel.exe'
@@ -151,14 +153,19 @@ Get-Process -Name CodexApprovalPanel,GravitySteward -ErrorAction SilentlyContinu
     if (!$_.HasExited) { $_.Kill() }
     if (!$_.WaitForExit(5000)) { throw 'The approval panel is still running. Close it and retry.' }
 }
-if ((Test-Path -LiteralPath $taskRuntime -PathType Leaf) -and
-    (Get-Process -Name dotnet -ErrorAction SilentlyContinue | Where-Object { $_.Path -ieq $taskRuntime })) {
+$taskHostId = $null
+if ($taskRuntime -and (Test-Path -LiteralPath $taskApproval -PathType Leaf)) {
     $taskPrevError = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
-    try { & $taskRuntime $taskAssembly stop --config $taskApproval 2>$null | Out-Null } finally { $ErrorActionPreference = $taskPrevError }
+    try {
+        $taskStatus = & $taskRuntime $taskAssembly status --config $taskApproval 2>$null
+        if ($LASTEXITCODE -eq 0 -and $taskStatus) { $taskHostId = ($taskStatus | ConvertFrom-Json).pid }
+        & $taskRuntime $taskAssembly stop --config $taskApproval 2>$null | Out-Null
+    } finally { $ErrorActionPreference = $taskPrevError }
 }
+$taskBundledRuntime = Join-Path $taskPlugin 'runtime/dotnet.exe'
 Get-Process -Name dotnet,ag-guardian-host -ErrorAction SilentlyContinue | Where-Object {
-    $_.Path -in @($taskRuntime, $taskGuardian)
+    $_.Path -in @($taskBundledRuntime, $taskGuardian) -or ($taskHostId -and $_.Id -eq $taskHostId -and $_.Path -ieq $taskRuntime)
 } | ForEach-Object {
     if (!$_.WaitForExit(12000)) { throw "The approval process is still running. Close it and retry: $($_.Path)" }
 }

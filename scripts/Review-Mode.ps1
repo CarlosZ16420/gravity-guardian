@@ -148,3 +148,94 @@ function Update-ApprovalReviewerConfig {
     $Config['policyDirectory'] = Join-Path $PluginDirectory 'policy/effective-codex'
     $Config['guardianPath'] = Join-Path $PluginDirectory 'native/ag-guardian-host.exe'
 }
+function Get-ApprovalDistribution([string]$Bundle) {
+    $metadata = Join-Path $Bundle 'distribution.json'
+    if (!(Test-Path -LiteralPath $metadata -PathType Leaf)) { return 'standalone' }
+    $type = (Get-Content -Encoding UTF8 -LiteralPath $metadata -Raw | ConvertFrom-Json).type
+    if ($type -cnotin @('standalone','lite')) { throw "Unknown package distribution: $type" }
+    return $type
+}
+
+function Test-ApprovalX64Executable([string]$Path) {
+    if (!(Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
+    try {
+        $reader = [IO.BinaryReader]::new([IO.File]::OpenRead($Path))
+        try {
+            if ($reader.ReadUInt16() -ne 0x5A4D) { return $false }
+            $reader.BaseStream.Position = 0x3c
+            $reader.BaseStream.Position = $reader.ReadUInt32()
+            return $reader.ReadUInt32() -eq 0x4550 -and $reader.ReadUInt16() -eq 0x8664
+        } finally { $reader.Dispose() }
+    } catch { return $false }
+}
+
+function Test-ApprovalX64Runtime([string]$Path) {
+    if (!(Test-ApprovalX64Executable $Path)) { return $false }
+    try {
+        $start = [Diagnostics.ProcessStartInfo]::new($Path, '--list-runtimes')
+        $start.UseShellExecute = $false
+        $start.CreateNoWindow = $true
+        $start.RedirectStandardOutput = $true
+        $start.RedirectStandardError = $true
+        $process = [Diagnostics.Process]::Start($start)
+        try {
+            $output = $process.StandardOutput.ReadToEndAsync()
+            $errorOutput = $process.StandardError.ReadToEndAsync()
+            if (!$process.WaitForExit(5000)) { $process.Kill(); return $false }
+            return $process.ExitCode -eq 0 -and $output.GetAwaiter().GetResult() -match '(?m)^Microsoft\.NETCore\.App 10\.0\.\d+ \['
+        } finally { $process.Dispose() }
+    } catch { return $false }
+}
+
+function Resolve-ApprovalRuntime([string]$Bundle, [switch]$Installed, [string[]]$SystemCandidates) {
+    $bundled = Join-Path $Bundle 'runtime/dotnet.exe'
+    if ((Get-ApprovalDistribution $Bundle) -eq 'standalone') {
+        if (!(Test-Path -LiteralPath $bundled -PathType Leaf)) { throw "Standalone .NET executable is missing: $bundled" }
+        return $bundled
+    }
+    if (Test-Path -LiteralPath (Join-Path $Bundle 'runtime')) { throw 'Lite package contains a bundled runtime' }
+    if ($Installed) {
+        $sidecar = Get-Content -Encoding UTF8 -LiteralPath (Join-Path $Bundle 'sidecars/reviewer/sidecar.json') -Raw | ConvertFrom-Json
+        if ([IO.Path]::IsPathRooted([string]$sidecar.command) -and (Test-Path -LiteralPath $sidecar.command -PathType Leaf)) {
+            return [string]$sidecar.command
+        }
+    }
+    if (!$PSBoundParameters.ContainsKey('SystemCandidates')) {
+        $SystemCandidates = @(
+            foreach ($directory in @($env:ProgramW6432, $env:ProgramFiles)) {
+                if ($directory) { Join-Path $directory 'dotnet/dotnet.exe' }
+            }
+            Get-Command dotnet.exe -CommandType Application -All -ErrorAction SilentlyContinue | ForEach-Object Source
+        )
+    }
+    $prefix = [IO.Path]::GetFullPath($Bundle).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+    foreach ($candidate in ($SystemCandidates | Select-Object -Unique)) {
+        if (![IO.Path]::IsPathRooted($candidate)) { continue }
+        $path = [IO.Path]::GetFullPath($candidate)
+        if ($path.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase) -or $path.Contains('%')) { continue }
+        if (Test-ApprovalX64Runtime $path) { return $path }
+    }
+    throw 'Gravity Steward Lite requires the x64 .NET 10 Runtime. Install it with winget install Microsoft.DotNet.Runtime.10 --architecture x64 or download https://dotnet.microsoft.com/download/dotnet/10.0.'
+}
+
+function Set-ApprovalHookRuntime([string]$Bundle, [string]$Runtime) {
+    if ((Get-ApprovalDistribution $Bundle) -ne 'lite') { return }
+    $path = Join-Path $Bundle 'hooks.json'
+    $hooks = Get-Content -Encoding UTF8 -LiteralPath $path -Raw | ConvertFrom-JsonHashtable
+    $events = $hooks['codex-approval']
+    $commands = foreach ($event in $events.Values) {
+        foreach ($item in $event) {
+            if ($item.Contains('hooks')) { $item['hooks'] } else { $item }
+        }
+    }
+    $template = '.\runtime\dotnet.exe '
+    foreach ($handler in $commands) {
+        if ($handler.command.StartsWith($template, [StringComparison]::Ordinal)) {
+            $arguments = $handler.command.Substring($template.Length)
+        } elseif ($handler.command -match '^cmd\.exe /D /V:OFF /S /C ""[^"]+" (.+)"$') {
+            $arguments = $Matches[1]
+        } else { throw 'Unknown release hook command' }
+        $handler.command = 'cmd.exe /D /V:OFF /S /C ""' + $Runtime + '" ' + $arguments + '"'
+    }
+    $hooks | ConvertTo-Json -Depth 16 | Set-Utf8NoBom -LiteralPath $path
+}

@@ -25,7 +25,7 @@ Gravity Steward 自带 Native Guardian，由它调用 `codex-auto-review` 模型
 
 运行 `GravitySteward.exe` 可以打开面板「安装 / 修复插件」、查看审批结果，并在「Guardian 登录」检测本机凭据。升级时，旧 CLI 审核设置会自动迁移到 Guardian，自定义凭据目录和历史审批统计会保留。支持的验证范围见[验收记录](docs/guardian-0.172.0-validation.md)。
 
-Windows 包自带 .NET 运行时。下载后可对照同页的 `checksums.sha256` 核对 ZIP。升级或卸载前先完全退出 Antigravity。
+**Standalone** 沿用原安装包文件名，自带 x64 .NET 10。**Lite** 的文件名带 `-lite-`，需要系统已安装 x64 .NET 10，可运行 `winget install Microsoft.DotNet.Runtime.10 --architecture x64` 安装。切换类型时，完整解压目标 ZIP，再从该目录运行「安装 / 修复插件」。下载后可对照同页的 `checksums.sha256` 核对 ZIP。升级或卸载前先完全退出 Antigravity。
 
 在面板点击「完整卸载」，确认后会关闭面板，移除已安装的插件和开机启动项，并永久删除本地审批日志、统计、设置、项目长期授权、缓存和备份。也可运行包内的 `scripts/Uninstall.ps1 -PurgeData`。手动下载的 ZIP 和解压目录可自行删除。
 
@@ -41,11 +41,17 @@ Windows 包自带 .NET 运行时。下载后可对照同页的 `checksums.sha256
 
 构建需要 Windows x64、PowerShell 7、.NET 10 SDK、Node.js 22+、Rust stable 和 MSVC C++ 构建工具。
 
+版本准备、双包验收和发布步骤见 [Windows 打包与验收手册](docs/packaging-runbook.md)。
+
 ```powershell
 .\scripts\Build.ps1
+.\scripts\Package.ps1
+.\scripts\Test-Distributions.ps1
 node .\scripts\Test-NativePrompt.mjs .local\prompt-test
 .\scripts\Test-NoCli.ps1 -OutputDirectory .local\no-cli-test
 ```
+
+用 `Measure-GuardianBuild.ps1 -Tuning` 测量 Rust 发布配置。可选 `Baseline`、`Symbols`、`Thin`、`ThinSingleUnit` 和 `ThinSize`。依次运行，记录冷构建耗时、编译进程内存、包体占用和本机模拟审核延迟。
 
 项目采用 [Apache-2.0](LICENSE)，上游与分发声明见 [NOTICE](NOTICE)。Gravity Steward 是独立的开源项目。
 

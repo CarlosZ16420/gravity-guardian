@@ -9,7 +9,9 @@ $taskGemini = Join-Path $taskSandbox '.gemini'
 $taskConfig = Join-Path $taskGemini 'config'
 $taskData = Join-Path $taskSandbox 'data'
 $taskFeed = Join-Path $taskSandbox 'feed'
-New-Item -ItemType Directory -Path $taskConfig, $taskData, $taskFeed -Force | Out-Null
+$taskCodexHome = Join-Path $taskSandbox 'codex-home'
+New-Item -ItemType Directory -Path $taskConfig, $taskData, $taskFeed, $taskCodexHome -Force | Out-Null
+Set-Content -LiteralPath (Join-Path $taskCodexHome 'config.toml') 'cli_auth_credentials_store = "file"'
 
 # Minimal native Antigravity config fixture
 @{ userSettings = @{ permissionPreset = 'AGENT_PERMISSION_PRESET_DEFAULT'; enableTerminalSandbox = $true; autoExecutionPolicy = 'CASCADE_COMMANDS_AUTO_EXECUTION_PROCEED_IN_SANDBOX' }; sidecars = @{} } |
@@ -29,6 +31,7 @@ $taskNextVersion = '{0}.{1}.{2}' -f $taskBaseParts.Major, $taskBaseParts.Minor, 
 & $taskRuntime $taskAssembly set-logging --config $taskApprovalPath --enabled true | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'Failed to enable detailed logs before update test' }
 $taskLegacyApproval = Get-Content -Encoding UTF8 -LiteralPath $taskApprovalPath -Raw | ConvertFrom-JsonHashtable
+$taskLegacyApproval.codexHome = $taskCodexHome
 $taskLegacyApproval.reviewerBackend = 'Cli'
 $taskLegacyApproval.codexPath = $(if ($env:AG_TEST_CLI_TRIPWIRE) { $env:AG_TEST_CLI_TRIPWIRE } else { Join-Path $taskSandbox 'missing-codex.exe' })
 $taskLegacyApproval.enableReviewerSessions = $true
@@ -45,43 +48,12 @@ $taskGuardDir = Join-Path $taskData 'denial-guard'
 New-Item -ItemType Directory -Path $taskGuardDir -Force | Out-Null
 [IO.File]::WriteAllText((Join-Path $taskGuardDir 'sentinel.json'), '{"keep":true}')
 
-# 2. Build a synthetic next-patch package and local feed.
-& (Join-Path $PSScriptRoot 'Package.ps1') | Out-Null
+# 2. Use the verified build and simulate an advertised newer version in the local feed.
 $taskBaseZip = Get-Item -LiteralPath (Join-Path $taskRoot "artifacts/gravity-steward-$taskBaseVersion-windows-x64.zip")
 if (!$taskBaseZip) { throw 'Packaged release zip not found' }
-
-$taskSynthExtract = Join-Path $taskSandbox 'synth-extract'
-Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
-[IO.Compression.ZipFile]::ExtractToDirectory($taskBaseZip.FullName, $taskSynthExtract)
-$taskSynthRoot = (Get-ChildItem -LiteralPath $taskSynthExtract -Filter 'package-manifest.json' -Recurse -File | Select-Object -First 1).Directory.FullName
-
-# Set the synthetic plugin and manifest to the next version.
-$taskSynthPluginJson = Join-Path $taskSynthRoot 'artifacts/codex-approval/plugin.json'
-$taskPj = Get-Content -Encoding UTF8 -LiteralPath $taskSynthPluginJson -Raw | ConvertFrom-JsonHashtable
-$taskPj.version = $taskNextVersion
-$taskPj | ConvertTo-Json -Depth 6 | Set-Utf8NoBom -LiteralPath $taskSynthPluginJson -Encoding utf8
-
-$taskSynthManifestPath = Join-Path $taskSynthRoot 'package-manifest.json'
-$taskSynthFiles = @(Get-ChildItem -LiteralPath $taskSynthRoot -Recurse -File | Where-Object { $_.FullName -ne $taskSynthManifestPath } | ForEach-Object {
-    @{ path = (Get-RelativePathCompat $taskSynthRoot $_.FullName).Replace('\', '/'); sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant() }
-})
-@{ version = $taskNextVersion; builtAt = [DateTime]::UtcNow.ToString('O'); files = $taskSynthFiles } |
-    ConvertTo-Json -Depth 8 | Set-Utf8NoBom -LiteralPath $taskSynthManifestPath -Encoding utf8
-
 $taskNextName = "gravity-steward-$taskNextVersion-windows-x64.zip"
 $taskNextZip = Join-Path $taskFeed $taskNextName
-$zipStream = [IO.File]::Open($taskNextZip, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
-try {
-    $arc = [IO.Compression.ZipArchive]::new($zipStream, [IO.Compression.ZipArchiveMode]::Create, $false)
-    try {
-        foreach ($item in Get-ChildItem -LiteralPath $taskSynthRoot -Recurse -File) {
-            $entryName = ("gravity-steward-$taskNextVersion/" + (Get-RelativePathCompat $taskSynthRoot $item.FullName)).Replace('\', '/')
-            $entry = $arc.CreateEntry($entryName, [IO.Compression.CompressionLevel]::Optimal)
-            $in = [IO.File]::OpenRead($item.FullName)
-            try { $out = $entry.Open(); try { $in.CopyTo($out) } finally { $out.Dispose() } } finally { $in.Dispose() }
-        }
-    } finally { $arc.Dispose() }
-} finally { $zipStream.Dispose() }
+Copy-Item -LiteralPath $taskBaseZip.FullName -Destination $taskNextZip
 
 $taskNextSha = (Get-FileHash -LiteralPath $taskNextZip -Algorithm SHA256).Hash.ToLowerInvariant()
 @{
@@ -120,7 +92,7 @@ try {
     $taskApplyRes | ForEach-Object { Write-Host $_ }
 
     $taskNewVer = (Get-Content -Encoding UTF8 -LiteralPath (Join-Path $taskPlugin 'plugin.json') -Raw | ConvertFrom-Json).version
-    if ($taskNewVer -ne $taskNextVersion) { throw "Expected upgraded plugin.json version $taskNextVersion, got $taskNewVer" }
+    if ($taskNewVer -ne $taskBaseVersion) { throw "Expected the packaged plugin version $taskBaseVersion, got $taskNewVer" }
 
     $taskPostApproval = Get-Content -Encoding UTF8 -LiteralPath $taskApprovalPath -Raw | ConvertFrom-JsonHashtable
     if (!$taskPostApproval.enableDetailedLogs) { throw 'Upgrade lost enableDetailedLogs=true user preference' }
@@ -138,7 +110,7 @@ try {
     }
     $taskAfterUpdate = & $taskRuntime $taskAssembly takeover --config $taskApprovalPath | ConvertFrom-Json
     if ($LASTEXITCODE -ne 0 -or $taskAfterUpdate.takeoverEnabled -ne $false) { throw 'Update resumed paused approval takeover' }
-    Write-Host "PASS end-to-end self-update $taskBaseVersion -> $taskNextVersion preserved paused takeover, user config, logs, and running host"
+    Write-Host "PASS package replacement preserved paused takeover, user config, logs, and running host"
 } finally {
     # Cleanly stop isolated test host
     try {

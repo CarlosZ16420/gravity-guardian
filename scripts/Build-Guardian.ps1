@@ -1,5 +1,11 @@
 [CmdletBinding()]
-param([ValidateSet('Release','Debug')][string]$Profile='Release',[string]$Toolchain='stable',[switch]$Offline)
+param(
+    [ValidateSet('Release','Debug')][string]$Profile='Release',
+    [string]$Toolchain='stable',
+    [ValidateSet('Default','Baseline','Symbols','Thin','ThinSingleUnit','ThinSize')][string]$ReleaseTuning='Default',
+    [switch]$Offline,
+    [switch]$ForceBuild
+)
 $ErrorActionPreference='Stop'
 . (Join-Path $PSScriptRoot 'Review-Mode.ps1')
 $root = Split-Path $PSScriptRoot -Parent
@@ -9,7 +15,12 @@ $policyPath = 'policy/upstream-codex/SOURCE.json'
 $policy = Get-Content -LiteralPath (Join-Path $root $policyPath) -Raw | ConvertFrom-Json
 $local = Join-Path $root '.local'
 $source = Join-Path $local ('guardian-host-upstream-' + $origin.commit)
-$output = Join-Path $local 'guardian-host-build'
+$output = if ($ReleaseTuning -eq 'Default') {
+    Join-Path $local 'guardian-host-build'
+} else {
+    if ($Profile -ne 'Release') { throw 'Release tuning requires the Release profile' }
+    Join-Path $local "guardian-profiles/$ReleaseTuning"
+}
 $patch = Join-Path $root 'native/patches/guardian-entry.patch'
 $target = 'x86_64-pc-windows-msvc'
 $name = 'ag-guardian-host'
@@ -133,7 +144,17 @@ if ($LASTEXITCODE -ne 0 -or !$compiler) { throw 'Cannot resolve the actual Rust 
 $cargoVersion = & cargo "+$Toolchain" --version
 if ($LASTEXITCODE -ne 0) { throw 'Cannot resolve the actual Cargo version' }
 $options = if ($Profile -eq 'Release') {
-    [ordered]@{ OPT_LEVEL='2'; LTO='false'; CODEGEN_UNITS='16'; DEBUG='0'; STRIP='none'; PANIC='unwind' }
+    $release = [ordered]@{ OPT_LEVEL='2'; LTO='false'; CODEGEN_UNITS='16'; DEBUG='0'; STRIP='none'; PANIC='unwind' }
+    switch ($ReleaseTuning) {
+        'Default' {
+            foreach ($property in $origin.releaseOptions.PSObject.Properties) { $release[$property.Name] = [string]$property.Value }
+        }
+        'Symbols' { $release.STRIP = 'symbols' }
+        'Thin' { $release.LTO = 'thin'; $release.STRIP = 'symbols' }
+        'ThinSingleUnit' { $release.LTO = 'thin'; $release.STRIP = 'symbols'; $release.CODEGEN_UNITS = '1' }
+        'ThinSize' { $release.LTO = 'thin'; $release.STRIP = 'symbols'; $release.OPT_LEVEL = 's' }
+    }
+    $release
 } else { [ordered]@{ DEBUG='0' } }
 $cargoProfile = if ($Profile -eq 'Release') { 'RELEASE' } else { 'DEV' }
 foreach ($entry in $options.GetEnumerator()) {
@@ -151,12 +172,12 @@ foreach ($file in @('native/SOURCE.json','native/patches/guardian-entry.patch','
 }
 $buildKey = Hash-Text ([ordered]@{ profile=$Profile; compiler=$compiler; cargoVersion=$cargoVersion; target=$target;
     sourceSha256=$hashes; resolvedCargoLockSha256=$lockHash; options=$options; settings=$settings } | ConvertTo-Json -Depth 8 -Compress)
-if (Test-HostCache $output) {
+if (!$ForceBuild -and (Test-HostCache $output)) {
     Write-Host "Verified native build: $(Join-Path $output $exe)"
     return
 }
 $parentOutput = Join-Path $parent '.local/guardian-host-build'
-if (Test-HostCache $parentOutput) {
+if (!$ForceBuild -and (Test-HostCache $parentOutput)) {
     foreach ($file in @($exe,'UPSTREAM-LICENSE','UPSTREAM-NOTICE','SOURCE.json')) {
         Copy-Item -LiteralPath (Join-Path $parentOutput $file) -Destination $output -Force
     }

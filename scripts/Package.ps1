@@ -10,10 +10,18 @@ $taskRuntime = Get-LockedDotnetRuntime
 $taskBundle = Join-Path $taskRoot 'artifacts/codex-approval'
 $taskVersion = (Get-Content -Encoding UTF8 -LiteralPath (Join-Path $taskBundle 'plugin.json') -Raw | ConvertFrom-Json).version
 $taskStage = Join-Path $taskRoot ('artifacts/releases/stage-' + [Guid]::NewGuid().ToString('N'))
-$taskRelease = Join-Path $taskStage ('gravity-steward-' + $taskVersion)
 
-New-Item -ItemType Directory -Path (Join-Path $taskRelease 'artifacts') -Force | Out-Null
-Copy-Item -LiteralPath $taskBundle -Destination (Join-Path $taskRelease 'artifacts/codex-approval') -Recurse
+function New-ReleaseArchive([ValidateSet('standalone','lite')][string]$Distribution) {
+$taskRelease = Join-Path (Join-Path $taskStage $Distribution) ('gravity-steward-' + $taskVersion)
+$taskPackageBundle = Join-Path $taskRelease 'artifacts/codex-approval'
+
+New-Item -ItemType Directory -Path $taskPackageBundle -Force | Out-Null
+foreach ($item in (Get-ChildItem -LiteralPath $taskBundle -Force)) {
+    if ($Distribution -eq 'lite' -and $item.Name -eq 'runtime') { continue }
+    Copy-Item -LiteralPath $item.FullName -Destination $taskPackageBundle -Recurse
+}
+@{ type = $Distribution } | ConvertTo-Json -Compress |
+    Set-Utf8NoBom -LiteralPath (Join-Path $taskPackageBundle 'distribution.json')
 Copy-Item -LiteralPath (Join-Path $taskBundle 'app/CodexApprovalPanel.exe') -Destination (Join-Path $taskRelease 'GravitySteward.exe') -Force
 
 New-Item -ItemType Directory -Path (Join-Path $taskRelease 'scripts') -Force | Out-Null
@@ -44,6 +52,7 @@ $taskFiles = @($taskReleaseFiles | ForEach-Object {
 $taskPackageManifest = Join-Path $taskRelease 'package-manifest.json'
 @{
     version = $taskVersion
+    distribution = $Distribution
     builtAt = [DateTime]::UtcNow.ToString('O')
     deploymentStatusSource = 'Use Doctor or CodexApprovalPanel status; package metadata is not live deployment state'
     files = $taskFiles
@@ -53,8 +62,8 @@ $taskExpectedFiles = [Collections.Generic.Dictionary[string,string]]::new([Strin
 foreach ($taskFile in $taskFiles) { $taskExpectedFiles.Add($taskFile.path, $taskFile.sha256) }
 $taskExpectedFiles.Add('package-manifest.json', (Get-FileHash -LiteralPath $taskPackageManifest -Algorithm SHA256).Hash.ToLowerInvariant())
 
-$taskZipName = "gravity-steward-$taskVersion-windows-x64.zip"
-$taskZip = Join-Path $taskRoot ('artifacts/' + $taskZipName)
+$taskSuffix = if ($Distribution -eq 'lite') { '-lite' } else { '' }
+$taskZipName = "gravity-steward-$taskVersion$taskSuffix-windows-x64.zip"
 $taskStagedZip = Join-Path $taskStage $taskZipName
 $taskPrefix = (Split-Path $taskRelease -Leaf) + '/'
 
@@ -80,7 +89,9 @@ $taskArchive = [IO.Compression.ZipFile]::OpenRead($taskStagedZip)
 try {
     $taskRuntimeArchive = [IO.Compression.ZipFile]::OpenRead($taskRuntime.archivePath)
     try {
-        $taskExpectedRuntime = Get-LockedDotnetRuntimeFiles -Archive $taskRuntimeArchive -Version $taskRuntime.version
+        $taskExpectedRuntime = if ($Distribution -eq 'standalone') {
+            Get-LockedDotnetRuntimeFiles -Archive $taskRuntimeArchive -Version $taskRuntime.version
+        } else { @{} }
         $taskRuntimePrefix = 'artifacts/codex-approval/runtime/'
         $taskNativeExe = 'artifacts/codex-approval/native/ag-guardian-host.exe'
         $taskNativeManifest = 'artifacts/codex-approval/native/SOURCE.json'
@@ -155,8 +166,33 @@ try {
 }
 
 $taskZipHash = (Get-FileHash -LiteralPath $taskStagedZip -Algorithm SHA256).Hash.ToLowerInvariant()
+@{
+    distribution = $Distribution
+    rootDirectory = $taskPrefix.TrimEnd('/')
+    assetName = $taskZipName
+    zipSizeBytes = $taskZipSize
+    zipSha256 = $taskZipHash
+    unpackedSizeBytes = $taskUnpackedBytes
+    fileCount = $taskTree.Count
+    dotnetRuntimeVersion = $(if ($Distribution -eq 'standalone') { $taskRuntime.version })
+    dotnetRuntimeArchiveSha256 = $(if ($Distribution -eq 'standalone') { $taskRuntime.sha256 })
+    guardianHostSha256 = $taskFileHashes[$taskNativeExe]
+    files = $taskTree
+}
+}
+
+$taskStandalone = New-ReleaseArchive 'standalone'
+$taskLite = New-ReleaseArchive 'lite'
+$taskBuilds = [ordered]@{ standalone = $taskStandalone; lite = $taskLite }
+$taskSharedFiles = @{}
+foreach ($file in $taskStandalone.files) { $taskSharedFiles[$file.path] = $file.sha256 }
+foreach ($file in $taskLite.files) {
+    if ($file.path -in @('package-manifest.json','artifacts/codex-approval/distribution.json')) { continue }
+    if ($taskSharedFiles[$file.path] -cne $file.sha256) { throw "Distributions disagree on common file: $($file.path)" }
+}
 $taskStagedChecksums = Join-Path $taskStage 'checksums.sha256'
-Set-Utf8NoBom -LiteralPath $taskStagedChecksums -Content ("$taskZipHash *$taskZipName`n")
+$taskChecksumLines = foreach ($build in $taskBuilds.Values) { "$($build.zipSha256) *$($build.assetName)" }
+Set-Utf8NoBom -LiteralPath $taskStagedChecksums -Content (($taskChecksumLines -join [char]10) + [char]10)
 
 $taskRepo = 'CarlosZ16420/gravity-steward'
 $taskUpdCfgPath = Join-Path $taskBundle 'update-config.json'
@@ -166,30 +202,29 @@ if (Test-Path -LiteralPath $taskUpdCfgPath -PathType Leaf) {
 }
 
 $taskStagedManifest = Join-Path $taskStage 'release-manifest.json'
+$taskAssets = [ordered]@{}
+foreach ($build in $taskBuilds.Values) {
+    $taskAssets[$build.distribution] = @{
+        assetName = $build.assetName; sizeBytes = $build.zipSizeBytes; sha256 = $build.zipSha256
+        downloadUrl = "https://github.com/$taskRepo/releases/download/v$taskVersion/$($build.assetName)"
+    }
+}
 @{
     version = $taskVersion
     publishedAt = [DateTime]::UtcNow.ToString('O')
-    assetName = $taskZipName
-    downloadUrl = "https://github.com/$taskRepo/releases/download/v$taskVersion/$taskZipName"
-    sha256 = $taskZipHash
-    sizeBytes = $taskZipSize
+    assetName = $taskAssets.standalone.assetName
+    downloadUrl = $taskAssets.standalone.downloadUrl
+    sha256 = $taskAssets.standalone.sha256
+    sizeBytes = $taskAssets.standalone.sizeBytes
+    distributions = $taskAssets
     minAntigravityVersion = '2.32.0'
     releaseNotes = "Gravity Steward ${taskVersion}: Codex-powered tool approvals for Antigravity on Windows."
 } | ConvertTo-Json -Depth 8 | Set-Utf8NoBom -LiteralPath $taskStagedManifest -Encoding utf8
 
 $taskStagedBuildInfo = Join-Path $taskStage 'release-build-info.json'
-@{
-    rootDirectory = $taskPrefix.TrimEnd('/')
-    assetName = $taskZipName
-    zipSizeBytes = $taskZipSize
-    zipSha256 = $taskZipHash
-    unpackedSizeBytes = $taskUnpackedBytes
-    fileCount = $taskTree.Count
-    dotnetRuntimeVersion = $taskRuntime.version
-    dotnetRuntimeArchiveSha256 = $taskRuntime.sha256
-    guardianHostSha256 = $taskFileHashes[$taskNativeExe]
-    files = $taskTree
-} | ConvertTo-Json -Depth 8 | Set-Utf8NoBom -LiteralPath $taskStagedBuildInfo -Encoding utf8
+$taskBuildInfo = $taskStandalone.Clone()
+$taskBuildInfo.distributions = $taskBuilds
+$taskBuildInfo | ConvertTo-Json -Depth 8 | Set-Utf8NoBom -LiteralPath $taskStagedBuildInfo -Encoding utf8
 
 $taskArtifacts = Join-Path $taskRoot 'artifacts'
 $taskChecksumsPath = Join-Path $taskArtifacts 'checksums.sha256'
@@ -197,7 +232,9 @@ $taskManifestPath = Join-Path $taskArtifacts 'release-manifest.json'
 $taskBuildInfoPath = Join-Path $taskArtifacts 'release-build-info.json'
 $taskPublishLock = [IO.File]::Open((Join-Path $taskArtifacts '.package.lock'), [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::Write, [IO.FileShare]::None)
 try {
-    [IO.File]::Move($taskStagedZip, $taskZip, $true)
+    foreach ($build in $taskBuilds.Values) {
+        [IO.File]::Move((Join-Path $taskStage $build.assetName), (Join-Path $taskArtifacts $build.assetName), $true)
+    }
     [IO.File]::Move($taskStagedChecksums, $taskChecksumsPath, $true)
     [IO.File]::Move($taskStagedBuildInfo, $taskBuildInfoPath, $true)
     [IO.File]::Move($taskStagedManifest, $taskManifestPath, $true)
@@ -205,12 +242,18 @@ try {
     $taskPublishLock.Dispose()
 }
 
+if ([IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($taskStage)) -eq (Join-Path $taskArtifacts 'releases') -and
+    (Split-Path $taskStage -Leaf) -match '^stage-[a-f0-9]{32}$') {
+    Remove-Item -LiteralPath $taskStage -Recurse -Force
+}
+
 @{
-    package = $taskZip
+    package = Join-Path $taskArtifacts $taskStandalone.assetName
+    litePackage = Join-Path $taskArtifacts $taskLite.assetName
     manifest = $taskManifestPath
     checksums = $taskChecksumsPath
     buildInfo = $taskBuildInfoPath
-    sha256 = $taskZipHash
-    files = $taskFiles.Count
-    bytes = $taskZipSize
+    sha256 = $taskStandalone.zipSha256
+    files = $taskStandalone.fileCount
+    bytes = $taskStandalone.zipSizeBytes
 } | ConvertTo-Json

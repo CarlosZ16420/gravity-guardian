@@ -8,6 +8,14 @@
   "protocol": "ag-guardian-v3",
   "model": "codex-auto-review",
   "effort": "low",
+  "releaseOptions": {
+    "OPT_LEVEL": "2",
+    "LTO": "thin",
+    "CODEGEN_UNITS": "1",
+    "DEBUG": "0",
+    "STRIP": "symbols",
+    "PANIC": "unwind"
+  },
   "license": "Apache-2.0; see bundled upstream LICENSE and NOTICE",
   "bootstrapSource": "codex-rs/thread-manager-sample/src/main.rs at the pinned commit"
 }

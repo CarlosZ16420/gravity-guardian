@@ -41,7 +41,8 @@ bool ComputeFileSha256Hex(const std::wstring& filePath, std::wstring& outHex, st
 
 UpdateConfig LoadUpdateConfig(const std::wstring& path);
 
-UpdateCheckResult CheckForUpdate(const UpdateConfig& config, const std::wstring& currentVersion);
+UpdateCheckResult CheckForUpdate(const UpdateConfig& config, const std::wstring& currentVersion,
+                                 const std::wstring& distribution = L"standalone");
 
 bool DownloadAndVerifyUpdate(
     const UpdateConfig& config,

@@ -88,6 +88,14 @@ public static class Program
             }
             settings.Validate(config);
             failureSettings=settings;
+            if (command == "check-guardian")
+            {
+                await using var reviewer = new NativeGuardianReviewer(settings, new Policy(settings.PolicyDirectory));
+                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+                await reviewer.CheckHandshakeAsync(timeout.Token);
+                Console.WriteLine("{\"ok\":true}");
+                return 0;
+            }
             if (command == "chat")
             {
                 using var ct = new CancellationTokenSource(TimeSpan.FromSeconds(8));

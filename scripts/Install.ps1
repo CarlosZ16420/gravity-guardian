@@ -23,11 +23,13 @@ $taskBundle = Join-Path $taskRoot 'artifacts/codex-approval'
 if (!(Test-Path -LiteralPath (Join-Path $taskBundle 'scripts/ag-approval.dll')) -and (Test-Path -LiteralPath (Join-Path $taskRoot 'scripts/ag-approval.dll'))) {
     $taskBundle = $taskRoot
 }
-$taskBundleRuntime = Join-Path $taskBundle 'runtime/dotnet.exe'
+$taskDistribution = Get-ApprovalDistribution $taskBundle
 $taskBundleAssembly = Join-Path $taskBundle 'scripts/ag-approval.dll'
 
 $taskConfigRoot = [IO.Path]::GetFullPath((Join-Path $GeminiRoot 'config'))
 $taskPlugin = [IO.Path]::GetFullPath((Join-Path $taskConfigRoot 'plugins/codex-approval'))
+$taskBundleRuntime = Resolve-ApprovalRuntime $taskBundle -Installed:($taskBundle -eq $taskPlugin)
+$taskRuntime = if ($taskDistribution -eq 'lite') { $taskBundleRuntime } else { Join-Path $taskPlugin 'runtime/dotnet.exe' }
 if ($taskPlugin -ne [IO.Path]::GetFullPath((Join-Path $taskConfigRoot 'plugins/codex-approval'))) { throw 'Invalid plugin target' }
 $taskAppConfig = Join-Path $taskConfigRoot 'config.json'
 
@@ -69,6 +71,7 @@ $taskOldSidecar = if ($taskAppState.sidecars) { $taskAppState.sidecars[$taskSide
 $taskPlan = @{
     pluginDirectory = $taskPlugin; applicationConfig = $taskAppConfig; dataDirectory = $DataDirectory
     antigravityPath = $AntigravityPath; proxy = $Proxy
+    distribution = $taskDistribution; dotnetPath = $taskRuntime
     model = 'codex-auto-review'; effort = 'low'; reviewMode = $ReviewMode; reviewRouting = $ReviewRouting; reviewerBackend = 'NativeGuardian'
     commitMethod = $(if ($UseVerifiedCopyCommit) { 'verified-copy' } else { 'directory-move' })
     changes = @('Install official plugin folder', 'Enable only codex-approval/reviewer sidecar', 'Keep Antigravity network and proxy untouched')
@@ -97,6 +100,7 @@ Copy-Item -LiteralPath $taskAppConfig -Destination (Join-Path $taskBackup 'confi
 
 $taskStage = Join-Path $taskData ('staging-' + [Guid]::NewGuid().ToString('N'))
 Copy-Item -LiteralPath $taskBundle -Destination $taskStage -Recurse
+Set-ApprovalHookRuntime -Bundle $taskStage -Runtime $taskRuntime
 $taskInstalledPricing = Join-Path $taskPlugin 'pricing.json'
 if ($taskOldApproval -and (Test-Path -LiteralPath $taskInstalledPricing -PathType Leaf)) {
     Copy-Item -LiteralPath $taskInstalledPricing -Destination (Join-Path $taskStage 'pricing.json') -Force
@@ -132,10 +136,9 @@ $taskApproval | ConvertTo-Json -Depth 8 | Set-Utf8NoBom -LiteralPath (Join-Path 
 
 $taskSidecar = Join-Path $taskStage 'sidecars/reviewer'
 New-Item -ItemType Directory -Path $taskSidecar -Force | Out-Null
-@{command = (Join-Path $taskPlugin 'runtime/dotnet.exe'); args = @((Join-Path $taskPlugin 'scripts/ag-approval.dll'), 'supervise', '--config', (Join-Path $taskPlugin 'approval.json')); restart_policy = 'on-failure'; display_name = 'Codex Approval'; description = 'Native codex-auto-review permission reviewer'} |
+@{command = $taskRuntime; args = @((Join-Path $taskPlugin 'scripts/ag-approval.dll'), 'supervise', '--config', (Join-Path $taskPlugin 'approval.json')); restart_policy = 'on-failure'; display_name = 'Codex Approval'; description = 'Native codex-auto-review permission reviewer'} |
     ConvertTo-Json -Depth 8 | Set-Utf8NoBom -LiteralPath (Join-Path $taskSidecar 'sidecar.json') -Encoding utf8
 
-$taskRuntime = Join-Path $taskPlugin 'runtime/dotnet.exe'
 $taskAssembly = Join-Path $taskPlugin 'scripts/ag-approval.dll'
 $taskReviewConfig = Join-Path $taskPlugin 'approval.json'
 
@@ -143,14 +146,15 @@ $taskHadPrevious = Test-Path -LiteralPath $taskPlugin
 if ($taskHadPrevious) {
     $taskExisting = Get-Content -Encoding UTF8 -LiteralPath (Join-Path $taskPlugin 'plugin.json') -Raw | ConvertFrom-Json
     if ($taskExisting.name -ne 'codex-approval') { throw 'Refusing to replace a different plugin' }
+    $taskOldRuntime = Resolve-ApprovalRuntime $taskPlugin -Installed
     [IO.File]::WriteAllText((Join-Path $taskData 'uninstalled'), 'upgrade in progress')
     Start-Sleep -Milliseconds 2200
     $taskOldHostId = $null
     $taskPrevError = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
     try {
-        $taskOldStatus = & $taskRuntime $taskAssembly status --config $taskReviewConfig 2>$null
+        $taskOldStatus = & $taskOldRuntime $taskAssembly status --config $taskReviewConfig 2>$null
         if ($LASTEXITCODE -eq 0 -and $taskOldStatus) { $taskOldHostId = (($taskOldStatus -join [Environment]::NewLine) | ConvertFrom-Json).pid }
-        & $taskRuntime $taskAssembly stop --config $taskReviewConfig 2>$null | Out-Null
+        & $taskOldRuntime $taskAssembly stop --config $taskReviewConfig 2>$null | Out-Null
     } catch {} finally { $ErrorActionPreference = $taskPrevError }
     if ($taskOldHostId) {
         $taskOldProcess = $null
@@ -223,6 +227,7 @@ if ($ReviewMode -eq 'Codex') { $taskModeChanges = @(Set-CodexReviewMode -ConfigR
 $taskManifest = @{
     installedAt = [DateTime]::UtcNow.ToString('O'); pluginDirectory = $taskPlugin; configRoot = $taskConfigRoot
     geminiRoot = [IO.Path]::GetFullPath($GeminiRoot); antigravityPath = $taskResolvedAntigravity
+    distribution = $taskDistribution; dotnetPath = $taskRuntime
     backupDirectory = $taskRestoreBackup; latestUpgradeBackup = $taskBackup
     hadPreviousPlugin = $taskRestorePreviousPlugin; oldSidecar = $taskRestoreSidecar; sidecarId = $taskSidecarId
     reviewMode = $ReviewMode; reviewModeChanges = @($taskModeChanges)
