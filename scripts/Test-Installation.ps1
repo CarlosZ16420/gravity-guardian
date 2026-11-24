@@ -31,7 +31,7 @@ $taskReview = Get-Content -Encoding UTF8 -LiteralPath (Join-Path $taskPlugin 'ap
 if ($taskReview.model -ne 'codex-auto-review' -or !$taskReview.enableNativeRouting -or !(Test-Path -LiteralPath $taskReview.policyDirectory)) { throw 'Installed runtime configuration invalid' }
 if ($taskReview.reviewerBackend -ne 'NativeGuardian' -or !$taskReview.enableNativeState -or !(Test-Path -LiteralPath $taskReview.guardianPath)) { throw 'Native Guardian was not installed as the selected backend' }
 if (![string]::IsNullOrEmpty($taskReview.proxy)) { throw 'Default open-source proxy must be empty' }
-foreach ($expectedAsset in @('pricing.json', 'update-config.json', 'app/CodexApprovalPanel.exe', 'scripts/Apply-Update.ps1')) {
+foreach ($expectedAsset in @('pricing.json', 'update-config.json', 'app/CodexApprovalPanel.exe', 'scripts/Apply-Update.ps1', 'rules/project-authorizations.md')) {
     if (!(Test-Path -LiteralPath (Join-Path $taskPlugin $expectedAsset) -PathType Leaf)) { throw ('Missing expected panel/update asset: ' + $expectedAsset) }
 }
 $taskInstalledHooks = Get-Content -Encoding UTF8 -LiteralPath (Join-Path $taskPlugin 'hooks.json') -Raw | ConvertFrom-Json
@@ -55,6 +55,11 @@ $taskCustomConfig | ConvertTo-Json -Depth 20 | Set-Utf8NoBom -LiteralPath (Join-
 $taskGuardDirectory = Join-Path $taskData 'denial-guard'
 New-Item -ItemType Directory -Path $taskGuardDirectory -Force | Out-Null
 [IO.File]::WriteAllText((Join-Path $taskGuardDirectory 'test-state.txt'), 'persistent protection sentinel')
+$taskGrantDirectory = Join-Path $taskData 'project-authorizations'
+$taskGrantFile = Join-Path $taskGrantDirectory (('a' * 64) + '.json')
+$taskGrantFixture = '{"grants":{"0123456789ab":"fixture scope"},"handled":{}}'
+New-Item -ItemType Directory -Path $taskGrantDirectory -Force | Out-Null
+[IO.File]::WriteAllText($taskGrantFile, $taskGrantFixture)
 
 & (Join-Path $PSScriptRoot 'Install.ps1') -GeminiRoot $taskGemini -DataDirectory $taskData @taskExecutables -ReviewRouting ModelOnly -ReviewerBackend Cli -UseVerifiedCopyCommit
 $taskUpgradeManifest = Get-Content -Encoding UTF8 -LiteralPath (Join-Path $taskData 'installation.json') -Raw | ConvertFrom-Json
@@ -62,6 +67,7 @@ if ((Get-Content -Encoding UTF8 -LiteralPath (Join-Path $taskPlugin 'approval.js
 if ((Get-Content -Encoding UTF8 -LiteralPath (Join-Path $taskPlugin 'approval.json') -Raw | ConvertFrom-Json).reviewerBackend -ne 'Cli') { throw 'Explicit CLI fallback was not selected' }
 if ((Get-Content -Encoding UTF8 -LiteralPath (Join-Path $taskPlugin 'approval.json') -Raw | ConvertFrom-Json).futureCompatibleSetting -ne 'preserved-on-upgrade') { throw 'Upgrade discarded an unknown compatible setting' }
 if ([IO.File]::ReadAllText((Join-Path $taskGuardDirectory 'test-state.txt')) -ne 'persistent protection sentinel') { throw 'Upgrade reset persistent protection state' }
+if ([IO.File]::ReadAllText($taskGrantFile) -cne $taskGrantFixture) { throw 'Upgrade changed stored project authorizations' }
 if ($taskUpgradeManifest.backupDirectory -ne $taskFirstManifest.backupDirectory) { throw 'Upgrade lost the original restoration backup' }
 if (@($taskUpgradeManifest.reviewModeChanges).Count -ne 3) { throw 'Upgrade lost native review-mode restoration records' }
 
@@ -92,6 +98,7 @@ if (!(Test-Path -LiteralPath $taskPersonalFile) -or (Test-Path -LiteralPath (Joi
 Move-Item -LiteralPath $taskPersonalFile -Destination $taskFixture
 & $taskInstalledUninstaller -DataDirectory $taskData -PurgeData -WhatIf
 if (!(Test-Path -LiteralPath $taskLog)) { throw 'Uninstall preview deleted a log' }
+if (!(Test-Path -LiteralPath $taskGrantFile)) { throw 'Uninstall preview deleted project authorizations' }
 if (!(Get-Process -Name dotnet -ErrorAction SilentlyContinue | Where-Object { $_.Path -ieq $taskHostPath })) {
     throw 'Approval host was not running before uninstall'
 }
