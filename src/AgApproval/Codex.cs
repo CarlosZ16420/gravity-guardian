@@ -10,190 +10,6 @@ public interface IReviewer
     Task InvalidateAsync(ReviewInput input,CancellationToken ct)=>Task.CompletedTask;
 }
 
-public sealed class CodexReviewer : IReviewer
-{
-    private readonly Settings settings;
-    private readonly Policy policy;
-    private readonly ReviewerSessions sessions;
-    private readonly bool forceIsolated;
-    private readonly SemaphoreSlim invocationLock=new(1);
-    public CodexReviewer(Settings settings, Policy policy, bool forceIsolated = false) { this.settings = settings; this.policy = policy; this.forceIsolated = forceIsolated; sessions=new(settings); }
-
-    public async Task<string> ReviewAsync(ReviewInput input, CancellationToken ct)
-    {
-        await invocationLock.WaitAsync(ct);
-        ReviewerInvocation? invocation=null;
-        try
-        {
-            if(!forceIsolated&&settings.EnableReviewerSessions&&Json.Text(JsonNode.Parse(input.Prompt),"schema_version")=="2.0")
-            {
-                invocation=sessions.Prepare(input);
-                var reconstructed=ReviewerSessions.Reconstruct(JsonNode.Parse(invocation.Prompt)!.AsObject(),invocation.State.Evidence);
-                if(!JsonNode.DeepEquals(reconstructed,invocation.Snapshot))throw new InvalidDataException("Reviewer transport did not preserve the review input");
-                if(settings.DetailedLogsActive)
-                    await Audit.AppendAsync(settings,new{at=DateTimeOffset.UtcNow,@event="review_transport",requestId=input.Id,conversationId=input.Conversation,
-                        version=ReviewerSessions.Version,mode=invocation.Mode,sequence=invocation.Sequence,expectedThreadId=invocation.ExpectedThreadId,
-                        activeEvidence=invocation.ActiveEvidence,addedEvidence=invocation.AddedEvidence,wire=JsonNode.Parse(invocation.Prompt)},ct);
-            }
-            var result=await RunAsync(input,invocation,ct);
-            if(invocation!=null&&(invocation.ThreadIdentityConflict||!Guid.TryParse(invocation.ReportedThreadId,out _)||invocation.ExpectedThreadId!=null&&invocation.ExpectedThreadId!=invocation.ReportedThreadId))
-                throw new InvalidDataException("Reviewer returned an unexpected session identity");
-            _=policy.Apply(result,input.Id,input.Hash);
-            if(invocation!=null)sessions.Commit(invocation,result);
-            return result;
-        }
-        catch{if(invocation!=null)sessions.Retire(invocation.State);throw;}
-        finally{invocationLock.Release();}
-    }
-
-    private async Task<string> RunAsync(ReviewInput input,ReviewerInvocation? invocation, CancellationToken ct)
-    {
-        var watch = Stopwatch.StartNew();
-        long? processStartedMs = null, inputSentMs = null;
-        string completionSource = "none";
-        bool terminatedAfterCompletedTurn = false;
-        var parent = Path.GetFullPath(Path.Combine(settings.DataDirectory, "runtime"));
-        var run = invocation?.State.Directory??Path.Combine(parent, Guid.NewGuid().ToString("N"));
-        var document=JsonNode.Parse(invocation?.Prompt??input.Prompt)!.AsObject();
-        var currentReview=invocation==null?document:document["current_review"]!.AsObject();
-        // The authoritative copy is already in model_instructions_file. Keep the original
-        // document for bindings, audit, and session reconstruction.
-        if(Json.Text(currentReview,"schema_version")=="2.0"&&currentReview["adapter"] is JsonObject adapter)
-            adapter.Remove("instructions");
-        var prompt=document.ToJsonString(Json.PromptOptions);
-        Directory.CreateDirectory(run);
-        var instructionPath = Path.Combine(run, "reviewer.md");
-        var schemaPath = Path.Combine(run, "output.schema.json");
-        var outputPath = Path.Combine(run, "result.json");
-        if(File.Exists(outputPath))File.Delete(outputPath);
-        // Codex exec's strict response-format transport requires every property to be required.
-        // Preserve the upstream decision fields and policy; only expand the low-risk shorthand on the wire.
-        var transportSchema = policy.Schema.DeepClone();
-        transportSchema["required"] = new JsonArray("risk_level", "user_authorization", "outcome", "rationale");
-        var transportNote = "\n\nCLI transport requirement: include all four assessment fields (risk_level, user_authorization, outcome, rationale) in every final JSON response, including low-risk allows. This only expands the low-risk shorthand; the security policy and allow/deny rules are unchanged.\n";
-        var legacyReplay=Json.Text(JsonNode.Parse(input.Prompt),"schema_version")=="1.0";
-        await File.WriteAllTextAsync(instructionPath, policy.Instructions + transportNote + (legacyReplay?"":"\n\nIntegration adapter ("+ReviewAdapter.Version+"): "+ReviewAdapter.Instructions)+(invocation==null?"":"\n\n"+ReviewerSessions.Instructions), ct);
-        await File.WriteAllTextAsync(schemaPath, transportSchema.ToJsonString(), ct);
-        var start = new ProcessStartInfo(settings.CodexPath) {
-            UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true,
-            RedirectStandardOutput = true, RedirectStandardError = true,
-            StandardInputEncoding = new UTF8Encoding(false), WorkingDirectory = run
-        };
-        foreach (var arg in settings.CodexPrefixArguments) start.ArgumentList.Add(arg);
-        foreach (var arg in new[] { "exec", "--ignore-user-config", "--ignore-rules", "--skip-git-repo-check",
-            "--sandbox", "read-only", "--model", settings.Model, "--output-schema", schemaPath,
-            "--output-last-message", outputPath, "--json", "--color", "never" }) start.ArgumentList.Add(arg);
-        if(invocation==null)start.ArgumentList.Add("--ephemeral");
-        void Config(string key, object value) { start.ArgumentList.Add("-c"); start.ArgumentList.Add(key + "=" + Json.Encode(value)); }
-        Config("model_reasoning_effort", settings.Effort);
-        Config("model_instructions_file", instructionPath);
-        Config("developer_instructions", "");
-        Config("approval_policy", "never");
-        Config("project_doc_max_bytes", 0);
-        Config("web_search", "disabled");
-        Config("notify", Array.Empty<string>());
-        Config("shell_environment_policy.inherit", "core");
-        Config("shell_environment_policy.ignore_default_excludes", false);
-        foreach (var feature in new[] { "apps", "plugins", "hooks", "memories", "multi_agent", "multi_agent_v2", "computer_use", "browser_use",
-            "in_app_browser", "image_generation", "code_mode", "code_mode_host", "workspace_dependencies", "sleep_tool", "skill_search", "shell_snapshot" })
-            Config("features." + feature, false);
-        Config("features.skip_host_skill_discovery", true);
-        // No user/project execpolicy is loaded; investigation remains inside Codex's read-only sandbox.
-        Config("sandbox_workspace_write.network_access", false);
-        if(invocation?.ExpectedThreadId!=null){start.ArgumentList.Add("resume");start.ArgumentList.Add(invocation.ExpectedThreadId);}
-        start.ArgumentList.Add("-");
-        start.Environment["CODEX_HOME"] = settings.CodexHome;
-        if (!string.IsNullOrWhiteSpace(settings.Proxy))
-        { start.Environment["HTTP_PROXY"] = settings.Proxy; start.Environment["HTTPS_PROXY"] = settings.Proxy; }
-        using var process = new Process { StartInfo = start };
-        var usage = new CliUsage();
-        var errors = new BoundedTextCapture();
-        Task? stdout = null, stderr = null;
-        bool started = false;
-        try
-        {
-            if (!process.Start()) throw new InvalidOperationException("Cannot start Codex");
-            started = true;
-            processStartedMs = watch.ElapsedMilliseconds;
-            stdout = usage.ReadAsync(process.StandardOutput);
-            stderr = errors.ReadAsync(process.StandardError);
-            await process.StandardInput.WriteAsync(prompt.AsMemory(), ct);
-            process.StandardInput.Close();
-            inputSentMs = watch.ElapsedMilliseconds;
-            var exit = process.WaitForExitAsync(CancellationToken.None);
-            await Task.WhenAny(exit, usage.Completion).WaitAsync(ct);
-            if (usage.Completion.IsCompletedSuccessfully && !await usage.Completion)
-                throw new InvalidOperationException("Codex reported a failed turn; no approval was applied. "+usage.TerminalError);
-            if (usage.Completion.IsCompletedSuccessfully && await usage.Completion && usage.CompletedAssessment != null)
-            {
-                // A successful terminal event plus its final agent message is the review result.
-                // CLI telemetry/shutdown may outlive the completed turn. Do not discard a valid
-                // assessment merely because that cleanup has not exited yet.
-                await Task.WhenAny(exit, Task.Delay(TimeSpan.FromSeconds(2), ct)).WaitAsync(ct);
-                ct.ThrowIfCancellationRequested();
-                if (usage.HasTurnFailure || (process.HasExited && process.ExitCode != 0))
-                    throw new InvalidOperationException("Codex failed after reporting a completed review; no approval was applied");
-                completionSource = "completed_turn_agent_message";
-                terminatedAfterCompletedTurn = !process.HasExited;
-                return usage.CompletedAssessment;
-            }
-            await exit.WaitAsync(ct);
-            await Task.WhenAll(stdout, stderr);
-            if (process.ExitCode != 0) throw new InvalidOperationException($"Codex review process exited with code {process.ExitCode}; no approval was applied");
-            if (usage.HasTurnFailure) throw new InvalidOperationException("Codex reported a failed turn; no approval was applied");
-            if (!File.Exists(outputPath) || new FileInfo(outputPath).Length > 16384)
-                throw new InvalidDataException("Codex final assessment is missing or too large");
-            completionSource = "successful_exit_output_file";
-            return await File.ReadAllTextAsync(outputPath, ct);
-        }
-        finally
-        {
-            try { if (!process.HasExited) { process.Kill(entireProcessTree: true); await process.WaitForExitAsync(CancellationToken.None); } }
-            catch (InvalidOperationException) { }
-            if (started)
-            {
-                // Drain after exit/kill too, so a reported usage event survives a later failure or timeout.
-                try { await Task.WhenAll(stdout!, stderr!); }
-                catch (Exception e) when (e is IOException or ObjectDisposedException) { }
-                var nativeUsage=usage.Snapshot();var billedUsage=(JsonObject)nativeUsage.DeepClone();
-                bool accountingValid=true;
-                if(invocation?.ExpectedThreadId!=null)
-                {
-                    try{billedUsage=CliUsage.SessionDelta(nativeUsage,invocation.State.NativeUsage??throw new InvalidDataException("Missing session usage baseline"));}
-                    catch(Exception e)when(e is InvalidDataException or OverflowException)
-                    {
-                        accountingValid=false;billedUsage["status"]="invalid";billedUsage["source"]="codex_exec.turn.completed.cumulative_difference";billedUsage["accountingError"]=e.Message;
-                        foreach(var field in new[]{"inputTokens","cachedInputTokens","outputTokens","reasoningOutputTokens","totalTokens"})billedUsage[field]=null;
-                    }
-                }
-                if(invocation!=null)
-                {
-                    var snapshot=nativeUsage;invocation.ReportedThreadId=usage.ThreadId;invocation.NativeUsage=nativeUsage;
-                    invocation.ThreadIdentityConflict=usage.ThreadIdConflict;
-                    invocation.LastInputTokens=billedUsage["inputTokens"]?.GetValue<long>()??long.MaxValue;
-                    invocation.Reusable=completionSource!="none"&&!terminatedAfterCompletedTurn&&!usage.HasTurnFailure&&!usage.ThreadIdConflict&&
-                        accountingValid&&process.HasExited&&process.ExitCode==0&&Json.Text(snapshot,"status")=="reported"&&snapshot["reportedTurns"]!.GetValue<int>()==1;
-                }
-                try { await Audit.AppendAsync(settings, new { at = DateTimeOffset.UtcNow,
-                    @event = "review_usage", requestId = input.Id, conversationId = input.Conversation,
-                    tool = input.Tool, model = settings.Model, effort = settings.Effort,
-                    processExitCode = process.HasExited ? (int?)process.ExitCode : null, usage = billedUsage,cliCumulativeUsage=invocation==null?null:nativeUsage,
-                    modelCallEvidence=usage.HasStartedTurn||nativeUsage["observedEvents"]!.GetValue<int>()>0||usage.CompletedAssessment!=null,
-                    process = new { processStartedMs, inputSentMs, elapsedMs = watch.ElapsedMilliseconds,
-                        promptBytes = Encoding.UTF8.GetByteCount(prompt), completionSource, terminatedAfterCompletedTurn,
-                        reviewerThreadId=usage.ThreadId,transportMode=invocation?.Mode??"isolated",transportSequence=invocation?.Sequence,
-                        stream = usage.Diagnostics(), stderr = errors.Snapshot() } }, CancellationToken.None); }
-                catch (Exception e) when (e is IOException or UnauthorizedAccessException)
-                { Console.Error.WriteLine("Cannot persist CLI token usage log"); }
-            }
-            // Only this invocation's generated directory, after verifying containment.
-            if (run.StartsWith(parent + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
-                try { Directory.Delete(run, true); } catch (IOException) { } catch (UnauthorizedAccessException) { }
-        }
-    }
-
-}
-
 public sealed class ReviewGate(Settings settings, Policy policy, IReviewer reviewer)
 {
     private readonly SemaphoreSlim serial = new(1);
@@ -225,7 +41,7 @@ public sealed class ReviewGate(Settings settings, Policy policy, IReviewer revie
             await Audit.TryAppendAsync(settings, receivedEvent, deadline.Token);
             try
             {
-                input = await ReviewContext.BuildAsync(payload, settings, deadline.Token,id,policy.HashFor(settings),includeNativeState:false);
+                input = await ReviewContext.BuildAsync(payload, settings, deadline.Token,id,policy.NativeHash,includeNativeState:false);
                 contextReadyMs = watch.ElapsedMilliseconds;
                 id = input.Id; actionHash = input.Hash;
                 phase = "routing";
@@ -252,16 +68,16 @@ public sealed class ReviewGate(Settings settings, Policy policy, IReviewer revie
                 var queueWatch=Stopwatch.StartNew();
                 if(waited)await serial.WaitAsync(deadline.Token);
                 acquired=true;queueMs=queueWatch.ElapsedMilliseconds;
-                if(settings.ReviewerBackend=="NativeGuardian"&&settings.EnableNativeState)
+                if(settings.EnableNativeState)
                 {
-                    var bound=await ReviewContext.BuildAsync(payload,settings,deadline.Token,id,policy.HashFor(settings));
+                    var bound=await ReviewContext.BuildAsync(payload,settings,deadline.Token,id,policy.NativeHash);
                     if(bound.ActionFingerprint!=input!.ActionFingerprint||bound.MaterialRevision!=input.MaterialRevision||bound.AuthorizationRevision!=input.AuthorizationRevision)
                         throw new InvalidDataException("Evidence changed before the native state was bound; submit a current request");
                     input=bound;
                 }
                 else if(waited)
                 {
-                    var fresh=await ReviewContext.BuildAsync(payload,settings,deadline.Token,id,policy.HashFor(settings));
+                    var fresh=await ReviewContext.BuildAsync(payload,settings,deadline.Token,id,policy.NativeHash);
                     if(fresh.ActionFingerprint!=input!.ActionFingerprint||fresh.MaterialRevision!=input.MaterialRevision||fresh.AuthorizationRevision!=input.AuthorizationRevision)
                         throw new InvalidDataException("Evidence changed while this request was queued; submit a current request");
                     input=fresh;
@@ -270,13 +86,13 @@ public sealed class ReviewGate(Settings settings, Policy policy, IReviewer revie
             else queueMs=0;
             phase="audit";
             if(input!=null && settings.DetailedLogsActive)
-                await Audit.TryAppendAsync(settings,new { at=DateTimeOffset.UtcNow, @event="review_context",requestId=id,actionHash,model=route.Route=="model"?settings.Model:null,effort=route.Route=="model"?settings.Effort:null,policyHash=policy.HashFor(settings),adapterInstructionHash=ReviewAdapter.Hash,reviewInput=JsonNode.Parse(input.Prompt),sourceUserRecords=input.SourceUserRecords },deadline.Token);
+                await Audit.TryAppendAsync(settings,new { at=DateTimeOffset.UtcNow, @event="review_context",requestId=id,actionHash,model=route.Route=="model"?settings.Model:null,effort=route.Route=="model"?settings.Effort:null,policyHash=policy.NativeHash,adapterInstructionHash=ReviewAdapter.Hash,reviewInput=JsonNode.Parse(input.Prompt),sourceUserRecords=input.SourceUserRecords },deadline.Token);
             if(route.Route=="native") result=GateResponse.Delegate(id,actionHash,route);
             else
             {
                 var modelInput=input??throw new InvalidDataException("Missing review input");
                 phase="denial_guard";
-                guard=await DenialGuard.AcquireAsync(settings,modelInput,policy.HashFor(settings),deadline.Token);
+                guard=await DenialGuard.AcquireAsync(settings,modelInput,policy.NativeHash,deadline.Token);
                 guardState=guard.Snapshot();
                 if(guard.IsBlocked(modelInput))result=GateResponse.Repeated(id,actionHash,guard.RecordedReason(modelInput)??"Recorded policy denial");
                 else
@@ -284,16 +100,7 @@ public sealed class ReviewGate(Settings settings, Policy policy, IReviewer revie
                     await guard.BeginAsync(modelInput,deadline.Token);
                     phase = "reviewer";reviewerStartedMs=watch.ElapsedMilliseconds;
                     modelInvoked=true;
-                    try
-                    {
-                        assessmentText = await reviewer.ReviewAsync(modelInput with{ReviewBudgetMs=Math.Max(1,settings.ReviewTimeoutSeconds*1000-(int)watch.ElapsedMilliseconds)}, deadline.Token);
-                    }
-                    catch(NativeReviewFailure nrf) when (IsNativeSectionLimitFailure(nrf) && File.Exists(settings.CodexPath))
-                    {
-                        var cliInput = ReviewContext.PrepareCliFallback(modelInput, settings);
-                        assessmentText = await new CodexReviewer(settings, policy, forceIsolated: true)
-                            .ReviewAsync(cliInput with{ReviewBudgetMs=Math.Max(1,settings.ReviewTimeoutSeconds*1000-(int)watch.ElapsedMilliseconds)}, deadline.Token);
-                    }
+                    assessmentText = await reviewer.ReviewAsync(modelInput with{ReviewBudgetMs=Math.Max(1,settings.ReviewTimeoutSeconds*1000-(int)watch.ElapsedMilliseconds)}, deadline.Token);
                     assessmentReadyMs = watch.ElapsedMilliseconds;reviewerMs=assessmentReadyMs-reviewerStartedMs;
                     phase = "assessment";
                     result = policy.Apply(assessmentText, id, actionHash);policyResult=result;
@@ -316,18 +123,19 @@ public sealed class ReviewGate(Settings settings, Policy policy, IReviewer revie
                 _=>phase switch {"reviewer" when e is InvalidDataException=>"adapter_incompatible","reviewer"=>"reviewer_unavailable",
                     "assessment"=>"assessment_invalid","queue" when acquired=>"action_invalidated","denial_guard"=>"audit_failed",_=>"context_invalid"}
             };
-            if(policyResult?.Decision!="deny"&&IsOversizedSingleRequest(e))
+            if(policyResult?.Decision!="deny"&&IsOversizedSingleRequest(e,input?.Tool??Json.Text(payload["toolCall"],"name")))
                 result=GateResponse.OversizedForAgentRetry(id,actionHash,e.Message);
-            else
-                result=policyResult?.Decision=="deny"?policyResult:code is "action_invalidated" or "action_mismatch" or "adapter_incompatible" or "context_invalid" or
-                    "state_not_ready" or "upstream_policy_blocked" or "review_cancelled" or "review_timeout" or "audit_failed"
-                    ?GateResponse.Failure(id,actionHash,e.Message,code)
-                    :GateResponse.NeedsHuman(id,actionHash,e.Message,code);
             // Antigravity applies its own Always Allow, Ask and Deny rules after
             // this opt-in handoff. A stored Guardian denial never reaches this branch.
-            if(input!=null&&phase is ("reviewer" or "assessment")&&policyResult==null&&(e is NativeReviewFailure||code=="assessment_invalid")&&
+            else if(input!=null&&phase is ("reviewer" or "assessment")&&policyResult==null&&(e is NativeReviewFailure||code=="assessment_invalid")&&
                 settings.EnableNativeAskHandoff&&code is ("upstream_unavailable" or "rate_limited" or "assessment_invalid" or "reviewer_unavailable"))
                 result=GateResponse.NativeAsk(id,actionHash,e.Message,code);
+            else
+                result=policyResult?.Decision=="deny"?policyResult:code is "action_invalidated" or "action_mismatch" or "adapter_incompatible" or "context_invalid" or
+                    "state_not_ready" or "upstream_policy_blocked" or "review_cancelled" or "review_timeout" or "audit_failed" or
+                    "native_action_budget_exceeded" or "review_input_budget_exceeded" or "review_authorization_budget_exceeded" or "native_frame_invalid"
+                    ?GateResponse.Failure(id,actionHash,e.Message,code)
+                    :GateResponse.NeedsHuman(id,actionHash,e.Message,code);
         }
         finally {
             if(guard!=null)
@@ -343,7 +151,7 @@ public sealed class ReviewGate(Settings settings, Policy policy, IReviewer revie
         reviewerMs??=reviewerStartedMs.HasValue?watch.ElapsedMilliseconds-reviewerStartedMs:null;
         // Record the candidate, then validate evidence after the final asynchronous write.
         var record = new { at = DateTimeOffset.UtcNow, @event="review_completed",requestId = id, actionHash, conversationId = input?.Conversation??Json.Text(payload,"conversationId"),
-            tool = input?.Tool??Json.Text(payload["toolCall"],"name"), stepIdx=payload["stepIdx"]?.DeepClone(),status = result.Status,decision=result.Decision,reason=result.Reason,reasonCode=result.ReasonCode,assessmentText,hookResponse=result.HookOutput, policyHash = policy.HashFor(settings), evidenceHash = input?.EvidenceHash,
+            tool = input?.Tool??Json.Text(payload["toolCall"],"name"), stepIdx=payload["stepIdx"]?.DeepClone(),status = result.Status,decision=result.Decision,reason=result.Reason,reasonCode=result.ReasonCode,assessmentText,hookResponse=result.HookOutput, policyHash = policy.NativeHash, evidenceHash = input?.EvidenceHash,
             actionFingerprint=input?.ActionFingerprint,authorizationRevision=input?.AuthorizationRevision,evidenceRevision=input?.EvidenceRevision,bindingHash=input?.BindingHash,
             materialRevision=input?.MaterialRevision,authorizationSources=input?.AuthorizationSources,nativeSegment=input?.NativeSegment,
             inputVersion=ReviewAdapter.InputVersion,adapterVersion=ReviewAdapter.Version,adapterInstructionHash=ReviewAdapter.Hash,transportVersion=ReviewAdapter.TransportVersion,
@@ -363,7 +171,7 @@ public sealed class ReviewGate(Settings settings, Policy policy, IReviewer revie
             {
                 if(input!=null)
                 {
-                    var final=await ReviewContext.BuildAsync(payload,settings,deadline.Token,id,policy.HashFor(settings),includeNativeState:route?.Route!="native");
+                    var final=await ReviewContext.BuildAsync(payload,settings,deadline.Token,id,policy.NativeHash,includeNativeState:route?.Route!="native");
                     if(final.ActionFingerprint!=input.ActionFingerprint||final.AuthorizationRevision!=input.AuthorizationRevision||final.MaterialRevision!=input.MaterialRevision)
                         throw new InvalidDataException("Review binding changed during audit commit");
                 }
@@ -385,16 +193,9 @@ public sealed class ReviewGate(Settings settings, Policy policy, IReviewer revie
             await InvalidateAsync(input);
         return result;
     }
-    private static bool IsNativeSectionLimitFailure(NativeReviewFailure failure)=>
-        failure.Code=="native_tool_call_limit"
-        ||failure.Message.Contains("evidence exceeds limits for section native_tool_call",StringComparison.Ordinal)
-        ||(failure.Code=="context_invalid"&&(Json.Text(failure.Details,"rawErrorKind") is string kind&&(kind.Contains("PromptBuild",StringComparison.OrdinalIgnoreCase)||kind.Contains("InputBudget",StringComparison.OrdinalIgnoreCase))));
-    private static bool IsOversizedSingleRequest(Exception e)=>
-        e.Message is "Input too large"
-            or "Complete action, user restrictions and rules exceed input budget"
-            or "Complete review input exceeds budget"
-            or "Native local history exceeds host budget; no history was silently dropped"
-        ||(e is NativeReviewFailure nrf&&IsNativeSectionLimitFailure(nrf));
+    private static bool IsOversizedSingleRequest(Exception e,string? tool)=>
+        tool is ("write_file" or "edit_file") &&
+        (e.Message=="Input too large" || e is NativeReviewFailure { Code: "native_action_budget_exceeded" or "native_tool_call_limit" });
     private static bool IsRecoverableTranscriptAnomaly(string message)=>
         message is "Unexplained transcript step rollback; current retry segment cannot be established"
             or "Overlapping native tool proposals cannot be uniquely bound"

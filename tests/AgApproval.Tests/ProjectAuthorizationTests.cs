@@ -61,7 +61,6 @@ internal static class ProjectAuthorizationTests
         var payload = new JsonObject { ["conversationId"]=reviewChat, ["transcriptPath"]=Transcript(reviewChat),
             ["workspacePaths"]=new JsonArray(workspace), ["stepIdx"]=1,
             ["toolCall"]=new JsonObject {["name"]="write_file",["args"]=new JsonObject {["Path"]=marker,["Content"]="fixture"}} };
-        settings.ReviewerBackend="NativeGuardian";
         var before = await ReviewContext.BuildAsync(payload, settings, default);
         var wire = GuardianFacts.Build(before, settings, 5000);
         Expect(wire["history"]!.AsArray().Any(row => Json.Text(row?["content"]?[0],"text")?.Contains("fixture。") == true), "Missing grant in native review input");

@@ -76,7 +76,7 @@ if (Test-Path -LiteralPath $taskApproval) {
 if ($PurgeData) {
     # DataDirectory can be custom. Require a known app directory layout before deleting its contents.
     $ownedDirectories = @('backups', 'denial-guard', 'guardian-workspace', 'logs', 'panel', 'project-authorizations', 'reviewer-sessions', 'runtime', 'service', 'updates')
-    $ownedFiles = @('installation.json', 'panel-settings.json', 'panel-settings.json.tmp', 'stats-cache.json', 'uninstalled')
+    $ownedFiles = @('approval-takeover-paused', 'installation.json', 'panel-settings.json', 'panel-settings.json.tmp', 'stats-cache.json', 'uninstalled')
     $taskDataEntries = @(Get-ChildItem -LiteralPath $taskData -Force)
     foreach ($item in $taskDataEntries) {
         $owned = if ($item.PSIsContainer) {

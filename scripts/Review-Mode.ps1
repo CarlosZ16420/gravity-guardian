@@ -131,3 +131,20 @@ function Restore-CodexReviewMode([string]$ConfigRoot,[object[]]$Changes=@()) {
         Move-Item -LiteralPath $taskTemporary -Destination $taskChange.path -Force
     }
 }
+function Update-ApprovalReviewerConfig {
+    param(
+        [System.Collections.IDictionary]$Config,
+        [string]$PluginDirectory
+    )
+    if (!$Config.Contains('enableNativeState') -or $Config['reviewerBackend'] -eq 'Cli') {
+        $Config['enableNativeState'] = $true
+    }
+    $Config['reviewerBackend'] = 'NativeGuardian'
+    foreach ($taskKey in @('codexPath', 'codexPrefixArguments', 'reviewerTransport', 'enableReviewerSessions',
+        'maxContextBytes', 'maxEvidenceBytes', 'maxEvidenceRecords', 'maxEvidenceContentBytes',
+        'maxReviewerSessionTurns', 'maxReviewerSessionBytes', 'maxReviewerSessionInputTokens')) {
+        $Config.Remove($taskKey)
+    }
+    $Config['policyDirectory'] = Join-Path $PluginDirectory 'policy/effective-codex'
+    $Config['guardianPath'] = Join-Path $PluginDirectory 'native/ag-guardian-host.exe'
+}

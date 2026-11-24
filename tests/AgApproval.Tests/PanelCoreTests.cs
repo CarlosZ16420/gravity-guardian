@@ -88,20 +88,6 @@ public static class PanelCoreTests
             return Task.CompletedTask;
         });
 
-        await test("EnvironmentDiscovery unwraps npm codex.cmd shim to native codex.exe", () =>
-        {
-            var npmRoot = Path.Combine(scratchRoot, "fake-npm");
-            var vendorExe = Path.Combine(npmRoot, "node_modules", "@openai", "codex", "node_modules", "@openai", "codex-win32-x64", "vendor", "x86_64-pc-windows-msvc", "bin", "codex.exe");
-            Directory.CreateDirectory(Path.GetDirectoryName(vendorExe)!);
-            File.WriteAllText(vendorExe, "MZ-stub");
-            var cmdShim = Path.Combine(npmRoot, "codex.cmd");
-            File.WriteAllText(cmdShim, "@ECHO off\r\nnode \"%~dp0\\node_modules\\@openai\\codex\\bin\\codex.js\" %*\r\n");
-
-            var resolved = EnvironmentDiscovery.ResolveCodexShim(cmdShim);
-            Check(string.Equals(resolved, Path.GetFullPath(vendorExe), StringComparison.OrdinalIgnoreCase), $"shim resolved to '{resolved}' instead of '{vendorExe}'");
-            return Task.CompletedTask;
-        });
-
         await test("usage stats distinguish zero-dispatch fallback from missing and reported use", () =>
         {
             var dataDir=Path.Combine(scratchRoot,"stats-fallback-dispatch");
@@ -134,7 +120,7 @@ public static class PanelCoreTests
             return Task.CompletedTask;
         });
 
-        await test("Settings.Load allows empty CodexPath for NativeGuardian while requiring it for Cli", () =>
+        await test("Settings.Load uses Guardian with current and historical CLI configurations", () =>
         {
             var cfgDir = Path.Combine(scratchRoot, "settings-codexpath");
             Directory.CreateDirectory(cfgDir);
@@ -157,14 +143,74 @@ public static class PanelCoreTests
             };
             File.WriteAllText(cfgPath, nativeCfg.ToJsonString());
             var loaded = Settings.Load(cfgPath);
-            Check(loaded.CodexPath == "", "NativeGuardian failed with empty CodexPath");
+            Check(loaded.GuardianPath == fakeGuardian, "Native configuration lost the selected Guardian");
+
+            nativeCfg["codexPath"] = Path.Combine(cfgDir, "removed-codex.exe");
+            File.WriteAllText(cfgPath, nativeCfg.ToJsonString());
+            Check(Settings.Load(cfgPath).GuardianPath == fakeGuardian, "Stale CLI path changed Guardian selection");
+
+            nativeCfg.Remove("reviewerBackend");
+            nativeCfg.Remove("codexPath");
+            nativeCfg.Remove("guardianPath");
+            var bundledGuardian = Path.Combine(cfgDir, "native", "ag-guardian-host.exe");
+            Directory.CreateDirectory(Path.GetDirectoryName(bundledGuardian)!);
+            File.Copy(fakeGuardian, bundledGuardian);
+            File.WriteAllText(cfgPath, nativeCfg.ToJsonString());
+            loaded = Settings.Load(cfgPath);
+            Check(loaded.GuardianPath == bundledGuardian,
+                "Legacy configuration did not select the bundled native backend");
 
             nativeCfg["reviewerBackend"] = "Cli";
+            nativeCfg["codexPath"] = Path.Combine(cfgDir, "removed-codex.exe");
+            nativeCfg["enableReviewerSessions"] = true;
             File.WriteAllText(cfgPath, nativeCfg.ToJsonString());
-            bool failed = false;
-            try { Settings.Load(cfgPath); } catch (InvalidDataException) { failed = true; }
-            Check(failed, "Cli backend unexpectedly accepted empty CodexPath");
+            loaded = Settings.Load(cfgPath);
+            Check(loaded.GuardianPath == bundledGuardian && loaded.CodexHome == baseSettings.CodexHome,
+                "Legacy CLI configuration blocked Guardian startup or erased the credential location");
             return Task.CompletedTask;
+        });
+
+        await test("takeover switch delegates new hooks immediately without a Guardian or approval host", async () =>
+        {
+            var dataDir = Path.Combine(scratchRoot, "takeover");
+            var configPath = Path.Combine(scratchRoot, "takeover-config.json");
+            var config = Json.Encode(new { dataDirectory = dataDir, guardianPath = Path.Combine(dataDir, "missing.exe") });
+            await File.WriteAllTextAsync(configPath, config);
+
+            async Task<JsonObject> RunHook(string command, string input, params string[] options)
+            {
+                var assembly = typeof(AgApproval.Program).Assembly.Location;
+                var start = new ProcessStartInfo(Environment.ProcessPath!)
+                {
+                    UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true,
+                    RedirectStandardOutput = true, RedirectStandardError = true
+                };
+                if (Path.GetFileNameWithoutExtension(start.FileName).Equals("dotnet", StringComparison.OrdinalIgnoreCase))
+                    start.ArgumentList.Add(assembly);
+                else
+                    start.FileName = Path.Combine(Path.GetDirectoryName(assembly)!, "ag-approval.exe");
+                foreach (var arg in new[] { command, "--config", configPath }.Concat(options)) start.ArgumentList.Add(arg);
+                using var child = Process.Start(start)!;
+                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                var stdout = child.StandardOutput.ReadToEndAsync(timeout.Token);
+                var stderr = child.StandardError.ReadToEndAsync(timeout.Token);
+                await child.StandardInput.WriteAsync(input.AsMemory(), timeout.Token);
+                child.StandardInput.Close();
+                await child.WaitForExitAsync(timeout.Token);
+                Check(child.ExitCode == 0, $"{command} did not exit successfully: {await stderr}");
+                return JsonNode.Parse(await stdout)!.AsObject();
+            }
+
+            Check((await RunHook("takeover", ""))["takeoverEnabled"]!.GetValue<bool>(), "existing configs should take over by default");
+            Check(!(await RunHook("takeover", "", "--enabled", "false"))["takeoverEnabled"]!.GetValue<bool>(), "could not pause takeover");
+            var deferred = await RunHook("review", new string('x', 600_000));
+            Check(deferred.Count == 1 && Json.Text(deferred, "decision") == "allow", "paused hook must delegate to native permissions");
+            foreach (var command in new[] { "chat", "session", "post" })
+                Check((await RunHook(command, "invalid-json")).Count == 0, $"paused {command} hook must have no effect");
+            Check(!Directory.Exists(Path.Combine(dataDir, "logs")), "paused plugin wrote hook logs");
+            Check((await RunHook("takeover", "", "--enabled", "true"))["takeoverEnabled"]!.GetValue<bool>(), "could not resume takeover");
+            Check(Json.Text(await RunHook("review", ""), "decision") == "deny", "resumed hook must enforce its error path");
+            Check(await File.ReadAllTextAsync(configPath) == config, "the switch changed the main configuration");
         });
 
         await test("live host IPC toggles detailed logs without restart and LogCompactor strips verbose dumps", async () =>
@@ -177,16 +223,14 @@ public static class PanelCoreTests
             var cfgPath = Path.Combine(ipcData, "approval.json");
             var cfg = new Settings
             {
-                CodexPath = "",
+                GuardianPath = fakeGuardian,
                 CodexHome = baseSettings.CodexHome,
                 DataDirectory = ipcData,
                 PolicyDirectory = baseSettings.PolicyDirectory,
                 AntigravityConfigDirectory = baseSettings.AntigravityConfigDirectory,
                 TranscriptRoots = baseSettings.TranscriptRoots,
-                ReviewerBackend = "Cli", // dummy non-spawning until reviewed; switch to Cli with dummy exe
                 EnableDetailedLogs = false
             };
-            cfg.CodexPath = Environment.ProcessPath!;
             cfg.PipeName = "ag-test-panel-" + Guid.NewGuid().ToString("N")[..12];
 
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));

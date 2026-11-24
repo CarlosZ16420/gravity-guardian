@@ -23,6 +23,9 @@ foreach ($taskName in @('Install.ps1','Uninstall.ps1','Review-Mode.ps1','Doctor.
 
 New-Item -ItemType Directory -Path (Join-Path $taskRelease 'docs') -Force | Out-Null
 Copy-Item -LiteralPath (Join-Path $taskRoot "docs/release-$taskVersion.md") -Destination (Join-Path $taskRelease 'docs')
+foreach ($taskNote in @('guardian-0.172.0-validation.md', 'release-native-guardian.md')) {
+    Copy-Item -LiteralPath (Join-Path $taskRoot "docs/$taskNote") -Destination (Join-Path $taskRelease 'docs')
+}
 
 Copy-Item -LiteralPath (Join-Path $taskRoot 'LICENSE') -Destination (Join-Path $taskRelease 'LICENSE') -Force
 Copy-Item -LiteralPath (Join-Path $taskRoot 'NOTICE') -Destination (Join-Path $taskRelease 'NOTICE') -Force

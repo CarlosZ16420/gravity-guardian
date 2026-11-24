@@ -8,8 +8,7 @@ public sealed class Policy
     public string Rejection { get; }
     public string Hash { get; }
     public JsonNode Schema { get; }
-    public string HashFor(Settings settings)=>settings.ReviewerBackend=="NativeGuardian"?
-        Json.Hash(Hash+GuardianFacts.Protocol+GuardianFacts.UpstreamCommit+GuardianFacts.BridgePolicy+ProjectAuthorizations.Guidance):Hash;
+    public string NativeHash => Json.Hash(Hash+GuardianFacts.Protocol+GuardianFacts.UpstreamCommit+GuardianFacts.BridgePolicy+ProjectAuthorizations.Guidance);
     public Policy(string directory)
     {
         var manifest = JsonNode.Parse(File.ReadAllText(Path.Combine(directory, "SOURCE.json")))!;

@@ -24,7 +24,7 @@ public static class ReviewContext
 {
     public static async Task<ReviewInput> BuildAsync(JsonNode payload,Settings settings,CancellationToken ct,string? requestId=null,string policyHash="",bool includeNativeState=true)
     {
-        if(string.IsNullOrEmpty(policyHash))policyHash=new Policy(settings.PolicyDirectory).HashFor(settings);
+        if(string.IsNullOrEmpty(policyHash))policyHash=new Policy(settings.PolicyDirectory).NativeHash;
         var call=payload["toolCall"] as JsonObject??throw new InvalidDataException("Missing toolCall");
         var tool=Json.Text(call,"name")??throw new InvalidDataException("Missing tool name");
         if(call["args"] is not JsonObject args)throw new InvalidDataException("Missing tool arguments");
@@ -64,14 +64,12 @@ public static class ReviewContext
             else evidence.Add(record);
         }
         if(users.Count==0)throw new InvalidDataException("No authenticated user task in transcript");
-        bool native=settings.ReviewerBackend=="NativeGuardian";
         var modelUsers=new JsonArray(users.Select(u=>{
             var copy=u!.DeepClone().AsObject();
             copy.Remove("original_content");copy.Remove("host_metadata");
             return (JsonNode)copy;
         }).ToArray());
-        if(!native&&Bytes(modelUsers)>settings.MaxContextBytes)throw new InvalidDataException("User instructions exceed review evidence budget");
-        var states=ReviewAdapter.FileStates(action,native);var rules=ReadRules(workspace,cwd,args,states);
+        var states=ReviewAdapter.FileStates(action,true);var rules=ReadRules(workspace,cwd,args,states);
         var authorizationRevision=Json.Hash(ReviewAdapter.Canonical(new JsonArray(modelUsers.Select(r=>(JsonNode)new JsonObject{
             ["content"]=r!["content"]?.DeepClone(),["truncation"]=r["truncation"]?.DeepClone()}).ToArray())));
         var projectAuthorizations = ProjectAuthorizations.Active(settings, workspace);
@@ -82,13 +80,13 @@ public static class ReviewContext
         var materialRevision=Json.Hash(ReviewAdapter.Canonical(new JsonObject{["action"]=fingerprint,["environment"]=environmentRevision,["rules"]=rules.DeepClone(),["files"]=states.DeepClone()}));
         var nativeRecords=new JsonArray(users.Concat(evidence).OrderBy(r=>r!["native_position"]!.GetValue<int>()).Select(r=>r!.DeepClone()).ToArray());
         JsonObject? nativeState=null;
-        if(includeNativeState&&settings.ReviewerBackend=="NativeGuardian"&&settings.EnableNativeState)
+        if(includeNativeState&&settings.EnableNativeState)
         {
             try{nativeState=await AntigravityState.ReadAsync(settings,conversation,step,call,ct);}
             catch(NativeStateUnavailableException e)when(e.Code is ("state_not_ready" or "adapter_incompatible")){nativeState=null;}
         }
         // Native mode binds relevant source records, not unrelated later assistant appends.
-        var sourceHash=settings.ReviewerBackend=="NativeGuardian"?Json.Hash(ReviewAdapter.Canonical(nativeRecords)):parsed.RawHash;
+        var sourceHash=Json.Hash(ReviewAdapter.Canonical(nativeRecords));
         var evidenceRevision=Json.Hash(sourceHash+ReviewAdapter.Canonical(effectiveKnownPermissions)+rules.ToJsonString()+states.ToJsonString()+parsed.Segment+parsed.Cutoff+(nativeState==null?"":ReviewAdapter.Canonical(nativeState)));
         var id=requestId??Guid.NewGuid().ToString("N");
         var binding=Json.Hash(ReviewAdapter.Canonical(new JsonObject{["request_id"]=id,["raw_request"]=payload.DeepClone(),["action"]=fingerprint,["authorization"]=authorizationRevision,["evidence"]=evidenceRevision,["policy"]=policyHash,["adapter"]=ReviewAdapter.Hash,["transport"]=ReviewAdapter.TransportVersion}));
@@ -99,39 +97,12 @@ public static class ReviewContext
             ["native_binding"]=new JsonObject{["segment_id"]="segment:"+parsed.Segment,["cutoff_position"]=parsed.Cutoff,["binding_method"]=parsed.Method,["raw_transcript_sha256"]=parsed.RawHash},
             ["conversation_evidence"]=new JsonArray(),["transcript_omitted_records"]=0,["transcript_omitted_positions"]=new JsonArray(),["planned_action"]=action,["additional_hook_scope"]=unknownScope};
         if (projectAuthorizations.Count > 0) doc["project_authorizations"] = projectAuthorizations;
-        if(!native)
-        {
-            int budget=settings.MaxContextBytes+settings.MaxInputBytes;
-            if(Bytes(doc)>budget)throw new InvalidDataException("Complete action, user restrictions and rules exceed input budget");
-            var (chosen,omitted)=ReviewEvidence.Select(evidence,settings,budget-Bytes(doc)-4096);
-            doc["conversation_evidence"]=chosen;
-            doc["transcript_omitted_records"]=omitted.Count;doc["transcript_omitted_positions"]=new JsonArray(omitted.Select(p=>(JsonNode?)JsonValue.Create(p)).ToArray());
-            if(Bytes(doc)>budget)throw new InvalidDataException("Complete review input exceeds budget");
-        }
         var prompt=doc.ToJsonString(Json.PromptOptions);
         return new(id,actionHash,conversation,tool,cwd,prompt,evidenceRevision){ActionFingerprint=fingerprint,AuthorizationRevision=authorizationRevision,EnvironmentRevision=environmentRevision,
             MaterialRevision=materialRevision,BindingHash=binding,NativeSegment="segment:"+parsed.Segment,AuthorizationSources=users.Select(r=>Json.Text(r,"record_id")!).ToArray(),
-            NativeRecords=native?nativeRecords:null,NativeState=nativeState,SourceUserRecords=users,StepIndex=step};
+            NativeRecords=nativeRecords,NativeState=nativeState,SourceUserRecords=users,StepIndex=step};
     }
 
-    public static ReviewInput PrepareCliFallback(ReviewInput input,Settings settings)
-    {
-        var doc=JsonNode.Parse(input.Prompt)!.AsObject();
-        int budget=settings.MaxContextBytes+settings.MaxInputBytes;
-        if(Bytes(doc)>budget)throw new InvalidDataException("Complete action, user restrictions and rules exceed input budget");
-        var nonUser=(input.NativeRecords??new JsonArray())
-            .Select(r=>r!.AsObject())
-            .Where(r=>r["is_authenticated_user_input"]?.GetValue<bool>()!=true)
-            .Select(r=>r.DeepClone().AsObject())
-            .ToList();
-        var (chosen,omitted)=ReviewEvidence.Select(nonUser,settings,Math.Max(0,budget-Bytes(doc)-4096));
-        doc["conversation_evidence"]=chosen;
-        doc["transcript_omitted_records"]=omitted.Count;
-        doc["transcript_omitted_positions"]=new JsonArray(omitted.Select(p=>(JsonNode?)JsonValue.Create(p)).ToArray());
-        if(Bytes(doc)>budget)throw new InvalidDataException("Complete review input exceeds budget");
-        return input with{Prompt=doc.ToJsonString(Json.PromptOptions)};
-    }
-    private static int Bytes(JsonNode value)=>Encoding.UTF8.GetByteCount(value.ToJsonString(Json.PromptOptions));
     private static JsonArray ReadRules(JsonArray workspace,string cwd,JsonObject args,JsonArray states)
     {
         var result=new JsonArray();var seen=new HashSet<string>(StringComparer.OrdinalIgnoreCase);

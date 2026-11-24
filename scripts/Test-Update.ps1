@@ -16,7 +16,7 @@ New-Item -ItemType Directory -Path $taskConfig, $taskData, $taskFeed -Force | Ou
     ConvertTo-Json -Depth 10 | Set-Utf8NoBom -LiteralPath (Join-Path $taskConfig 'config.json') -Encoding utf8
 
 # 1. Install the current package into an isolated directory.
-& (Join-Path $PSScriptRoot 'Install.ps1') -GeminiRoot $taskGemini -DataDirectory $taskData -CodexPath $env:ComSpec -AntigravityPath $env:ComSpec
+& (Join-Path $PSScriptRoot 'Install.ps1') -GeminiRoot $taskGemini -DataDirectory $taskData -AntigravityPath $env:ComSpec
 $taskPlugin = Join-Path $taskConfig 'plugins/codex-approval'
 $taskRuntime = Join-Path $taskPlugin 'runtime/dotnet.exe'
 $taskAssembly = Join-Path $taskPlugin 'scripts/ag-approval.dll'
@@ -28,6 +28,14 @@ $taskNextVersion = '{0}.{1}.{2}' -f $taskBaseParts.Major, $taskBaseParts.Minor, 
 # Customize enableDetailedLogs=true, write a log file and denial-guard sentinel to verify preservation across upgrade
 & $taskRuntime $taskAssembly set-logging --config $taskApprovalPath --enabled true | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'Failed to enable detailed logs before update test' }
+$taskLegacyApproval = Get-Content -Encoding UTF8 -LiteralPath $taskApprovalPath -Raw | ConvertFrom-JsonHashtable
+$taskLegacyApproval.reviewerBackend = 'Cli'
+$taskLegacyApproval.codexPath = $(if ($env:AG_TEST_CLI_TRIPWIRE) { $env:AG_TEST_CLI_TRIPWIRE } else { Join-Path $taskSandbox 'missing-codex.exe' })
+$taskLegacyApproval.enableReviewerSessions = $true
+$taskLegacyApproval.enableNativeState = $false
+$taskLegacyApproval | ConvertTo-Json -Depth 16 | Set-Utf8NoBom -LiteralPath $taskApprovalPath
+$taskPaused = & $taskRuntime $taskAssembly takeover --config $taskApprovalPath --enabled false | ConvertFrom-Json
+if ($LASTEXITCODE -ne 0 -or $taskPaused.takeoverEnabled -ne $false) { throw 'Could not pause approval takeover before update' }
 
 $taskLogsDir = Join-Path $taskData 'logs'
 New-Item -ItemType Directory -Path $taskLogsDir -Force | Out-Null
@@ -114,8 +122,10 @@ try {
     $taskNewVer = (Get-Content -Encoding UTF8 -LiteralPath (Join-Path $taskPlugin 'plugin.json') -Raw | ConvertFrom-Json).version
     if ($taskNewVer -ne $taskNextVersion) { throw "Expected upgraded plugin.json version $taskNextVersion, got $taskNewVer" }
 
-    $taskPostApproval = Get-Content -Encoding UTF8 -LiteralPath $taskApprovalPath -Raw | ConvertFrom-Json
+    $taskPostApproval = Get-Content -Encoding UTF8 -LiteralPath $taskApprovalPath -Raw | ConvertFrom-JsonHashtable
     if (!$taskPostApproval.enableDetailedLogs) { throw 'Upgrade lost enableDetailedLogs=true user preference' }
+    if ($taskPostApproval.reviewerBackend -ne 'NativeGuardian' -or !$taskPostApproval.enableNativeState -or
+        $taskPostApproval.ContainsKey('codexPath') -or $taskPostApproval.ContainsKey('enableReviewerSessions')) { throw 'Self-update did not migrate old reviewer settings' }
     if (!(Test-Path -LiteralPath $taskSentinelLog) -or ![IO.File]::ReadAllText((Join-Path $taskGuardDir 'sentinel.json')).Contains('keep')) {
         throw 'Upgrade lost user logs or denial-guard state'
     }
@@ -126,7 +136,9 @@ try {
     if ($taskStatus.status -ne 'running' -or !$taskStatus.detailedLogs) {
         throw 'Upgraded host not running with preserved detailedLogs setting'
     }
-    Write-Host "PASS end-to-end self-update $taskBaseVersion -> $taskNextVersion preserved user config, logs, and running host"
+    $taskAfterUpdate = & $taskRuntime $taskAssembly takeover --config $taskApprovalPath | ConvertFrom-Json
+    if ($LASTEXITCODE -ne 0 -or $taskAfterUpdate.takeoverEnabled -ne $false) { throw 'Update resumed paused approval takeover' }
+    Write-Host "PASS end-to-end self-update $taskBaseVersion -> $taskNextVersion preserved paused takeover, user config, logs, and running host"
 } finally {
     # Cleanly stop isolated test host
     try {

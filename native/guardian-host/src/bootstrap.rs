@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use anyhow::bail;
+use codex_guardian_context::{ContextProfile, DEFAULT_MAX_INPUT_TOKENS, ElasticBudgetConfig, ElasticSection, ElasticSectionLimits};
 use codex_core_api::AbsolutePathBuf;
 use codex_core_api::AltScreenMode;
 use codex_core_api::ApprovalsReviewer;
@@ -77,7 +78,18 @@ use codex_core_api::passthrough_image_store;
 use codex_core_api::resolve_bootstrap_respect_system_proxy;
 use codex_core_api::resolve_installation_id;
 use codex_core_api::set_default_originator;
-use codex_core_api::thread_store_from_config;
+
+fn synchronous_budget() -> anyhow::Result<ElasticBudgetConfig> {
+    let mut config = ElasticBudgetConfig::default();
+    let transcript_entry_limit = ContextProfile::synchronous().transcript.entry_limits.message_tokens;
+    let other_reservations = usize::try_from(config.total_minimum_tokens())? - transcript_entry_limit;
+    let message_reservation = DEFAULT_MAX_INPUT_TOKENS.checked_sub(other_reservations)
+        .context("upstream Guardian section reservations exceed the nominal input budget")?;
+    config.sections.insert(ElasticSection::TranscriptMessages,
+        ElasticSectionLimits::new(message_reservation, transcript_entry_limit)?);
+    config.validate()?;
+    Ok(config)
+}
 
 pub async fn new_config(
     model: Option<String>,
@@ -158,16 +170,21 @@ pub async fn new_config(
         explicit_permission_profile_mode: false,
         custom_permission_profiles: Vec::new(),
         approvals_reviewer: ApprovalsReviewer::User,
+        requested_approvals_reviewer: None,
         enforce_residency: Constrained::allow_any(/*initial_value*/ None),
         hide_agent_reasoning: false,
         show_raw_agent_reasoning: false,
         base_instructions: None,
         base_instructions_provenance: None,
         developer_instructions: None,
+        guardian_policy_revision: 0,
         guardian_policy_config: None,
         guardian_extra_policy: None,
         guardian_policy_template: None,
         guardian_transcript_mode: Default::default(),
+        guardian_v3: None,
+        guardian_sync_elastic_budget: Some(synchronous_budget()?),
+        guardian_async_elastic_budget: None,
         guardian_conversation_history_prompt: None,
         guardian_conversation_history_max_output_tokens: None,
         guardian_circuit_break_action: Default::default(),
@@ -192,12 +209,15 @@ pub async fn new_config(
         tui_auto_recap: true,
         model_availability_nux: ModelAvailabilityNuxConfig::default(),
         tui_fullscreen_transcript: false,
+        tui_collapse_turn_details: false,
+        tui_sidebar_width_percent: None,
         tui_mouse_scroll_speed: None,
         tui_copy_on_select: Default::default(),
         tui_copy_on_select_clear_selection: false,
         tui_right_click_paste: Default::default(),
         tui_alternate_screen: AltScreenMode::Auto,
         tui_status_line: None,
+        tui_status_line_provider: None,
         tui_status_line_use_colors: true,
         tui_terminal_title: None,
         tui_theme: None,
@@ -227,7 +247,7 @@ pub async fn new_config(
         project_doc_max_bytes: 32 * 1024,
         project_doc_fallback_filenames: Vec::new(),
         tool_output_token_limit: None,
-        agents_enabled: true,
+        agents_enabled: false,
         agent_max_threads: Some(6),
         agent_default_subagent_model: None,
         agent_default_subagent_reasoning_effort: None,
@@ -242,10 +262,12 @@ pub async fn new_config(
         log_dir: codex_home.join("log").to_path_buf(),
         codex_home,
         history: History::default(),
+        rollout_trace_limits: Default::default(),
         ephemeral: true,
         allow_persistent_dynamic_tool_updates: false,
         extra_config: None,
         file_opener: UriBasedFileOpener::VsCode,
+        mcp_launch_cwds: Default::default(),
         codex_self_exe: arg0_paths.codex_self_exe,
         codex_linux_sandbox_exe: arg0_paths.codex_linux_sandbox_exe,
         main_execve_wrapper_exe: None,
@@ -276,9 +298,10 @@ pub async fn new_config(
         forced_login_method: auth_config.forced_login_method,
         web_search_mode: Constrained::allow_any(WebSearchMode::Disabled),
         web_search_config: None,
-        experimental_request_user_input_enabled: true,
-        update_plan_enabled: true,
+        experimental_request_user_input_enabled: false,
+        update_plan_enabled: false,
         tool_registry: Default::default(),
+        response_process_mode: Default::default(),
         code_mode: Default::default(),
         background_terminal_max_timeout: 300_000,
         thread_unload_delay: std::time::Duration::from_secs(/*secs*/ 60),
@@ -290,6 +313,7 @@ pub async fn new_config(
         rollout_budget: None,
         current_time_reminder: None,
         sleep_tool_mode: Default::default(),
+        runtime_auth_mode: Default::default(),
         features: Default::default(),
         prefer_mxc: false,
 

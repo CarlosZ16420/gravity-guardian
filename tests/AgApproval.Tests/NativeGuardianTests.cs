@@ -15,6 +15,14 @@ public static class NativeGuardianTests
         {
             var request=JsonNode.Parse(line)!;var id=Json.Text(request,"id")!;var scope=Json.Text(request,"scope")!;
             if(Json.Text(request,"operation")=="invalidate"){scopes.Remove(scope);Console.WriteLine(Json.Encode(new{id,ok=true}));await Console.Out.FlushAsync();continue;}
+            var capture=Array.IndexOf(args,"--capture-wire");
+            if(capture>=0) await File.WriteAllTextAsync(args[capture+1],line);
+            if(args.Contains("--incomplete-frame"))
+            {
+                Console.Write("{");
+                await Console.Out.FlushAsync();
+                return 0;
+            }
             if(args.Contains("--hang")){await Task.Delay(30000);continue;}
             if(args.Contains("--preflight-limit") && Json.Text(request["action"],"arguments")!.Length>30_000)
             {
@@ -65,7 +73,7 @@ public static class NativeGuardianTests
     public static async Task RunAsync(Settings basis,Policy policy,Func<string,Func<Task>,Task> test)
     {
         var settings=JsonSerializer.Deserialize<Settings>(Json.Encode(basis),AgApproval.Json.Options)!;
-        settings.ReviewerBackend="NativeGuardian";settings.EnableNativeState=false;settings.ReviewTimeoutSeconds=10;settings.HookTimeoutSeconds=12;
+        settings.EnableNativeState=false;settings.ReviewTimeoutSeconds=10;settings.HookTimeoutSeconds=12;
         settings.DataDirectory=Path.Combine(basis.DataDirectory,"native-tests");Directory.CreateDirectory(settings.DataDirectory);
         settings.GuardianPath=Environment.ProcessPath!;
         settings.GuardianPrefixArguments=(Path.GetFileNameWithoutExtension(Environment.ProcessPath)=="dotnet"?new[]{typeof(TestMarker).Assembly.Location,"--fake-guardian-host"}:new[]{"--fake-guardian-host"});
@@ -75,7 +83,7 @@ public static class NativeGuardianTests
         await File.WriteAllTextAsync(transcript,string.Join("\n",rows.Select(Json.Encode))+"\n");
         var payload=new JsonObject{["conversationId"]=conversation,["stepIdx"]=81,["transcriptPath"]=transcript,["workspacePaths"]=new JsonArray(settings.DataDirectory),
             ["toolCall"]=new JsonObject{["name"]="write_file",["args"]=new JsonObject{["Path"]=Path.Combine(settings.DataDirectory,"never-executed.txt"),["Content"]="evidence only"}}};
-        async Task<ReviewInput> Input()=>await ReviewContext.BuildAsync(payload,settings,default,policyHash:policy.Hash);
+        async Task<ReviewInput> Input()=>await ReviewContext.BuildAsync(payload,settings,default,policyHash:policy.NativeHash);
         void Check(bool okay,string message){if(!okay)throw new Exception(message);}
         await test("native executable is bound to the pinned source and its hash",async()=>{
             var dir=Path.Combine(settings.DataDirectory,"integrity");Directory.CreateDirectory(dir);var file=Path.Combine(dir,"fixture.exe");await File.WriteAllTextAsync(file,"not executed");
@@ -276,7 +284,7 @@ public static class NativeGuardianTests
             }
             finally{await File.WriteAllTextAsync(transcript,snapshot);}
         });
-        await test("native size preflight falls back once and preserves the original reviewer",async()=>{
+        await test("native size preflight requests a smaller action and preserves the session",async()=>{
             var cfg=JsonSerializer.Deserialize<Settings>(Json.Encode(settings),AgApproval.Json.Options)!;
             cfg.DataDirectory=Path.Combine(settings.DataDirectory,"preflight-keeps-session");
             cfg.GuardianPrefixArguments=[..settings.GuardianPrefixArguments,"--preflight-limit"];
@@ -284,14 +292,16 @@ public static class NativeGuardianTests
             largeWrite["toolCall"]!["args"]!["Content"]=new string('c',42_000);
             await using var reviewer=new NativeGuardianReviewer(cfg,policy);
             var gate=new ReviewGate(cfg,policy,reviewer);
-            foreach(var candidate in new[]{payload,largeWrite,payload})
-                Check((await gate.ReviewAsync(candidate,default)).Decision=="auto_approve","preflight sequence failed");
+            Check((await gate.ReviewAsync(payload,default)).Decision=="auto_approve","initial review failed");
+            var oversized=await gate.ReviewAsync(largeWrite,default);
+            Check(oversized.Decision=="deny"&&oversized.ReasonCode=="request_too_large_retry_smaller","oversized write did not fail closed");
+            Check((await gate.ReviewAsync(payload,default)).Decision=="auto_approve","normal review after preflight failed");
             var usage=Directory.GetFiles(Path.Combine(cfg.DataDirectory,"logs"),"*.jsonl")
                 .SelectMany(File.ReadLines).Select(line=>JsonNode.Parse(line)!)
                 .Where(item=>Json.Text(item,"event")=="review_usage").ToArray();
-            Check(usage.Length==4 && Json.Text(usage[0]["diagnostics"],"sessionReason")=="new_scope" &&
-                usage[1]["inferenceDispatchCount"]?.GetValue<int>()==0 && Json.Text(usage[2]["usage"],"source")=="codex_exec.turn.completed" &&
-                Json.Text(usage[3]["diagnostics"],"sessionReason")=="continued","fallback dispatched twice or discarded the native session");
+            Check(usage.Length==3 && Json.Text(usage[0]["diagnostics"],"sessionReason")=="new_scope" &&
+                usage[1]["inferenceDispatchCount"]?.GetValue<int>()==0 &&
+                Json.Text(usage[2]["diagnostics"],"sessionReason")=="continued","oversized request dispatched inference or discarded the native session");
         });
         await test("native state RPC outage soft-degrades to transcript binding while sibling completion preserves allow",async()=>{
             var snapshot=await File.ReadAllTextAsync(transcript);
@@ -343,21 +353,74 @@ public static class NativeGuardianTests
             }
             finally{await File.WriteAllTextAsync(transcript,snapshot);}
         });
-        await test("native_tool_call PromptBuild limit falls back to CodexReviewer while oversized single requests instruct Agent to split",async()=>{
+        await test("native evidence and action budget failures remain distinct with either ask setting",async()=>{
             var cfg=JsonSerializer.Deserialize<Settings>(Json.Encode(settings),AgApproval.Json.Options)!;
-            cfg.DataDirectory=Path.Combine(settings.DataDirectory,"prompt-build-fallback");
-            cfg.GuardianPrefixArguments=[..settings.GuardianPrefixArguments,"--prompt-build-limit"];
+            cfg.DataDirectory=Path.Combine(settings.DataDirectory,"native-budget-types");
             var largeWrite=payload.DeepClone();
-            largeWrite["toolCall"]=new JsonObject{["name"]="write_file",["args"]=new JsonObject{["Path"]=Path.Combine(cfg.DataDirectory,"normal-large.cs"),["Content"]=new string('c',42000)}};
+            var content=string.Concat(Enumerable.Repeat("// 本地测试 C:\\fixture \"quoted\"\n",4000))+"// END_OF_ACTION";
+            largeWrite["toolCall"]!["args"]!["Content"]=content;
+            foreach(var handoff in new[]{false,true})
+            {
+                cfg.EnableNativeAskHandoff=handoff;
+                foreach(var code in new[]{"native_action_budget_exceeded","review_authorization_budget_exceeded",
+                    "review_input_budget_exceeded","native_frame_invalid","context_invalid","review_timeout","upstream_unavailable","action_invalidated"})
+                {
+                    var fake=new FakeReviewer(_=>throw new NativeReviewFailure("controlled failure",new JsonObject{["reasonCode"]=code}));
+                    var result=await new ReviewGate(cfg,policy,fake).ReviewAsync(largeWrite,default);
+                    var expectedCode=code=="native_action_budget_exceeded"?"request_too_large_retry_smaller":code;
+                    var expectedDecision=code=="upstream_unavailable"?(handoff?"ask":"force_ask"):"deny";
+                    Check(result.Decision==expectedDecision&&result.ReasonCode==expectedCode,
+                        $"classified failure changed with ask={handoff}: {Json.Encode(result)}");
+                }
+            }
+            var snapshot=await File.ReadAllTextAsync(transcript);
+            try
+            {
+                const string authorization="I authorize writing the synthetic fixture locally.";
+                const string revocation="I revoke permission to write the fixture.";
+                await File.AppendAllTextAsync(transcript,Json.Encode(new{step_index=81,source="USER_EXPLICIT",type="USER_INPUT",content=authorization})+"\n"+
+                    Json.Encode(new{step_index=82,source="USER_EXPLICIT",type="USER_INPUT",content=revocation})+"\n");
+                largeWrite["stepIdx"]=83;
+                foreach(var outcome in new[]{"allow","deny"})
+                {
+                    var capturePath=Path.Combine(cfg.DataDirectory,"wire-"+outcome+".json");
+                    cfg.GuardianPrefixArguments=[..settings.GuardianPrefixArguments,"--capture-wire",capturePath];
+                    if(outcome=="deny") cfg.GuardianPrefixArguments=[..cfg.GuardianPrefixArguments,"--deny"];
+                    await using var reviewer=new NativeGuardianReviewer(cfg,policy);
+                    var result=await new ReviewGate(cfg,policy,reviewer).ReviewAsync(largeWrite,default);
+                    Check(result.ReasonCode==(outcome=="allow"?"policy_allowed":"policy_denied"),"Simulated assessment changed");
+                    var wire=JsonNode.Parse(await File.ReadAllTextAsync(capturePath))!;
+                    var arguments=JsonNode.Parse(Json.Text(wire["action"],"arguments")!)!;
+                    Check(Json.Text(arguments,"Content")==content,"Full large action was not delivered to the native host");
+                    var users=wire["history"]!.AsArray().Where(item=>Json.Text(item,"role")=="user")
+                        .Select(item=>Json.Text(item!["content"]![0],"text")).ToArray();
+                    Check(users[^2]==authorization&&users[^1]==revocation,"Ordered authorization or revocation was lost");
+                }
+            }
+            finally { await File.WriteAllTextAsync(transcript,snapshot); }
+        });
+        await test("an incomplete native response never enters manual approval handoff",async()=>{
+            var cfg=JsonSerializer.Deserialize<Settings>(Json.Encode(settings),AgApproval.Json.Options)!;
+            cfg.DataDirectory=Path.Combine(settings.DataDirectory,"incomplete-native-frame");
+            cfg.EnableNativeAskHandoff=true;
+            cfg.GuardianPrefixArguments=[..settings.GuardianPrefixArguments,"--incomplete-frame"];
             await using var reviewer=new NativeGuardianReviewer(cfg,policy);
-            var gate=new ReviewGate(cfg,policy,reviewer);
-            var approved=await gate.ReviewAsync(largeWrite,default);
-            Check(approved.Decision=="auto_approve"&&approved.Status=="approved","normal 42 KB write_file failed CLI fallback after native_tool_call section limit: "+Json.Encode(approved));
-
-            var absurdWrite=payload.DeepClone();
-            absurdWrite["toolCall"]=new JsonObject{["name"]="write_file",["args"]=new JsonObject{["Path"]=Path.Combine(cfg.DataDirectory,"absurd.cs"),["Content"]=new string('x',cfg.MaxContextBytes+cfg.MaxInputBytes+1024)}};
-            var retrySmaller=await gate.ReviewAsync(absurdWrite,default);
-            Check(retrySmaller.Decision=="deny"&&retrySmaller.ReasonCode=="request_too_large_retry_smaller"&&retrySmaller.Reason.Contains("split this tool call"),"truly oversized single request did not return actionable split-and-retry instruction: "+Json.Encode(retrySmaller));
+            var result=await new ReviewGate(cfg,policy,reviewer).ReviewAsync(payload,default);
+            Check(result.Decision=="deny"&&result.ReasonCode=="native_frame_invalid","truncated response reached permissive handoff");
+        });
+        await test("native quota failure clears pending state and permits a fresh assessment after restart",async()=>{
+            var cfg=JsonSerializer.Deserialize<Settings>(Json.Encode(settings),AgApproval.Json.Options)!;
+            cfg.DataDirectory=Path.Combine(settings.DataDirectory,"quota-account-retry");
+            cfg.GuardianPrefixArguments=[..settings.GuardianPrefixArguments,"--failure-code","quota_exhausted"];
+            await using(var limited=new NativeGuardianReviewer(cfg,policy))
+            {
+                var failure=await new ReviewGate(cfg,policy,limited).ReviewAsync(payload,default);
+                Check(failure.ReasonCode=="quota_exhausted","simulated quota failure was not retained");
+            }
+            cfg.GuardianPrefixArguments=[..settings.GuardianPrefixArguments];
+            await using var next=new NativeGuardianReviewer(cfg,policy);
+            var retry=await new ReviewGate(cfg,policy,next).ReviewAsync(payload,default);
+            Check(retry.ReasonCode=="policy_allowed","quota failure prevented the same action from being reviewed again");
         });
     }
 }

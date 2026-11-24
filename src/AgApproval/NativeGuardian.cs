@@ -25,7 +25,7 @@ public sealed class NativeGuardianReviewer(Settings settings,Policy policy) : IR
         using var deadline=CancellationTokenSource.CreateLinkedTokenSource(ct);deadline.CancelAfter(Math.Max(1,budgetMs));ct=deadline.Token;
         var watch=Stopwatch.StartNew();
         await serial.WaitAsync(ct);
-        JsonObject? reply=null,result=null;long before=Interlocked.Read(ref dispatches);bool started=false,submitted=false;
+        JsonObject? reply=null,result=null,transportFailure=null;long before=Interlocked.Read(ref dispatches);bool started=false,submitted=false;
         try
         {
             lock(stderr)stderr.Clear();
@@ -64,7 +64,8 @@ public sealed class NativeGuardianReviewer(Settings settings,Policy policy) : IR
             return text;
         }
         catch(NativeReviewFailure failure) when(reply?["sessionRetired"] is JsonValue status &&
-            status.TryGetValue<bool>(out var retired) && (retired || failure.Code=="native_tool_call_limit")){throw;}
+            status.TryGetValue<bool>(out var retired) && (retired || failure.Code is "native_tool_call_limit" or "context_invalid")){throw;}
+        catch(NativeReviewFailure failure) { transportFailure=failure.Details; await StopAsync(); throw; }
         catch { await StopAsync();throw; }
         finally
         {
@@ -78,7 +79,7 @@ public sealed class NativeGuardianReviewer(Settings settings,Policy policy) : IR
                 var observed=Math.Max(0,Interlocked.Read(ref dispatches)-before);
                 var reported=frame?["inferenceDispatchCount"];
                 long? dispatched=reported is JsonValue count&&count.TryGetValue<int>(out var n)&&n>=0?n:observed>0?observed:submitted?null:0;
-                var failure=reply?["failure"];
+                var failure=reply?["failure"]??transportFailure;
                 var identity=(frame?["sampling"] as JsonArray)?.LastOrDefault(v=>v is JsonObject o&&Json.Text(o,"event")=="guardian_runtime_identity");
                 var modelIdentity=identity?.DeepClone() as JsonObject;
                 if(modelIdentity != null)
@@ -202,9 +203,18 @@ public sealed class NativeGuardianReviewer(Settings settings,Policy policy) : IR
         if(process is null||process.HasExited)throw new IOException("Native Guardian process is unavailable");
         await process.StandardInput.WriteLineAsync(request.ToJsonString(Json.PromptOptions).AsMemory(),ct).WaitAsync(ct);
         await process.StandardInput.FlushAsync(ct).WaitAsync(ct);
-        var reply=JsonNode.Parse(await Program.ReadLineAsync(process.StandardOutput,131072,ct).WaitAsync(ct))?.AsObject()??throw new InvalidDataException("Native Guardian frame missing");
-        if(Json.Text(reply,"id")!=Json.Text(request,"id"))throw new InvalidDataException("Native Guardian result belongs to another request");
-        return reply;
+        try
+        {
+            var frame=await Program.ReadLineAsync(process.StandardOutput,131072,ct).WaitAsync(ct);
+            if(JsonNode.Parse(frame) is not JsonObject reply || Json.Text(reply,"id")!=Json.Text(request,"id"))
+                throw new InvalidDataException("Native Guardian response has no matching request ID");
+            return reply;
+        }
+        catch(Exception e) when(e is EndOfStreamException or InvalidDataException or System.Text.Json.JsonException)
+        {
+            throw new NativeReviewFailure(e.Message,new JsonObject{["reasonCode"]="native_frame_invalid",
+                ["rawErrorKind"]=e is EndOfStreamException?"incomplete_frame":"invalid_frame",["retryable"]=false});
+        }
     }
     public static string VerifyBinary(string executable)
     {

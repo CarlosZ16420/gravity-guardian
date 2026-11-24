@@ -7,7 +7,7 @@ $taskConfig = Join-Path $taskGemini 'config'
 $taskData = Join-Path $taskFixture 'data'
 # Start only the approval host, then use invalid-input hook checks. These application
 # paths are placeholders and are never launched; no model or personal login is used.
-$taskExecutables = @{ CodexPath = $env:ComSpec; AntigravityPath = $env:ComSpec }
+$taskExecutables = @{ AntigravityPath = $env:ComSpec }
 New-Item -ItemType Directory -Path $taskConfig -Force | Out-Null
 $taskOriginal = @{ userSettings = @{ permissionPreset = 'AGENT_PERMISSION_PRESET_AUTO'; globalPermissionGrants = @{ allow = @('command(git status)'); deny = @('write_file(private)') } }; sidecars = @{ other = @{ enabled = $true } } }
 $taskOriginal | ConvertTo-Json -Depth 10 | Set-Utf8NoBom -LiteralPath (Join-Path $taskConfig 'config.json') -Encoding utf8
@@ -38,7 +38,21 @@ $taskInstalledHooks = Get-Content -Encoding UTF8 -LiteralPath (Join-Path $taskPl
 if ($taskReview.reviewTimeoutSeconds -ne 90 -or $taskReview.hookTimeoutSeconds -ne 100 -or $taskInstalledHooks.'codex-approval'.PreToolUse[0].hooks[0].timeout -ne 120) { throw 'Nested review, client, and native hook deadlines are not coordinated' }
 
 & (Join-Path $PSScriptRoot 'Test-Hooks.ps1') -PluginDirectory $taskPlugin
-& (Join-Path $PSScriptRoot 'Doctor.ps1') -DataDirectory $taskData -SkipCodexLoginCheck
+$taskReviewPath = Join-Path $taskPlugin 'approval.json'
+$taskFixtureHome = Join-Path $taskFixture '.codex'
+New-Item -ItemType Directory -Path $taskFixtureHome -Force | Out-Null
+[IO.File]::WriteAllText((Join-Path $taskFixtureHome 'config.toml'), 'cli_auth_credentials_store = "file"')
+[IO.File]::WriteAllText((Join-Path $taskFixtureHome 'auth.json'), '{"auth_mode":"apikey","OPENAI_API_KEY":"local-test-only"}')
+$taskCustomConfig = Get-Content -Encoding UTF8 -LiteralPath $taskReviewPath -Raw | ConvertFrom-JsonHashtable
+$taskCustomConfig.codexHome = $taskFixtureHome
+$taskCustomConfig | ConvertTo-Json -Depth 20 | Set-Utf8NoBom -LiteralPath $taskReviewPath -Encoding utf8
+& (Join-Path $PSScriptRoot 'Doctor.ps1') -DataDirectory $taskData
+$taskRuntime = Join-Path $taskPlugin 'runtime/dotnet.exe'
+$taskAssembly = Join-Path $taskPlugin 'scripts/ag-approval.dll'
+$taskDetect = & $taskRuntime $taskAssembly detect --config $taskReviewPath --gemini-root $taskGemini | ConvertFrom-Json
+if ($LASTEXITCODE -ne 0 -or $taskDetect.nativeAuth.status -ne 'credentials_found' -or $taskDetect.nativeAuth.storeMode -ne 'file') {
+    throw 'Native discovery did not read the isolated credential fixture'
+}
 & (Join-Path $PSScriptRoot 'Analyze-Logs.ps1') -DataDirectory $taskData
 
 $taskManifestPath = Join-Path $taskData 'installation.json'
@@ -51,7 +65,27 @@ $taskFirstManifest.installedLauncherHash = (Get-FileHash -LiteralPath $taskLegac
 $taskFirstManifest | ConvertTo-Json -Depth 20 | Set-Utf8NoBom -LiteralPath $taskManifestPath
 $taskCustomConfig = Get-Content -Encoding UTF8 -LiteralPath (Join-Path $taskPlugin 'approval.json') -Raw | ConvertFrom-JsonHashtable
 $taskCustomConfig.futureCompatibleSetting = 'preserved-on-upgrade'
+$taskCustomConfig.reviewerBackend = 'Cli'
+$taskCustomConfig.codexPath = $(if ($env:AG_TEST_CLI_TRIPWIRE) { $env:AG_TEST_CLI_TRIPWIRE } else { Join-Path $taskFixture 'missing-codex.exe' })
+$taskCustomConfig.enableReviewerSessions = $true
+$taskCustomConfig.enableNativeState = $false
 $taskCustomConfig | ConvertTo-Json -Depth 20 | Set-Utf8NoBom -LiteralPath (Join-Path $taskPlugin 'approval.json') -Encoding utf8
+$taskOldPanel = Join-Path $taskData 'panel-settings.json'
+$taskOldPanelConfig = Get-Content -Encoding UTF8 -LiteralPath $taskOldPanel -Raw | ConvertFrom-JsonHashtable
+$taskOldPanelConfig.codexPath = $taskCustomConfig.codexPath
+$taskOldPanelConfig.autoCheckUpdates = $false
+$taskOldPanelConfig | ConvertTo-Json -Depth 10 | Set-Utf8NoBom -LiteralPath $taskOldPanel
+$taskDetect = & $taskRuntime $taskAssembly detect --config $taskReviewPath --gemini-root $taskGemini | ConvertFrom-Json
+if ($LASTEXITCODE -ne 0 -or $taskDetect.nativeAuth.status -ne 'credentials_found') { throw 'Legacy configuration did not use the native credential check' }
+$taskPanel = Join-Path $taskPlugin 'app/CodexApprovalPanel.exe'
+$taskPanelOutput = & $taskPanel --self-test --plugin-dir $taskPlugin --data-dir $taskData --gemini-root $taskGemini | ForEach-Object { $_ }
+$taskPanelOutput | ForEach-Object { Write-Host $_ }
+if ($LASTEXITCODE -ne 0 -or !($taskPanelOutput -join "`n").Contains('PASS panel detected the installed Guardian')) {
+    throw 'Panel discovery failed using the installed Guardian and legacy configuration'
+}
+$taskAfterPanel = Get-Content -Encoding UTF8 -LiteralPath $taskOldPanel -Raw | ConvertFrom-JsonHashtable
+if ($taskAfterPanel.ContainsKey('codexPath') -or $taskAfterPanel.autoCheckUpdates) { throw 'Panel discovery lost a preference or retained a CLI path' }
+$taskOldPanelConfig | ConvertTo-Json -Depth 10 | Set-Utf8NoBom -LiteralPath $taskOldPanel
 $taskGuardDirectory = Join-Path $taskData 'denial-guard'
 New-Item -ItemType Directory -Path $taskGuardDirectory -Force | Out-Null
 [IO.File]::WriteAllText((Join-Path $taskGuardDirectory 'test-state.txt'), 'persistent protection sentinel')
@@ -61,15 +95,28 @@ $taskGrantFixture = '{"grants":{"0123456789ab":"fixture scope"},"handled":{}}'
 New-Item -ItemType Directory -Path $taskGrantDirectory -Force | Out-Null
 [IO.File]::WriteAllText($taskGrantFile, $taskGrantFixture)
 
-& (Join-Path $PSScriptRoot 'Install.ps1') -GeminiRoot $taskGemini -DataDirectory $taskData @taskExecutables -ReviewRouting ModelOnly -ReviewerBackend Cli -UseVerifiedCopyCommit
+$taskPaused = & $taskRuntime $taskAssembly takeover --config $taskReviewPath --enabled false | ConvertFrom-Json
+if ($LASTEXITCODE -ne 0 -or $taskPaused.takeoverEnabled -ne $false) { throw 'Could not pause approval takeover before repair' }
+
+& (Join-Path $PSScriptRoot 'Install.ps1') -GeminiRoot $taskGemini -DataDirectory $taskData @taskExecutables -ReviewRouting ModelOnly -UseVerifiedCopyCommit
 $taskUpgradeManifest = Get-Content -Encoding UTF8 -LiteralPath (Join-Path $taskData 'installation.json') -Raw | ConvertFrom-Json
 if ((Get-Content -Encoding UTF8 -LiteralPath (Join-Path $taskPlugin 'approval.json') -Raw | ConvertFrom-Json).enableNativeRouting) { throw 'ModelOnly fallback did not disable routing' }
-if ((Get-Content -Encoding UTF8 -LiteralPath (Join-Path $taskPlugin 'approval.json') -Raw | ConvertFrom-Json).reviewerBackend -ne 'Cli') { throw 'Explicit CLI fallback was not selected' }
+$taskMigrated = Get-Content -Encoding UTF8 -LiteralPath $taskReviewPath -Raw | ConvertFrom-JsonHashtable
+if ($taskMigrated.reviewerBackend -ne 'NativeGuardian' -or !$taskMigrated.enableNativeState -or
+    $taskMigrated.ContainsKey('codexPath') -or $taskMigrated.ContainsKey('enableReviewerSessions') -or
+    $taskMigrated.codexHome -ne $taskFixtureHome) { throw 'Legacy config migration did not preserve auth or remove CLI settings' }
+$taskMigratedPanel = Get-Content -Encoding UTF8 -LiteralPath $taskOldPanel -Raw | ConvertFrom-JsonHashtable
+if ($taskMigratedPanel.ContainsKey('codexPath') -or $taskMigratedPanel.autoCheckUpdates) { throw 'Panel config migration lost a preference or retained a CLI path' }
+Write-Host 'PASS install/repair migrated a CLI configuration and retained the native credential location'
 if ((Get-Content -Encoding UTF8 -LiteralPath (Join-Path $taskPlugin 'approval.json') -Raw | ConvertFrom-Json).futureCompatibleSetting -ne 'preserved-on-upgrade') { throw 'Upgrade discarded an unknown compatible setting' }
 if ([IO.File]::ReadAllText((Join-Path $taskGuardDirectory 'test-state.txt')) -ne 'persistent protection sentinel') { throw 'Upgrade reset persistent protection state' }
 if ([IO.File]::ReadAllText($taskGrantFile) -cne $taskGrantFixture) { throw 'Upgrade changed stored project authorizations' }
 if ($taskUpgradeManifest.backupDirectory -ne $taskFirstManifest.backupDirectory) { throw 'Upgrade lost the original restoration backup' }
 if (@($taskUpgradeManifest.reviewModeChanges).Count -ne 3) { throw 'Upgrade lost native review-mode restoration records' }
+$taskAfterRepair = & $taskRuntime $taskAssembly takeover --config $taskReviewPath | ConvertFrom-Json
+if ($LASTEXITCODE -ne 0 -or $taskAfterRepair.takeoverEnabled -ne $false) { throw 'Repair resumed paused approval takeover' }
+$taskResumed = & $taskRuntime $taskAssembly takeover --config $taskReviewPath --enabled true | ConvertFrom-Json
+if ($LASTEXITCODE -ne 0 -or $taskResumed.takeoverEnabled -ne $true) { throw 'Could not resume approval takeover after repair' }
 
 & (Join-Path $PSScriptRoot 'Test-Hooks.ps1') -PluginDirectory $taskPlugin
 
@@ -78,6 +125,8 @@ $taskUserMode.settings.permissionPreset = 'AGENT_PERMISSION_PRESET_REQUEST_REVIE
 $taskUserMode | ConvertTo-Json -Depth 10 | Set-Utf8NoBom -LiteralPath $taskUserModeFile -Encoding utf8
 
 $taskInstalledUninstaller = Join-Path $taskPlugin 'scripts/Uninstall.ps1'
+$taskPaused = & $taskRuntime $taskAssembly takeover --config $taskReviewPath --enabled false | ConvertFrom-Json
+if ($LASTEXITCODE -ne 0 -or $taskPaused.takeoverEnabled -ne $false) { throw 'Could not pause approval takeover before uninstall' }
 $taskHostPath = Join-Path $taskPlugin 'runtime/dotnet.exe'
 $taskLog = Join-Path $taskData 'logs/uninstall-test.jsonl'
 $taskOldArchive = Join-Path $taskData 'uninstalled-plugin-20261124-000000'
@@ -99,6 +148,7 @@ Move-Item -LiteralPath $taskPersonalFile -Destination $taskFixture
 & $taskInstalledUninstaller -DataDirectory $taskData -PurgeData -WhatIf
 if (!(Test-Path -LiteralPath $taskLog)) { throw 'Uninstall preview deleted a log' }
 if (!(Test-Path -LiteralPath $taskGrantFile)) { throw 'Uninstall preview deleted project authorizations' }
+if (!(Test-Path -LiteralPath (Join-Path $taskData 'approval-takeover-paused') -PathType Leaf)) { throw 'Uninstall preview removed the takeover setting' }
 if (!(Get-Process -Name dotnet -ErrorAction SilentlyContinue | Where-Object { $_.Path -ieq $taskHostPath })) {
     throw 'Approval host was not running before uninstall'
 }

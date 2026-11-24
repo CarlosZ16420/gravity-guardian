@@ -220,7 +220,7 @@ public static class ReviewRouting
                     start.ArgumentList.Add(argument);
                 ParserProcess=Process.Start(start);
                 if(ParserProcess==null)return null;
-                _=new BoundedTextCapture(1024).ReadAsync(ParserProcess.StandardError);
+                _=ParserProcess.StandardError.BaseStream.CopyToAsync(Stream.Null);
             }
             var encoded=Convert.ToBase64String(Encoding.UTF8.GetBytes(command));
             await ParserProcess.StandardInput.WriteLineAsync(encoded.AsMemory(),deadline.Token).WaitAsync(deadline.Token);

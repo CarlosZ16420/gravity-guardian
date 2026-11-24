@@ -2,16 +2,18 @@
 mod bootstrap;
 use anyhow::{Context, ensure};
 use codex_core_api::*;
+use codex_protocol::models::{ContentItemKind, ContentItemMetadata, InternalChatMessageMetadataPassthrough};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio_util::sync::CancellationToken;
 
 const PROTOCOL: &str = "ag-guardian-v3";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
-const UPSTREAM: &str = "6ff1e1ca3b30fc8b914720681fcf5fe62e95f856";
+const UPSTREAM: &str = "3d86e43b075adeba2193ec5c22ac92f55afd82e6";
 const MAX_FRAME: usize = 12 * 1024 * 1024;
 const MAX_SESSIONS: usize = 8;
 const MAX_PARENT_REVIEWS: usize = 64;
@@ -61,6 +63,10 @@ fn validate(r: &Request) -> anyhow::Result<()> {
         match item["type"].as_str() {
             Some("message") => {
                 ensure!(matches!(item["role"].as_str(), Some("user" | "assistant")), "unaccepted evidence role");
+                ensure!(item.as_object().is_some_and(|fields| fields.keys().all(|key|
+                    matches!(key.as_str(), "type" | "role" | "content"))), "unaccepted evidence metadata");
+                ensure!(item["content"].as_array().is_some_and(|parts| !parts.is_empty() && parts.iter().all(|part|
+                    part["type"] == "input_text" && part["text"].is_string())), "external evidence must contain text");
                 if item["role"] == "user" { users += 1; }
             }
             Some("function_call" | "function_call_output") => (),
@@ -70,15 +76,83 @@ fn validate(r: &Request) -> anyhow::Result<()> {
     ensure!(users > 0, "no source-verified user input");
     Ok(())
 }
+
+fn annotate_user_history(history: &mut [Value]) -> anyhow::Result<()> {
+    for item in history.iter_mut().filter(|item| item["type"] == "message" && item["role"] == "user") {
+        // The bridge independently validates these source records before forwarding.
+        // Upstream history needs matching content attribution to retain them as complete.
+        let count = item["content"].as_array().context("missing accepted user content")?.len();
+        item["internal_chat_message_metadata_passthrough"] =
+            serde_json::to_value(InternalChatMessageMetadataPassthrough {
+                content_item_kinds: Some(vec![ContentItemKind("user.text".to_owned()); count]),
+                content_item_metadata: Some(vec![ContentItemMetadata::user(); count]),
+                ..Default::default()
+            })?;
+    }
+    Ok(())
+}
 fn main() -> anyhow::Result<()> { arg0_dispatch_or_else(run) }
+async fn check_auth(paths: Arg0DispatchPaths) -> anyhow::Result<()> {
+    let mut report = json!({"status":"store_unavailable","codexHome":null,"storeMode":null,"storeError":null});
+    let exit_code = match bootstrap::new_config(None, paths).await {
+        Ok(config) => {
+            report["codexHome"] = json!(config.codex_home.as_path());
+            report["storeMode"] = json!(config.cli_auth_credentials_store_mode);
+            if config.cli_auth_credentials_store_mode == AuthCredentialsStoreMode::Ephemeral {
+                report["storeError"] = json!("ephemeral_store_is_process_local");
+                2
+            } else {
+                match AuthManager::shared_from_config(&config, false).await {
+                    Ok(auth) => match auth.reload_with_cached_auth().await {
+                        Ok(_) if auth.auth_cached().is_some() => {
+                            report["status"] = json!("credentials_found");
+                            0
+                        }
+                        Ok(_) => {
+                            report["status"] = json!("credentials_missing");
+                            1
+                        }
+                        Err(error) => {
+                            report["storeError"] = json!({"stage":"reload","kind":format!("{:?}",error.kind()),
+                                "osError":error.raw_os_error()});
+                            2
+                        }
+                    },
+                    Err(_) => {
+                        report["storeError"] = json!("credential_manager_initialization_failed");
+                        2
+                    }
+                }
+            }
+        }
+        Err(_) => {
+            report["codexHome"] = json!(find_codex_home().ok().map(|path| path.as_path().to_path_buf()));
+            report["storeError"] = json!("authentication_configuration_unavailable");
+            2
+        }
+    };
+    emit(report)?;
+    if exit_code != 0 { std::process::exit(exit_code); }
+    Ok(())
+}
+
 async fn run(paths: Arg0DispatchPaths) -> anyhow::Result<()> {
     if std::env::args().any(|arg| arg == "--version") {
         emit(json!({"protocol":PROTOCOL,"version":VERSION,"upstreamCommit":UPSTREAM}))?;
         return Ok(());
     }
+    if std::env::args().any(|arg| arg == "--check-auth") {
+        return check_auth(paths).await;
+    }
     ensure!(std::env::var("AG_GUARDIAN_HOST").as_deref()==Ok("1"), "start through the approval host");
     let _ = set_default_originator("antigravity_guardian_host".to_owned());
     let mut config = bootstrap::new_config(Some("codex-auto-review".into()), paths).await?;
+    configure_host(&mut config)?;
+    let (auth, manager) = start_host(&config).await?;
+    serve(config, auth, manager).await
+}
+
+fn configure_host(config: &mut Config) -> anyhow::Result<()> {
     config.model_reasoning_effort = Some(serde_json::from_str("\"low\"")?);
     config.model_provider.supports_websockets = false;
     config.project_doc_max_bytes = 0;
@@ -86,24 +160,36 @@ async fn run(paths: Arg0DispatchPaths) -> anyhow::Result<()> {
     config.model_auto_compact_token_limit = Some(100_000_000);
     config.model_post_turn_compact_threshold_percent = 0;
     for f in [Feature::Apps, Feature::Plugins, Feature::CodexHooks, Feature::MultiAgentV2,
-        Feature::CodeMode, Feature::CodeModeHost, Feature::ShellTool, Feature::GuardianConversationHistoryTools] {
+        Feature::CodeMode, Feature::CodeModeHost, Feature::ShellTool, Feature::GuardianConversationHistoryTools,
+        Feature::GuardianV3, Feature::GuardianV2DecisionsComparison, Feature::BrowserUse,
+        Feature::BrowserUseExternal, Feature::ComputerUse, Feature::ImageGeneration,
+        Feature::WebSearchRequest, Feature::WebSearchCached, Feature::ApplyPatchFreeform] {
         config.features.set_enabled(f, false)?;
     }
     config.features.set_enabled(Feature::SkipHostSkillDiscovery, true)?;
-    let db = init_state_db(&config).await;
-    let auth = AuthManager::shared_from_config(&config, false).await?;
+    Ok(())
+}
+
+async fn start_host(config: &Config) -> anyhow::Result<(Arc<AuthManager>, Arc<ThreadManager>)> {
+    let db = init_state_db(config).await;
+    let auth = AuthManager::shared_from_config(config, false).await?;
     let runtime = ExecServerRuntimeOptions::from_optional_paths(config.codex_self_exe.clone(), config.codex_linux_sandbox_exe.clone())?;
-    let store = thread_store_from_config(&config, db.clone());
+    let store = ThreadStoreBuilder::from_config(config, db.clone()).build();
     let environments = Arc::new(EnvironmentManager::from_codex_home(config.codex_home.clone(), Some(runtime), config.http_client_factory()).await?);
     let installation = resolve_installation_id(&config.codex_home).await?;
-    let models = build_models_manager(&config, Arc::clone(&auth));
+    let startup = build_startup_models(config, Arc::clone(&auth), installation,
+        Arc::new(ModelCatalogSettings::disk(config.codex_home.to_path_buf())));
     let manager = Arc::new_cyclic(|weak| {
         let mut extensions = ExtensionRegistryBuilder::<Config>::new();
         codex_guardian_v2::install_reviewer(&mut extensions, weak.clone());
-        ThreadManager::new(&config, Arc::clone(&auth), Arc::clone(&models), CodexAppsToolsCache::default(),
+        ThreadManager::new(config, startup, CodexAppsToolsCache::default(),
             SessionSource::Exec, Arc::clone(&environments), Arc::new(extensions.build()), Arc::new(NoUserInstructions),
-            None, passthrough_image_store(), Arc::clone(&store), local_agent_graph_store_from_state_db(db.as_ref()), installation.clone(), None, None)
+            None, passthrough_image_store(), Arc::clone(&store), local_agent_graph_store_from_state_db(db.as_ref()), None, None)
     });
+    Ok((auth, manager))
+}
+
+async fn serve(config: Config, auth: Arc<AuthManager>, manager: Arc<ThreadManager>) -> anyhow::Result<()> {
     emit(json!({"type":"ready","protocol":PROTOCOL,"version":VERSION,"upstreamCommit":UPSTREAM,
         "toolsEnabled":false,"investigationMode":"host_workspace_script_snapshots",
         "inferenceDispatchCap":null,"maxAttempts":codex_guardian_reviewer::MAX_REVIEW_ATTEMPTS,
@@ -122,9 +208,23 @@ async fn run(paths: Arg0DispatchPaths) -> anyhow::Result<()> {
             emit(json!({"id":request.id,"ok":true,"invalidated":true}))?; continue;
         }
         let result = async {
-            ensure!(request.operation == "assess", "unknown operation"); validate(&request)?;
+            if let Err(error) = validate(&request).and_then(|()| {
+                ensure!(request.operation == "assess", "unknown operation");
+                Ok(())
+            }) {
+                return Ok(json!({"id":request.id,"ok":false,"sessionRetired":false,
+                    "error":error.to_string(),
+                    "failure":{"reasonCode":"context_invalid","rawErrorKind":"invalid_guardian_evidence","retryable":false},
+                    "inferenceDispatchCount":0,"attemptCount":0}));
+            }
             // Codex can select a different account while this host is running.
-            auth.reload().await;
+            if auth.reload_with_cached_auth().await.is_err() {
+                for (_, parent) in parents.drain() { retire(&manager, parent).await; }
+                return Ok(json!({"id":request.id,"ok":false,"sessionRetired":true,
+                    "error":"Could not verify the current credential store.",
+                    "failure":{"reasonCode":"action_invalidated","rawErrorKind":"credential_store_unavailable","retryable":false},
+                    "inferenceDispatchCount":0,"attemptCount":0}));
+            }
             let owner_generation = auth_changes.borrow().owner_generation;
             let mut reset = "new_scope";
             if owner_generation != session_owner_generation {
@@ -140,11 +240,6 @@ async fn run(paths: Arg0DispatchPaths) -> anyhow::Result<()> {
                     "failure":{"reasonCode":"entitlement_unavailable","rawErrorKind":"missing_codex_auth","retryable":false},
                     "inferenceDispatchCount":0,"attemptCount":0,"sessionReason":reset}));
             }
-            // Check before selecting or mutating the parent. The bridge may use its
-            // CLI backend for this action and keep the native reviewer warm.
-            if let Some(reply) = preflight(&request)? {
-                return Ok(reply);
-            }
             let compatible = parents.get(&request.scope).is_some_and(|p|
                 p.touched.elapsed() < Duration::from_secs(1800) && !needs_checkpoint(p.reviews,p.last_input) && request.extra_policy == p.policy && request.history.starts_with(&p.history));
             if !compatible {
@@ -159,23 +254,49 @@ async fn run(paths: Arg0DispatchPaths) -> anyhow::Result<()> {
                 parents.insert(request.scope.clone(), Parent {thread, id: thread_id, history: Vec::new(), policy: request.extra_policy.clone(), touched: Instant::now(), reviews:0,last_input:0});
             } else { reset = "continued"; }
             let parent = parents.get_mut(&request.scope).unwrap();
-            let delta = request.history[parent.history.len()..].to_vec();
+            let mut delta = request.history[parent.history.len()..].to_vec();
+            annotate_user_history(&mut delta)?;
             let remaining = request.timeout_ms.saturating_sub(started.elapsed().as_millis() as u64);
             if remaining == 0 {
                 return Ok(json!({"id":request.id,"ok":false,"error":"Native Guardian deadline expired before assessment",
                     "failure":{"reasonCode":"review_timeout","rawErrorKind":"timeout","retryable":false},
                     "inferenceDispatchCount":0,"attemptCount":0}));
             }
-            let result = parent.thread.assess_external_guardian(
-                Value::Array(delta), request.action.clone(), request.host_facts.clone(), remaining,
-            ).await?;
-            auth.reload().await;
-            let account_changed = auth_changes.borrow().owner_generation != owner_generation;
-            if account_changed || result["error"].is_string() {
+            let cancellation = CancellationToken::new();
+            let review = parent.thread.assess_external_guardian(
+                Value::Array(delta), request.action.clone(), request.host_facts.clone(), remaining, cancellation.clone(),
+            );
+            let watch_login = async {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    let unavailable = auth.reload_with_cached_auth().await.is_err();
+                    let changed = auth_changes.borrow().owner_generation != owner_generation;
+                    if unavailable || changed { return (unavailable, changed); }
+                }
+            };
+            let (result, store_error_during, owner_changed_during) = {
+                tokio::pin!(review);
+                tokio::select! {
+                    outcome = &mut review => (outcome, false, false),
+                    (unavailable, changed) = watch_login => {
+                        cancellation.cancel();
+                        (review.await, unavailable, changed)
+                    }
+                }
+            };
+            let result = result?;
+            let store_unavailable = auth.reload_with_cached_auth().await.is_err() || store_error_during;
+            let account_changed = owner_changed_during || auth_changes.borrow().owner_generation != owner_generation
+                || result["failure"]["reasonCode"] == "action_invalidated"
+                    && result["failure"]["rawErrorKind"] == "review_account_changed";
+            if account_changed || store_unavailable || result["error"].is_string() {
                 let (error, failure) = if account_changed {
                     reset = "account_changed";
                     ("The Codex account or workspace changed during review. Submit the action again under the current login.",
                         json!({"reasonCode":"action_invalidated","rawErrorKind":"review_account_changed","retryable":false}))
+                } else if store_unavailable {
+                    ("Could not verify the credential store after review.",
+                        json!({"reasonCode":"action_invalidated","rawErrorKind":"credential_store_unavailable","retryable":false}))
                 } else {
                     (result["error"].as_str().unwrap_or("Native Guardian failed"), result["failure"].clone())
                 };
@@ -202,17 +323,9 @@ async fn run(paths: Arg0DispatchPaths) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn preflight(request: &Request) -> anyhow::Result<Option<Value>> {
-    let action = serde_json::from_value(request.action.clone())?;
-    match codex_guardian_context::validate_native_tool_call(&action) {
-        Ok(()) => Ok(None),
-        Err(error @ codex_guardian_context::SectionError::EvidenceLimitExceeded { section: "native_tool_call" }) =>
-            Ok(Some(json!({"id":request.id,"ok":false,"error":error.to_string(),"sessionRetired":false,
-                "failure":{"reasonCode":"native_tool_call_limit","rawErrorKind":"PromptBuildError","retryable":false},
-                "inferenceDispatchCount":0,"attemptCount":0}))),
-        Err(error) => Err(error.into()),
-    }
-}
+#[cfg(test)]
+mod offline_prompt_tests;
+
 async fn retire(manager: &ThreadManager, parent: Parent) {
     let _ = parent.thread.shutdown_and_wait().await;
     let _ = manager.remove_thread(&parent.id).await;
@@ -243,13 +356,19 @@ mod tests {
     #[test] fn sustained_reviews_checkpoint_before_unbounded_growth() {
         assert!(!needs_checkpoint(63,95_999));assert!(needs_checkpoint(64,100));assert!(needs_checkpoint(1,96_000));
     }
-    #[test] fn oversize_preflight_leaves_parent_untouched_and_dispatches_nothing() {
+    #[test] fn wire_validation_admits_large_actions_to_elastic_budgeting() {
         let mut value=request();
-        assert!(preflight(&serde_json::from_value(value.clone()).unwrap()).unwrap().is_none());
         value["action"]["arguments"]=json!(json!({"Content":"sample ".repeat(16_000)}).to_string());
-        let reply=preflight(&serde_json::from_value(value).unwrap()).unwrap().unwrap();
-        assert_eq!(reply["sessionRetired"],false);
-        assert_eq!(reply["inferenceDispatchCount"],0);
-        assert_eq!(reply["failure"]["reasonCode"],"native_tool_call_limit");
+        assert!(validate(&serde_json::from_value(value).unwrap()).is_ok());
+    }
+    #[test] fn validated_text_gets_host_owned_user_attribution() {
+        let original = request();
+        let incoming: Request = serde_json::from_value(original.clone()).unwrap();
+        let mut history = incoming.history;
+        annotate_user_history(&mut history).unwrap();
+        assert_eq!(history[0]["internal_chat_message_metadata_passthrough"]["content_item_kinds"][0], "user.text");
+        assert_eq!(history[0]["content"], original["history"][0]["content"]);
+        let forged = Request { history, ..serde_json::from_value(original).unwrap() };
+        assert!(validate(&forged).is_err());
     }
 }

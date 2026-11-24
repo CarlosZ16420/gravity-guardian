@@ -12,8 +12,6 @@ public sealed class Settings
 {
     public string Model { get; set; } = "codex-auto-review";
     public string Effort { get; set; } = "low";
-    public string CodexPath { get; set; } = "";
-    public string[] CodexPrefixArguments { get; set; } = [];
     public string? Proxy { get; set; }
     public string DataDirectory { get; set; } = "";
     public string PolicyDirectory { get; set; } = "";
@@ -23,12 +21,8 @@ public sealed class Settings
     public int ReviewTimeoutSeconds { get; set; } = 90;
     public int HookTimeoutSeconds { get; set; } = 100;
     public int MaxInputBytes { get; set; } = 524288;
-    public int MaxContextBytes { get; set; } = 131072;
     public int MaxQueue { get; set; } = 8;
     public bool EnableNativeRouting { get; set; } = true;
-    public bool EnableReviewerSessions { get; set; } = true;
-    // Old installations remain explicit CLI users until upgraded by Install.ps1.
-    public string ReviewerBackend { get; set; } = "Cli";
     public string GuardianPath { get; set; } = "";
     public string[] GuardianPrefixArguments { get; set; } = [];
     public bool EnableNativeState { get; set; }
@@ -36,59 +30,69 @@ public sealed class Settings
     public string NativeStateLogPath { get; set; } = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),"Antigravity","logs","main.log");
     public int NativeStateTimeoutMilliseconds { get; set; } = 4000;
     public int MaxNativeHistoryBytes { get; set; } = 8388608;
-    public int MaxEvidenceBytes { get; set; } = 49152;
-    public int MaxEvidenceRecords { get; set; } = 40;
-    public int MaxEvidenceContentBytes { get; set; } = 4096;
-    public int MaxReviewerSessionTurns { get; set; } = 8;
-    public int MaxReviewerSessionBytes { get; set; } = 262144;
-    public int MaxReviewerSessionInputTokens { get; set; } = 96000;
     private volatile bool enableDetailedLogs;
     public bool EnableDetailedLogs { get => enableDetailedLogs; set => enableDetailedLogs = value; }
     public int MaxLogSegmentBytes { get; set; } = 16 * 1024 * 1024;
     public string PipeName { get; set; } = "";
     public bool DetailedLogsActive => enableDetailedLogs || string.Equals(Environment.GetEnvironmentVariable("AG_APPROVAL_DETAILED_LOGS"), "1", StringComparison.Ordinal);
 
+    internal static Settings Read(string path) =>
+        JsonSerializer.Deserialize<Settings>(File.ReadAllText(path), Json.Options)
+        ?? throw new InvalidDataException("Empty configuration");
+
     public static Settings Load(string path)
     {
-        var s = JsonSerializer.Deserialize<Settings>(File.ReadAllText(path), Json.Options)
-            ?? throw new InvalidDataException("Empty configuration");
-        if (s.Model != "codex-auto-review" || s.Effort != "low")
+        var s = Read(path);
+        s.Validate(path);
+        return s;
+    }
+
+    internal void Validate(string path)
+    {
+        if (Model != "codex-auto-review" || Effort != "low")
             throw new InvalidDataException("This release is validated only for codex-auto-review / low");
-        foreach (var p in new[] { s.DataDirectory, s.PolicyDirectory, s.CodexHome, s.AntigravityConfigDirectory })
+        foreach (var p in new[] { DataDirectory, PolicyDirectory, CodexHome, AntigravityConfigDirectory })
             if (!Path.IsPathFullyQualified(p)) throw new InvalidDataException("Configuration paths must be absolute");
-        if (s.ReviewerBackend is not ("Cli" or "NativeGuardian")) throw new InvalidDataException("Unknown reviewer backend");
-        if (s.ReviewerBackend == "Cli" && string.IsNullOrWhiteSpace(s.CodexPath))
-            throw new InvalidDataException("Configuration paths must be absolute");
-        if (!string.IsNullOrWhiteSpace(s.CodexPath))
-        {
-            if (!Path.IsPathFullyQualified(s.CodexPath)) throw new InvalidDataException("Configuration paths must be absolute");
-            if (!File.Exists(s.CodexPath)) throw new FileNotFoundException("Codex executable not found");
-        }
-        else
-        {
-            s.CodexPath = "";
-        }
-        if(s.ReviewerBackend=="NativeGuardian"&&(!Path.IsPathFullyQualified(s.GuardianPath)||!File.Exists(s.GuardianPath)))throw new InvalidDataException("Native Guardian executable is missing");
-        if(s.ReviewerBackend=="NativeGuardian"&&s.GuardianPrefixArguments.Length>0)throw new InvalidDataException("Native Guardian prefix arguments are reserved for in-process test fixtures");
-        if(s.EnableNativeState&&!Path.IsPathFullyQualified(s.NativeStateLogPath))throw new InvalidDataException("Native state log path must be absolute");
-        if(s.NativeStateTimeoutMilliseconds is < 100 or > 5000 || s.MaxNativeHistoryBytes is < 262144 or > 8388608)throw new InvalidDataException("Invalid native state/history limits");
-        if (s.ReviewTimeoutSeconds is < 1 or > 120 || s.HookTimeoutSeconds <= s.ReviewTimeoutSeconds || s.HookTimeoutSeconds > 150)
+        if(string.IsNullOrWhiteSpace(GuardianPath))
+            GuardianPath=Path.Combine(Path.GetDirectoryName(Path.GetFullPath(path))!,"native","ag-guardian-host.exe");
+        if(!Path.IsPathFullyQualified(GuardianPath)||!File.Exists(GuardianPath))
+            throw new InvalidDataException("Native Guardian executable is missing");
+        if(GuardianPrefixArguments.Length>0)throw new InvalidDataException("Native Guardian prefix arguments are reserved for in-process test fixtures");
+        if(EnableNativeState&&!Path.IsPathFullyQualified(NativeStateLogPath))throw new InvalidDataException("Native state log path must be absolute");
+        if(NativeStateTimeoutMilliseconds is < 100 or > 5000 || MaxNativeHistoryBytes is < 262144 or > 8388608)throw new InvalidDataException("Invalid native state/history limits");
+        if (ReviewTimeoutSeconds is < 1 or > 120 || HookTimeoutSeconds <= ReviewTimeoutSeconds || HookTimeoutSeconds > 150)
             throw new InvalidDataException("Invalid nested deadlines");
-        if (s.MaxInputBytes is < 1024 or > 1048576 || s.MaxContextBytes is < 1024 or > 524288 || s.MaxQueue is < 1 or > 32)
+        if (MaxInputBytes is < 1024 or > 1048576 || MaxQueue is < 1 or > 32)
             throw new InvalidDataException("Invalid resource limits");
-        if(s.MaxEvidenceBytes is < 1024 or > 131072 || s.MaxEvidenceRecords is < 1 or > 100 || s.MaxEvidenceContentBytes is < 256 or > 16384 ||
-            s.MaxReviewerSessionTurns is < 1 or > 32 || s.MaxReviewerSessionBytes is < 16384 or > 1048576 || s.MaxReviewerSessionInputTokens is < 4096 or > 160000)
-            throw new InvalidDataException("Invalid reviewer context/session limits");
-        if(s.MaxLogSegmentBytes is < 65536 or > 67108864)
+        if(MaxLogSegmentBytes is < 65536 or > 67108864)
             throw new InvalidDataException("Invalid log segment size limit");
-        if (s.TranscriptRoots.Length == 0 || s.TranscriptRoots.Any(p => !Path.IsPathFullyQualified(p)))
+        if (TranscriptRoots.Length == 0 || TranscriptRoots.Any(p => !Path.IsPathFullyQualified(p)))
             throw new InvalidDataException("Transcript roots must be explicit absolute paths");
-        if (string.IsNullOrEmpty(s.PipeName))
+        if (string.IsNullOrEmpty(PipeName))
         {
             var owner = OperatingSystem.IsWindows() ? WindowsIdentity.GetCurrent().User!.Value : Environment.UserName;
-            s.PipeName = "ag-codex-" + Json.Hash(owner + Path.GetFullPath(path))[..20];
+            PipeName = "ag-codex-" + Json.Hash(owner + Path.GetFullPath(path))[..20];
         }
-        return s;
+    }
+
+    // Keep the switch in the data directory so plugin updates preserve the user's choice.
+    private string TakeoverPausePath => Path.IsPathFullyQualified(DataDirectory)
+        ? Path.Combine(DataDirectory, "approval-takeover-paused")
+        : throw new InvalidDataException("Data directory must be an absolute path");
+
+    internal bool IsTakeoverEnabled() => !File.Exists(TakeoverPausePath);
+
+    internal void SetTakeoverEnabled(bool enabled)
+    {
+        var path = TakeoverPausePath;
+        if (enabled)
+        {
+            if (Directory.Exists(DataDirectory)) File.Delete(path);
+            return;
+        }
+
+        Directory.CreateDirectory(DataDirectory);
+        using var pause = File.Open(path, FileMode.OpenOrCreate, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete);
     }
 }
 

@@ -43,30 +43,6 @@ public static class ReviewCorpus
         var path=Path.Combine(output,"manifest.json");await File.WriteAllTextAsync(path,manifest.ToJsonString(Json.PromptOptions));
         return Json.Encode(new{manifestPath=path,originalModelDenials=manifest.Count,newlyOmittedRecords=0,actionExecuted=false,byTool=manifest.GroupBy(r=>Json.Text(r,"tool")).ToDictionary(g=>g.Key!,g=>g.Count())});
     }
-    public static async Task RunAsync(Settings settings,string manifestPath)
-    {
-        var manifest=JsonNode.Parse(await File.ReadAllTextAsync(manifestPath))!.AsArray();var policy=new Policy(settings.PolicyDirectory);
-        var output=Path.Combine(Path.GetDirectoryName(Path.GetFullPath(manifestPath))!,"runs",DateTime.UtcNow.ToString("yyyyMMdd-HHmmss"));Directory.CreateDirectory(output);
-        settings.DataDirectory=output;
-        // Fixed corpus: one old and one v2 review per record, sequential. Never sample until allowed.
-        foreach(var entry in manifest)
-        foreach(var version in new[]{"v1","v2"})
-        {
-            var prompt=await File.ReadAllTextAsync(Json.Text(entry,version+"Path")!);
-            if(Json.Hash(prompt)!=Json.Text(entry,version+"Hash"))throw new InvalidDataException("Corpus integrity changed");
-            if(Json.Text(entry,"policyHash")!=policy.Hash)throw new InvalidDataException("Corpus policy changed");
-            var doc=JsonNode.Parse(prompt)!;var action=doc["planned_action"]!;var id=Guid.NewGuid().ToString("N");
-            var input=new ReviewInput(id,Json.Text(doc,"action_sha256")!,Json.Text(action,"conversationId")!,Json.Text(action["toolCall"],"name")!,Json.Text(action,"cwd")!,prompt,Json.Hash(prompt));
-            Console.WriteLine(Json.Encode(new{phase="started",originalRequestId=Json.Text(entry,"requestId"),version,output,actionExecuted=false}));
-            GateResponse result;string? text=null;using var deadline=new CancellationTokenSource(TimeSpan.FromSeconds(90));
-            try{text=await new CodexReviewer(settings,policy).ReviewAsync(input,deadline.Token);result=policy.Apply(text,id,input.Hash);}
-            catch(OperationCanceledException){result=GateResponse.NeedsHuman(id,input.Hash,"Corpus review timeout","review_timeout");}
-            catch(Exception e){result=GateResponse.NeedsHuman(id,input.Hash,e.Message);}
-            var record=new{originalRequestId=Json.Text(entry,"requestId"),version,policyHash=policy.Hash,adapterInstructionHash=version=="v1"?Json.Hash(Json.Text(doc,"integration")!):ReviewAdapter.Hash,model=settings.Model,effort=settings.Effort,result,assessment=text,actionExecuted=false};
-            await File.WriteAllTextAsync(Path.Combine(output,Json.Text(entry,"requestId")+"."+version+".json"),Json.Encode(record));Console.WriteLine(Json.Encode(record));
-            if(result.Decision=="force_ask"){Console.WriteLine("Corpus stopped on technical failure; no remaining calls or business actions were attempted.");return;}
-        }
-    }
     public static async Task<string> ValidateBindingsAsync(string manifestPath)
     {
         var manifest=JsonNode.Parse(await File.ReadAllTextAsync(manifestPath))!.AsArray();

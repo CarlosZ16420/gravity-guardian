@@ -1,8 +1,8 @@
 diff --git a/codex-rs/core/Cargo.toml b/codex-rs/core/Cargo.toml
-index 542abf9..5ffc5cf 100644
+index f3b137e..a9e3297 100644
 --- a/codex-rs/core/Cargo.toml
 +++ b/codex-rs/core/Cargo.toml
-@@ -114,6 +114,7 @@ rmcp = { workspace = true, default-features = false, features = [
+@@ -112,6 +112,7 @@ rmcp = { workspace = true, default-features = false, features = [
  serde = { workspace = true, features = ["derive"] }
  serde_json = { workspace = true }
  sha1 = { workspace = true }
@@ -11,10 +11,10 @@ index 542abf9..5ffc5cf 100644
  similar = { workspace = true }
  tempfile = { workspace = true }
 diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
-index 2ac9b93..1093e0f 100644
+index 9fa408a..42ba8d0 100644
 --- a/codex-rs/core/src/client.rs
 +++ b/codex-rs/core/src/client.rs
-@@ -32,6 +32,54 @@ use std::sync::OnceLock;
+@@ -33,6 +33,73 @@ use std::sync::OnceLock;
  use std::sync::atomic::AtomicBool;
  use std::sync::atomic::Ordering;
  
@@ -66,13 +66,32 @@ index 2ac9b93..1093e0f 100644
 +    std::mem::take(&mut *EXTERNAL_GUARDIAN_DIAGNOSTICS.lock().unwrap_or_else(|error| error.into_inner()))
 +}
 +
++static EXTERNAL_GUARDIAN_ACTION_TOO_LARGE: AtomicBool = AtomicBool::new(false);
++static EXTERNAL_GUARDIAN_AUTHORIZATION_TOO_LARGE: AtomicBool = AtomicBool::new(false);
++
++pub(crate) fn set_external_guardian_action_too_large(value: bool) {
++    EXTERNAL_GUARDIAN_ACTION_TOO_LARGE.store(value, Ordering::SeqCst);
++}
++
++pub(crate) fn external_guardian_action_too_large() -> bool {
++    EXTERNAL_GUARDIAN_ACTION_TOO_LARGE.load(Ordering::SeqCst)
++}
++
++pub(crate) fn set_external_guardian_authorization_too_large(value: bool) {
++    EXTERNAL_GUARDIAN_AUTHORIZATION_TOO_LARGE.store(value, Ordering::SeqCst);
++}
++
++pub(crate) fn external_guardian_authorization_too_large() -> bool {
++    EXTERNAL_GUARDIAN_AUTHORIZATION_TOO_LARGE.load(Ordering::SeqCst)
++}
++
+ mod response_delivery;
  #[path = "client_tool_metadata.rs"]
  mod tool_metadata;
- 
-@@ -2520,6 +2568,15 @@ impl ModelClientSession {
+@@ -2113,6 +2180,15 @@ impl ResponsesHttpExecutor<'_> {
          responses_metadata: &CodexResponsesMetadata,
          inference_trace: &InferenceTraceContext,
-     ) -> Result<ResponseStream> {
+     ) -> Result<OpenedModelResponse> {
 +        if std::env::var("AG_GUARDIAN_HOST").as_deref() == Ok("1") {
 +            if !prompt.tools.is_empty() {
 +                return Err(CodexErr::Fatal("External Guardian cannot expose tools".into()));
@@ -82,33 +101,57 @@ index 2ac9b93..1093e0f 100644
 +                .map_err(|_| CodexErr::Fatal("External Guardian sampling outside review".into()))? + 1;
 +            eprintln!("{{\"event\":\"guardian_inference_dispatch\",\"sequence\":{sequence},\"toolDefinitions\":0}}");
 +        }
-         let wire_api = self.client.state.provider.info().wire_api;
-         match wire_api {
-             WireApi::Responses => {
+         let auth_manager = self.client.state.provider.auth_manager();
+         let mut auth_recovery = auth_manager
+             .as_ref()
 diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
-index 968d331..9c98a07 100644
+index 4b8e0b3..1625f71 100644
 --- a/codex-rs/core/src/codex_thread.rs
 +++ b/codex-rs/core/src/codex_thread.rs
-@@ -221,6 +221,13 @@ pub struct BackgroundTerminalInfo {
+@@ -290,6 +290,13 @@ pub(crate) async fn resolve_client_inputs(
  /// Conduit for the bidirectional stream of messages that compose a thread
  /// (formerly called a conversation) in Codex.
  impl CodexThread {
 +    /// Source-verified external history and a proposed action, without executing that action.
-+    pub async fn assess_external_guardian(&self, delta: serde_json::Value, action: serde_json::Value, host_facts: serde_json::Value, timeout_ms: u64) -> anyhow::Result<serde_json::Value> {
++    pub async fn assess_external_guardian(&self, delta: serde_json::Value, action: serde_json::Value, host_facts: serde_json::Value, timeout_ms: u64, cancellation: tokio_util::sync::CancellationToken) -> anyhow::Result<serde_json::Value> {
 +        let items: Vec<ResponseItem> = serde_json::from_value(delta)?;
 +        let action: ResponseItem = serde_json::from_value(action)?;
-+        crate::guardian::assess_external_guardian(Arc::clone(&self.session), items, action, host_facts, timeout_ms).await
++        crate::guardian::assess_external_guardian(Arc::clone(&self.session), items, action, host_facts, timeout_ms, cancellation).await
 +    }
 +
      pub(crate) fn new(
          session: Arc<Session>,
          io: SessionIo,
 diff --git a/codex-rs/core/src/guardian/input_budget.rs b/codex-rs/core/src/guardian/input_budget.rs
-index cc3b5ec..5432f52 100644
+index ca2768e..4260ff9 100644
 --- a/codex-rs/core/src/guardian/input_budget.rs
 +++ b/codex-rs/core/src/guardian/input_budget.rs
-@@ -35,6 +35,12 @@ pub(crate) struct PendingReviewContext(pub ComposedContext);
+@@ -55,7 +55,8 @@ impl<'a> PreparedReviewContext<'a> {
+         match elastic {
+             Some(config) => Ok(Self::Elastic(
+                 context
+-                    .prepare_elastic_entries(config)?
++                    .prepare_elastic_entries(config)
++                    .inspect_err(classify_authorization_budget)?
+                     .prepare_delivery(history)?,
+             )),
+             None => {
+@@ -76,13 +77,26 @@ impl<'a> PreparedReviewContext<'a> {
+             .unwrap_or_default();
+         match self {
+             Self::Fixed(context) => context.enforce_budget(budget, notice, history_truncation),
+-            Self::Elastic(context) => context.enforce_budget(budget, notice),
++            Self::Elastic(context) => context.enforce_budget(budget, notice).inspect_err(classify_authorization_budget),
+         }
+     }
+ }
  
++fn classify_authorization_budget(error: &codex_guardian_context::SectionError) {
++    if matches!(error, codex_guardian_context::SectionError::EvidenceLimitExceeded { section: "external_authorization" }) {
++        crate::client::set_external_guardian_authorization_too_large(true);
++    }
++}
++
  pub(super) use codex_guardian_reviewer::CheckpointRecovery;
  
 +fn external_facts_tokens() -> usize {
@@ -117,20 +160,36 @@ index cc3b5ec..5432f52 100644
 +        .map_or(0, |item| usize::try_from(estimate_item_token_count(item)).unwrap_or(usize::MAX))
 +}
 +
++
  /// Restart a reused reviewer before paying for a summary we would discard.
  /// A fresh checkpoint stays intact while final input selection makes the review fit.
  pub(crate) fn should_compact(session: &Session) -> CodexResult<bool> {
-@@ -73,7 +79,8 @@ pub(crate) async fn check_pending(session: &Session, turn: &TurnContext) -> Code
+@@ -121,8 +135,9 @@ pub(crate) async fn check_pending(session: &Session, turn: &TurnContext) -> Code
+         return Ok(());
      };
      let base = session.get_prompt_base_instructions().await;
-     let minimum_prefix =
--        codex_protocol::protocol::TruncationPolicy::Bytes(base.text.len()).token_budget();
-+        codex_protocol::protocol::TruncationPolicy::Bytes(base.text.len()).token_budget()
-+            .saturating_add(external_facts_tokens());
+-    let minimum_prefix =
++    let base_tokens =
+         codex_protocol::protocol::TruncationPolicy::Bytes(base.text.len()).token_budget();
++    let minimum_prefix = base_tokens.saturating_add(external_facts_tokens());
      let maximum = effective_input_token_limit(turn.model_info(), turn.config.model_context_window)
          .saturating_sub(super::request_budget::INPUT_TOKEN_MARGIN);
-     let mut context = pending.0.clone();
-@@ -176,6 +183,7 @@ pub(crate) async fn finalize(
+     let context = pending.context.clone();
+@@ -136,6 +151,13 @@ pub(crate) async fn check_pending(session: &Session, turn: &TurnContext) -> Code
+         .await;
+     let context = PreparedReviewContext::prepare(context, pending.elastic.as_ref(), &history)
+         .map_err(|error| CodexErr::InvalidRequest(error.to_string()))?;
++    if std::env::var("AG_GUARDIAN_HOST").as_deref() == Ok("1")
++        && let PreparedReviewContext::Elastic(context) = &context
++        && context.planned_action_tokens().saturating_add(base_tokens) > maximum
++    {
++        crate::client::set_external_guardian_action_too_large(true);
++        return Err(CodexErr::ContextWindowExceeded);
++    }
+     let context_tokens = match &context {
+         PreparedReviewContext::Fixed(context) => context.estimated_tokens(),
+         PreparedReviewContext::Elastic(context) => context.estimated_tokens(),
+@@ -225,6 +247,7 @@ pub(crate) async fn finalize(
          /*include_internal*/ true,
      )?;
      let mut existing = super::request_budget::estimate_request_tokens(&request)
@@ -139,22 +198,22 @@ index cc3b5ec..5432f52 100644
      // These reminders are appended after the accepted input. Reserve their full
      // serialized cost before choosing optional evidence, even if the time
 diff --git a/codex-rs/core/src/guardian/mod.rs b/codex-rs/core/src/guardian/mod.rs
-index 68e2a40..1cfe512 100644
+index 05edc81..45eb2b0 100644
 --- a/codex-rs/core/src/guardian/mod.rs
 +++ b/codex-rs/core/src/guardian/mod.rs
-@@ -18,6 +18,7 @@ mod request_budget;
- pub(crate) use request_budget::ExhaustedReviewBudget;
- pub(crate) use request_budget::prepare_prompt as prepare_guardian_prompt;
+@@ -21,6 +21,7 @@ pub(crate) use request_budget::prepare_prompt as prepare_guardian_prompt;
+ mod response_resampling;
+ pub(crate) use response_resampling::ResponseResampling;
  mod review;
 +pub(crate) use review::assess_external_guardian;
  mod review_session;
  mod reviewer_config;
- pub(crate) use reviewer_config::resolve_review_model;
+ pub use reviewer_config::guardian_policy_model;
 diff --git a/codex-rs/core/src/guardian/request_budget.rs b/codex-rs/core/src/guardian/request_budget.rs
-index d1cf8d6..d530a75 100644
+index 877b5e8..e7853d8 100644
 --- a/codex-rs/core/src/guardian/request_budget.rs
 +++ b/codex-rs/core/src/guardian/request_budget.rs
-@@ -58,6 +58,11 @@ pub(crate) async fn prepare_prompt(
+@@ -62,6 +62,11 @@ pub(crate) async fn prepare_prompt(
      step: &StepContext,
      metadata: &crate::responses_metadata::CodexResponsesMetadata,
  ) -> CodexResult<()> {
@@ -167,10 +226,10 @@ index d1cf8d6..d530a75 100644
      let maximum = effective_input_token_limit(model, step.turn.config.model_context_window)
          .saturating_sub(INPUT_TOKEN_MARGIN);
 diff --git a/codex-rs/core/src/guardian/review.rs b/codex-rs/core/src/guardian/review.rs
-index b2307e9..b6599d9 100644
+index 2d13552..6200b8b 100644
 --- a/codex-rs/core/src/guardian/review.rs
 +++ b/codex-rs/core/src/guardian/review.rs
-@@ -12,12 +12,10 @@ use codex_features::Feature;
+@@ -13,12 +13,10 @@ use codex_features::Feature;
  use codex_guardian_reviewer::GuardianAssessment;
  use codex_guardian_reviewer::GuardianReviewError;
  use codex_guardian_reviewer::GuardianReviewOutcome;
@@ -183,9 +242,9 @@ index b2307e9..b6599d9 100644
  use codex_guardian_reviewer::run_with_retry;
  use codex_prompts::ResolvedModelMessages;
  use codex_protocol::openai_models::GuardianScope;
-@@ -132,6 +130,24 @@ pub(super) async fn guardian_review_session_config(
-         context.personality,
+@@ -152,6 +150,24 @@ pub(super) async fn guardian_review_session_config(
          model_messages,
+         retrieval,
      )?;
 +    if std::env::var("AG_GUARDIAN_HOST").as_deref() == Ok("1") {
 +        use sha2::{Digest, Sha256};
@@ -208,7 +267,7 @@ index b2307e9..b6599d9 100644
      if context.model_info.computer_use_review_required() {
          spawn_config
              .features
-@@ -307,6 +323,105 @@ async fn run_guardian_review_session_before_deadline(
+@@ -311,6 +327,118 @@ async fn run_guardian_review_session_before_deadline(
      (session_outcome.into(), session_analytics_result)
  }
  
@@ -219,8 +278,11 @@ index b2307e9..b6599d9 100644
 +    action: codex_protocol::models::ResponseItem,
 +    host_facts: serde_json::Value,
 +    timeout_ms: u64,
++    cancellation: CancellationToken,
 +) -> anyhow::Result<serde_json::Value> {
 +    crate::client::take_external_guardian_diagnostics();
++    crate::client::set_external_guardian_action_too_large(false);
++    crate::client::set_external_guardian_authorization_too_large(false);
 +    let start = std::time::Instant::now();
 +    let deadline = ReviewDeadline::from_timeout(Some(Duration::from_millis(timeout_ms)));
 +    crate::client::begin_external_guardian_measurement(host_facts);
@@ -232,11 +294,11 @@ index b2307e9..b6599d9 100644
 +    let context = GuardianReviewContext::from(&turn);
 +    let (outcome, analytics, _) = run_with_retry(
 +        GuardianReviewSessionLimits { max_attempts: codex_guardian_reviewer::MAX_REVIEW_ATTEMPTS, deadline },
-+        None, None, |deadline| {
++        Some(&cancellation), None, |deadline| {
 +            let attempt = run_guardian_review_session_before_deadline(
 +                Arc::clone(&session), context.clone(), request.clone(), request.guardian_scope(),
 +                ApprovalRequestReasons::default(),
-+                ReviewAttemptOptions { authorization: None, external_cancel: None, deadline },
++                ReviewAttemptOptions { authorization: None, external_cancel: Some(cancellation.clone()), deadline },
 +            );
 +            async move {
 +                let (outcome, analytics) = attempt.await;
@@ -255,10 +317,14 @@ index b2307e9..b6599d9 100644
 +    let assessment = match outcome {
 +        GuardianReviewOutcome::Completed(value) => serde_json::to_value(value)?,
 +        outcome => {
-+            let failure = match &outcome {
++            let failure = if crate::client::external_guardian_action_too_large() {
++                serde_json::json!({"reasonCode":"native_action_budget_exceeded","rawErrorKind":"action_input_budget","retryable":false})
++            } else if crate::client::external_guardian_authorization_too_large() {
++                serde_json::json!({"reasonCode":"review_authorization_budget_exceeded","rawErrorKind":"authorization_budget","retryable":false})
++            } else { match &outcome {
 +                GuardianReviewOutcome::Error(error) => external_failure(error),
 +                _ => serde_json::json!({"reasonCode":"adapter_incompatible","rawErrorKind":"unexpected_cached_approval","retryable":false}),
-+            };
++            }};
 +            return Ok(serde_json::json!({
 +                "error": "Native Guardian did not produce an assessment",
 +                "failure": failure, "attemptCount": analytics.attempt_count,
@@ -279,6 +345,8 @@ index b2307e9..b6599d9 100644
 +    use codex_protocol::protocol::CodexErrorInfo as Info;
 +    use GuardianReviewError as Error;
 +    let (code, kind, status, retryable, retry_after) = match error {
++        Error::Session { message, .. } if message.contains("account changed while preparing model request") =>
++            ("action_invalidated", serde_json::json!("review_account_changed"), None, false, None),
 +        Error::Session { error_info, retry_at, .. } => {
 +            let retry_after = retry_at.map(|at| at.saturating_duration_since(Instant::now()).as_millis() as u64);
 +            let (code, status, retryable) = match error_info {
@@ -295,7 +363,7 @@ index b2307e9..b6599d9 100644
 +                    *http_status_code, matches!(http_status_code, None | Some(408 | 429 | 500..=599))),
 +                Some(Info::FlexUnavailable | Info::ServerOverloaded | Info::PolicyCapacityUnavailable
 +                    | Info::InternalServerError) => ("upstream_unavailable", None, true),
-+                Some(Info::ContextWindowExceeded) => ("context_invalid", None, false),
++                Some(Info::ContextWindowExceeded) => ("review_input_budget_exceeded", None, false),
 +                _ => ("reviewer_unavailable", None, false),
 +            };
 +            (code, serde_json::json!(format!("{error_info:?}")), status, retryable, retry_after)
@@ -304,7 +372,11 @@ index b2307e9..b6599d9 100644
 +        Error::Timeout => ("review_timeout", serde_json::json!("timeout"), None, false, None),
 +        Error::Cancelled => ("review_cancelled", serde_json::json!("cancelled"), None, false, None),
 +        Error::StaleAuthorization => ("action_invalidated", serde_json::json!("stale_authorization"), None, true, None),
-+        Error::InputBudgetExceeded | Error::PromptBuild { .. } =>
++        Error::InputBudgetExceeded =>
++            ("review_input_budget_exceeded", serde_json::json!("input_budget"), None, false, None),
++        Error::PromptBuild { message } if message.contains("external_authorization") =>
++            ("review_authorization_budget_exceeded", serde_json::json!("authorization_budget"), None, false, None),
++        Error::PromptBuild { .. } =>
 +            ("context_invalid", serde_json::json!(format!("{:?}", error.failure_reason())), None, false, None),
 +    };
 +    serde_json::json!({"reasonCode":code,"rawErrorKind":kind,"httpStatus":status,
@@ -315,10 +387,10 @@ index b2307e9..b6599d9 100644
  pub(super) async fn run_guardian_review_session_with_retry(
      session: Arc<Session>,
 diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
-index e4a092e..2e75bb8 100644
+index f3b2ec7..73facc2 100644
 --- a/codex-rs/core/src/session/turn.rs
 +++ b/codex-rs/core/src/session/turn.rs
-@@ -625,6 +625,14 @@ pub(crate) async fn run_turn(
+@@ -735,6 +735,14 @@ pub(crate) async fn run_turn(
                  .instrument(trace_span!("run_turn.collect_post_sampling_state"))
                  .await;
                  let needs_follow_up = model_needs_follow_up || has_pending_input;
@@ -327,18 +399,19 @@ index e4a092e..2e75bb8 100644
 +                        "event": "guardian_sampling_completed",
 +                        "modelNeedsFollowUp": model_needs_follow_up,
 +                        "hasPendingInput": has_pending_input,
-+                        "hasAssistantMessage": sampling_request_last_agent_message.is_some(),
++                        "hasAssistantMessage": completion_hooks.last_assistant_message.is_some(),
 +                    }));
 +                }
                  let token_limit_reached = token_status.token_limit_reached;
  
                  super::async_compaction::maybe_start(
-@@ -1834,6 +1842,17 @@ async fn run_sampling_request(
+@@ -2151,7 +2159,17 @@ async fn run_sampling_request(
              &mut draining_for_mailbox,
+             &tool_cancellation,
          )
-         .await
+-        .await;
++        .await
 +        .inspect_err(|err| {
-+            // Capture the original error before a retry can hit the external dispatch cap.
 +            if std::env::var("AG_GUARDIAN_HOST").as_deref() == Ok("1") {
 +                crate::client::record_external_guardian_diagnostic(serde_json::json!({
 +                    "event": "guardian_sampling_failed",
@@ -347,64 +420,133 @@ index e4a092e..2e75bb8 100644
 +                    "hasServerRetryAdvice": err.retry_after().is_some(),
 +                }));
 +            }
-+        })
-         {
-             Ok(output) => {
-                 return Ok((output, notify_messages));
-diff --git a/codex-rs/guardian-context/src/action.rs b/codex-rs/guardian-context/src/action.rs
-index fcfbd16..514d605 100644
---- a/codex-rs/guardian-context/src/action.rs
-+++ b/codex-rs/guardian-context/src/action.rs
-@@ -170,23 +170,24 @@ impl SectionContributor for PlannedActionSection {
-         {
-             return Ok(None);
++        });
+         if SamplingInterrupt::enabled(&turn_context) && tool_cancellation.is_cancelled() {
+             return Err(CodexErr::TurnAborted);
          }
--        if let PlannedActionKind::ToolCall(call) = &action.kind
--            && !matches!(
--                call.as_ref(),
--                codex_protocol::models::ResponseItem::FunctionCall { .. }
--            )
--        {
--            return Err(SectionError::UnsupportedDelivery {
--                section: "planned_action",
--            });
--        }
--        if let PlannedActionKind::ToolCall(call) = &action.kind
--            && crate::native_tool_call::estimate_tokens(call) > 9_000
--        {
--            return Err(SectionError::EvidenceLimitExceeded {
--                section: "native_tool_call",
--            });
-+        if let PlannedActionKind::ToolCall(call) = &action.kind {
-+            validate_native_tool_call(call)?;
-         }
-         Ok(Some(ContextSection::PlannedAction(action.clone())))
+diff --git a/codex-rs/guardian-context/src/allocation.rs b/codex-rs/guardian-context/src/allocation.rs
+index dd5c14b..3573f2b 100644
+--- a/codex-rs/guardian-context/src/allocation.rs
++++ b/codex-rs/guardian-context/src/allocation.rs
+@@ -169,6 +169,11 @@ pub struct PreparedElasticContext<'a> {
+ }
+ 
+ impl PreparedElasticContext<'_> {
++    /// Exact action demand using the same cost calculation as allocation.
++    pub fn planned_action_tokens(&self) -> usize {
++        planned_action_tokens(&self.context)
++    }
++
+     /// Removes history-delivered instructions and deduplicates native deliveries.
+     /// Pending instruction proof waits for Required selection.
+     pub fn prepare_delivery(
+@@ -238,9 +243,16 @@ impl PreparedElasticContext<'_> {
+             } else {
+                 0
+             };
+-            let allowance = remaining
+-                .checked_sub(demand.protected_tokens.saturating_add(notice_tokens))
+-                .ok_or(REQUEST_BUDGET_EXCEEDED)?;
++            let protected_tokens = demand.protected_tokens.saturating_add(notice_tokens);
++            let allowance = remaining.checked_sub(protected_tokens).ok_or_else(|| {
++                if std::env::var("AG_GUARDIAN_HOST").as_deref() == Ok("1")
++                    && planned_action_tokens(&context).saturating_add(notice_tokens) <= remaining
++                {
++                    SectionError::EvidenceLimitExceeded { section: "external_authorization" }
++                } else {
++                    REQUEST_BUDGET_EXCEEDED
++                }
++            })?;
+             let selected = allocate_items(&mut demand, self.config, allowance, &pinned)?;
+             minimums_funded |= demand.minimums_fit;
+             let sources = context
+@@ -289,6 +301,13 @@ impl PreparedElasticContext<'_> {
      }
  }
-+
-+/// Validate the exact native action before a host commits it to a review session.
-+pub fn validate_native_tool_call(call: &codex_protocol::models::ResponseItem) -> Result<(), SectionError> {
-+    if !matches!(call, codex_protocol::models::ResponseItem::FunctionCall { .. }) {
-+        return Err(SectionError::UnsupportedDelivery {
-+            section: "planned_action",
-+        });
-+    }
-+    if crate::native_tool_call::estimate_tokens(call) > 9_000 {
-+        return Err(SectionError::EvidenceLimitExceeded {
-+            section: "native_tool_call",
-+        });
-+    }
-+    Ok(())
+ 
++fn planned_action_tokens(context: &ComposedContext) -> usize {
++    context.sections.iter()
++        .filter(|section| section.id == "planned_action")
++        .map(section_tokens)
++        .fold(0, usize::saturating_add)
 +}
-diff --git a/codex-rs/guardian-context/src/lib.rs b/codex-rs/guardian-context/src/lib.rs
-index cabc1b0..83e2814 100644
---- a/codex-rs/guardian-context/src/lib.rs
-+++ b/codex-rs/guardian-context/src/lib.rs
-@@ -29,6 +29,7 @@ pub use action::ActionPresentation;
- pub use action::PlannedAction;
- pub use action::PlannedActionKind;
- pub use action::action_for_review;
-+pub use action::validate_native_tool_call;
- pub use authorization::GuardianRootMessage;
- pub use authorization::RootConversationContent;
- pub use preparation::root::RootAssistantCandidate;
++
+ const MESSAGE_ID_PREFIX: &str = "msg";
+ const ID_FIELD_FRAMING: &str = r#","id":"#;
+ 
+diff --git a/codex-rs/guardian-context/src/authorization.rs b/codex-rs/guardian-context/src/authorization.rs
+index d5420b0..af7260e 100644
+--- a/codex-rs/guardian-context/src/authorization.rs
++++ b/codex-rs/guardian-context/src/authorization.rs
+@@ -120,10 +120,12 @@ pub(crate) fn root_conversation_items(
+             | GuardianRootMessage::LegacyContextScope => true,
+         };
+         let verified_answer = matches!(message, GuardianRootMessage::UserInput(_));
++        let external_user = std::env::var("AG_GUARDIAN_HOST").as_deref() == Ok("1")
++            && matches!(&message, GuardianRootMessage::User(_));
+         let text = message.render();
+         let item = if verified_answer {
+             crate::Budgeted::verified_answer(text)
+-        } else if protected {
++        } else if protected || external_user {
+             crate::Budgeted::protected(text)
+         } else {
+             crate::Budgeted::required(text)
+diff --git a/codex-rs/guardian-context/src/preparation/elastic.rs b/codex-rs/guardian-context/src/preparation/elastic.rs
+index 32313e1..a0f1b3c 100644
+--- a/codex-rs/guardian-context/src/preparation/elastic.rs
++++ b/codex-rs/guardian-context/src/preparation/elastic.rs
+@@ -28,6 +28,9 @@ impl ComposedContext {
+         mut self,
+         config: &ElasticBudgetConfig,
+     ) -> Result<PreparedElasticContext<'_>, SectionError> {
++        let external_guardian = std::env::var("AG_GUARDIAN_HOST").as_deref() == Ok("1");
++        let missing_answers = crate::GuardianRootMessage::IncompleteVerifiedAnswers.render();
++        let missing_instructions = crate::GuardianRootMessage::IncompleteRootInstructions.render();
+         for section in &mut self.sections {
+             // Request scaffolding is not a contributed evidence section.
+             if matches!(section.id, "intro" | "budget_omission") {
+@@ -53,6 +56,24 @@ impl ComposedContext {
+                     }
+                     for item in items {
+                         item.protected |= section.id == "permissions";
++                        if external_guardian {
++                            if item.protected
++                                && matches!(&item.content, SectionContent::Other(ContentItem::InputText { text })
++                                    if text.trim() == missing_answers.trim()
++                                        || text.trim() == missing_instructions.trim()
++                                        || text.trim() == crate::retained_instructions::USER_OMISSION.trim())
++                            {
++                                return Err(SectionError::EvidenceLimitExceeded {
++                                    section: "external_authorization",
++                                });
++                            }
++                            // Allocation may discard optional evidence. User-authored restrictions
++                            // and verified answers must either travel whole or prevent assessment.
++                            item.protected |= item.verified_answer
++                                || (section.id == "retained_user_instructions"
++                                    && item.retention == crate::Retention::Required)
++                                || (section.id == "conversation_transcript" && item.source.is_some());
++                        }
+                         let maximum = limit(item.retention)?;
+                         let original_tokens = section_content_tokens(&item.content);
+                         if item.protected
+diff --git a/codex-rs/guardian-context/src/preparation/transcript.rs b/codex-rs/guardian-context/src/preparation/transcript.rs
+index 457eb3d..aabbeb3 100644
+--- a/codex-rs/guardian-context/src/preparation/transcript.rs
++++ b/codex-rs/guardian-context/src/preparation/transcript.rs
+@@ -305,10 +305,14 @@ impl ContextProfile {
+                 if included[index] {
+                     Some(match entry.kind {
+                         TranscriptEntryKind::User | TranscriptEntryKind::ManualApproval => {
++                            let external = std::env::var("AG_GUARDIAN_HOST").as_deref() == Ok("1");
+                             if let Some(source) = entry.source {
+                                 let mut item = Budgeted::required(entry.content);
+                                 item.source = Some(source);
++                                item.protected = external;
+                                 item
++                            } else if external {
++                                Budgeted::protected(entry.content)
+                             } else if budgeting == ContextBudgeting::Elastic {
+                                 if entry.kind == TranscriptEntryKind::User {
+                                     Budgeted::optional(entry.content, BudgetPriority::Commentary)

@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([string]$DataDirectory=(Join-Path $env:USERPROFILE '.gemini/codex-approval-data'),[switch]$SkipCodexLoginCheck)
+param([string]$DataDirectory=(Join-Path $env:USERPROFILE '.gemini/codex-approval-data'),[Alias('SkipCodexLoginCheck')][switch]$SkipGuardianAuthCheck)
 $ErrorActionPreference='Stop'
 $taskManifest=Get-Content -Encoding UTF8 -LiteralPath (Join-Path $DataDirectory 'installation.json') -Raw | ConvertFrom-Json
 $taskPlugin=$taskManifest.pluginDirectory
@@ -20,31 +20,31 @@ if(Test-Path -LiteralPath $taskProjects){
     }
 }
 Write-Host ('Reviewer: '+$taskConfig.model+' / '+$taskConfig.effort)
-Write-Host ('Reviewer backend: '+$taskConfig.reviewerBackend+'; native state binding: '+$taskConfig.enableNativeState)
+Write-Host ('Reviewer backend: NativeGuardian; native state binding: '+$taskConfig.enableNativeState)
 Write-Host ('Native ask after eligible technical failure: '+$taskConfig.enableNativeAskHandoff)
-if($taskConfig.reviewerBackend -eq 'NativeGuardian'){
-    $taskVersionRaw=& $taskConfig.guardianPath --version
-    if($LASTEXITCODE -ne 0){throw 'Native Guardian executable failed its offline version check'}
-    $taskVersion=$taskVersionRaw|ConvertFrom-Json
-    $taskGuardianManifest=Get-Content -Encoding UTF8 -LiteralPath (Join-Path (Split-Path $taskConfig.guardianPath) 'SOURCE.json') -Raw|ConvertFrom-Json
-    if($taskVersion.protocol -cne $taskGuardianManifest.protocol -or $taskVersion.upstreamCommit -cne $taskGuardianManifest.upstreamCommit){throw 'Native runtime version differs from source manifest'}
-    if((Get-FileHash -LiteralPath $taskConfig.guardianPath -Algorithm SHA256).Hash.ToLowerInvariant() -ne $taskGuardianManifest.binarySha256){throw 'Native Guardian binary integrity mismatch'}
-    Write-Host ('Native Guardian protocol/upstream/SHA256: '+$taskVersion.protocol+'/'+$taskVersion.upstreamCommit+'/'+$taskGuardianManifest.binarySha256)
-}
+$taskGuardian = if ($taskConfig.guardianPath) { $taskConfig.guardianPath } else { Join-Path $taskPlugin 'native/ag-guardian-host.exe' }
+$taskGuardianManifest=Get-Content -Encoding UTF8 -LiteralPath (Join-Path (Split-Path $taskGuardian) 'SOURCE.json') -Raw|ConvertFrom-Json
+if((Get-FileHash -LiteralPath $taskGuardian -Algorithm SHA256).Hash.ToLowerInvariant() -ne $taskGuardianManifest.binarySha256){throw 'Native Guardian binary integrity mismatch'}
+$taskVersionRaw=& $taskGuardian --version
+if($LASTEXITCODE -ne 0){throw 'Native Guardian executable failed its offline version check'}
+$taskVersion=$taskVersionRaw|ConvertFrom-Json
+if($taskVersion.protocol -cne $taskGuardianManifest.protocol -or $taskVersion.upstreamCommit -cne $taskGuardianManifest.upstreamCommit){throw 'Native runtime version differs from source manifest'}
+Write-Host ('Native Guardian protocol/upstream/SHA256: '+$taskVersion.protocol+'/'+$taskVersion.upstreamCommit+'/'+$taskGuardianManifest.binarySha256)
 Write-Host ('Native read-only routing: '+$taskConfig.enableNativeRouting)
-Write-Host ('Reviewer sessions: '+$taskConfig.enableReviewerSessions+'; evidence budget: '+$taskConfig.maxEvidenceBytes+' bytes')
 $taskHooks=Get-Content -Encoding UTF8 -LiteralPath (Join-Path $taskPlugin 'hooks.json') -Raw|ConvertFrom-Json
 $taskOuterTimeout=$taskHooks.'codex-approval'.PreToolUse[0].hooks[0].timeout
 Write-Host ('Deadlines (review/client/native hook): '+$taskConfig.reviewTimeoutSeconds+'/'+$taskConfig.hookTimeoutSeconds+'/'+$taskOuterTimeout+' seconds')
 if($taskConfig.reviewTimeoutSeconds -ge $taskConfig.hookTimeoutSeconds -or $taskConfig.hookTimeoutSeconds -ge $taskOuterTimeout){Write-Warning 'Nested approval deadlines are out of order; the outer hook may discard the reviewer result.'}
-if(!$SkipCodexLoginCheck){
-    if($taskConfig.codexPath -and (Test-Path -LiteralPath $taskConfig.codexPath)){
-        & $taskConfig.codexPath --version;& $taskConfig.codexPath login status
-    }else{
-        Write-Warning 'Codex CLI path is not configured; CLI fallback is disabled. NativeGuardian uses .codex credentials directly.'
-    }
+$taskRuntime = Join-Path $taskPlugin 'runtime/dotnet.exe'
+$taskAssembly = Join-Path $taskPlugin 'scripts/ag-approval.dll'
+$taskConfigPath = Join-Path $taskPlugin 'approval.json'
+if(!$SkipGuardianAuthCheck){
+    $taskDetectionRaw = & $taskRuntime $taskAssembly detect --config $taskConfigPath --gemini-root $taskManifest.geminiRoot --data-dir $DataDirectory
+    if ($LASTEXITCODE -ne 0) { throw 'Native authentication probe failed' }
+    $taskDetection = ($taskDetectionRaw -join [Environment]::NewLine) | ConvertFrom-Json
+    Write-Host ('Native authentication: ' + ($taskDetection.nativeAuth | ConvertTo-Json -Depth 4 -Compress))
 }
-$taskRunningRaw=& (Join-Path $taskPlugin 'runtime/dotnet.exe') (Join-Path $taskPlugin 'scripts/ag-approval.dll') status --config (Join-Path $taskPlugin 'approval.json')
+$taskRunningRaw=& $taskRuntime $taskAssembly status --config $taskConfigPath
 if($LASTEXITCODE -ne 0){throw 'Approval service is not responding; installed files do not prove a running upgrade'}
 $taskRunning=($taskRunningRaw -join [Environment]::NewLine).Trim()|ConvertFrom-Json
 $taskInstalled=Get-Content -Encoding UTF8 -LiteralPath (Join-Path $taskPlugin 'plugin.json') -Raw|ConvertFrom-Json

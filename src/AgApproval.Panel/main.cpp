@@ -46,7 +46,6 @@ struct PanelConfig {
     std::wstring pluginDirectory;
     std::wstring bundleDirectory;
     std::wstring antigravityPath;
-    std::wstring codexPath;
     bool autoCheckUpdates = true;
     bool autoUpdate = true;
     bool autostart = false;
@@ -89,13 +88,13 @@ struct RuntimeState {
     std::wstring serviceVersion = PANEL_VERSION_WIDE;
     std::wstring serviceDetail = L"正在初始化...";
     std::wstring serviceBackend;
+    std::optional<bool> takeoverEnabled;
+    unsigned takeoverRevision = 0;
     bool detailedLogs = false;
 
     bool agFound = false;
     std::wstring agVersion;
-    bool codexFound = false;
-    bool codexLoggedIn = false;
-    std::wstring codexSummary = L"未检测";
+    std::wstring guardianAuthStatus;
 
     bool updateChecked = false;
     bool updateAvailable = false;
@@ -112,6 +111,7 @@ enum class WorkKind {
     ServiceEnsure,
     LaunchAntigravity,
     DetectEnv,
+    ToggleApprovalTakeover,
     ToggleDetailedLogs,
     CompactLogs,
     CheckAndMaybeUpdate,
@@ -158,6 +158,7 @@ struct App {
     std::atomic<bool> busyRefresh{false};
     std::atomic<bool> busyUpdate{false};
     std::atomic<bool> busyAction{false};
+    bool busyTakeover = false;
     bool uninstallPromptOpen = false;
     bool statsRunning = false;
     bool statsPending = false;
@@ -171,6 +172,7 @@ struct App {
     // Child controls
     HWND lblTitle = nullptr;
     HWND lblStatus = nullptr;
+    HWND btnApprovalTakeover = nullptr;
     HWND lblBackend = nullptr;
     HWND btnLaunchAg = nullptr;
     HWND btnServiceAction = nullptr;
@@ -204,10 +206,9 @@ struct App {
     HWND lblAgTitle = nullptr;
     HWND lblAgPath = nullptr;
     HWND btnBrowseAg = nullptr;
-    HWND lblCodexTitle = nullptr;
-    HWND lblCodexPath = nullptr;
+    HWND lblGuardianTitle = nullptr;
+    HWND lblGuardianAuth = nullptr;
     HWND btnDetectEnv = nullptr;
-    HWND btnBrowseCodex = nullptr;
 
     HWND btnInstallRepair = nullptr;
     HWND btnUninstall = nullptr;
@@ -339,12 +340,23 @@ void SavePanelConfig(const PanelConfig& cfg) {
     setStr("dataDirectory", cfg.dataDirectory);
     setStr("pluginDirectory", cfg.pluginDirectory);
     setStr("antigravityPath", cfg.antigravityPath);
-    setStr("codexPath", cfg.codexPath);
+    doc.objVal.erase("codexPath");
     setBool("autoCheckUpdates", cfg.autoCheckUpdates);
     setBool("autoUpdate", cfg.autoUpdate);
     setBool("autostart", cfg.autostart);
 
     WriteFileUtf8Atomic(path, doc.Dump(true));
+}
+
+void LoadPanelPreferences(PanelConfig& cfg) {
+    std::string raw;
+    JsonValue doc;
+    if (!ReadFileUtf8(PanelSettingsPath(cfg), raw) || !JsonValue::Parse(raw, doc) ||
+        doc.kind != JsonValue::Kind::Object) return;
+    cfg.antigravityPath = doc.GetWide("antigravityPath");
+    cfg.autoCheckUpdates = doc.GetBool("autoCheckUpdates", true);
+    cfg.autoUpdate = doc.GetBool("autoUpdate", true);
+    cfg.autostart = doc.GetBool("autostart", false);
 }
 
 void InitPathsAndConfig(const std::wstring& optPlugin, const std::wstring& optData, const std::wstring& optGemini) {
@@ -372,27 +384,15 @@ void InitPathsAndConfig(const std::wstring& optPlugin, const std::wstring& optDa
         cfg.bundleDirectory = cfg.pluginDirectory;
     }
 
-    // Load saved panel-settings.json if present
-    std::string raw;
-    if (ReadFileUtf8(PanelSettingsPath(cfg), raw)) {
-        JsonValue doc;
-        if (JsonValue::Parse(raw, doc) && doc.kind == JsonValue::Kind::Object) {
-            if (auto ag = doc.GetWide("antigravityPath"); !ag.empty()) cfg.antigravityPath = ag;
-            if (auto cx = doc.GetWide("codexPath"); !cx.empty()) cfg.codexPath = cx;
-            cfg.autoCheckUpdates = doc.GetBool("autoCheckUpdates", true);
-            cfg.autoUpdate = doc.GetBool("autoUpdate", true);
-            cfg.autostart = doc.GetBool("autostart", false);
-        }
-    }
+    LoadPanelPreferences(cfg);
 
     // Also inspect installation.json if panel-settings lacked paths
-    if (cfg.antigravityPath.empty() || cfg.codexPath.empty()) {
+    if (cfg.antigravityPath.empty()) {
         std::string instRaw;
         if (ReadFileUtf8(JoinPath(cfg.dataDirectory, L"installation.json"), instRaw)) {
             JsonValue inst;
             if (JsonValue::Parse(instRaw, inst) && inst.kind == JsonValue::Kind::Object) {
                 if (cfg.antigravityPath.empty()) cfg.antigravityPath = inst.GetWide("antigravityPath");
-                if (cfg.codexPath.empty()) cfg.codexPath = inst.GetWide("codexPath");
             }
         }
     }
@@ -551,10 +551,26 @@ void StartStatsWorker() {
     }).detach();
 }
 
+std::optional<bool> RunTakeoverCommand(const PanelConfig& cfg, std::optional<bool> enabled = std::nullopt) {
+    const auto dotnet = JoinPath(cfg.pluginDirectory, L"runtime\\dotnet.exe");
+    const auto dll = JoinPath(cfg.pluginDirectory, L"scripts\\ag-approval.dll");
+    const auto approvalCfg = JoinPath(cfg.pluginDirectory, L"approval.json");
+    std::wstring args = L"\"" + dll + L"\" takeover --config \"" + approvalCfg + L"\"";
+    if (enabled.has_value()) args += *enabled ? L" --enabled true" : L" --enabled false";
+    const auto result = RunHiddenCommand(dotnet, args, cfg.pluginDirectory, 4000);
+    JsonValue reply;
+    if (!result.started || result.timedOut || result.exitCode != 0 || !JsonValue::Parse(result.stdoutUtf8, reply))
+        return std::nullopt;
+    const auto* value = reply.Get("takeoverEnabled");
+    if (!value || value->kind != JsonValue::Kind::Bool) return std::nullopt;
+    return value->boolVal;
+}
+
 void QueryCoreSnapshot(const PanelConfig& cfg, RuntimeState& snap, bool runDetect, bool skipLoginCheck) {
     std::wstring approvalCfg = JoinPath(cfg.pluginDirectory, L"approval.json");
     std::wstring pluginJson = JoinPath(cfg.pluginDirectory, L"plugin.json");
     snap.pluginInstalled = FileExists(approvalCfg) && FileExists(pluginJson);
+    snap.takeoverEnabled = snap.pluginInstalled ? RunTakeoverCommand(cfg) : std::nullopt;
 
     if (snap.pluginInstalled) {
         std::string pjRaw;
@@ -610,8 +626,8 @@ void QueryCoreSnapshot(const PanelConfig& cfg, RuntimeState& snap, bool runDetec
     // 2. Environment discovery
     if (runDetect) {
         std::wstring dArgs = L"\"" + dll + L"\" detect --gemini-root \"" + cfg.geminiRoot + L"\" --data-dir \"" + cfg.dataDirectory + L"\"";
+        if (snap.pluginInstalled) dArgs += L" --config \"" + approvalCfg + L"\"";
         if (!cfg.antigravityPath.empty()) dArgs += L" --antigravity \"" + cfg.antigravityPath + L"\"";
-        if (!cfg.codexPath.empty()) dArgs += L" --codex \"" + cfg.codexPath + L"\"";
         if (skipLoginCheck) dArgs += L" --skip-login-check";
         CommandResult dRes = RunHiddenCommand(dotnet, dArgs, GetDirectoryName(dll), 10000);
         JsonValue dJson;
@@ -625,22 +641,17 @@ void QueryCoreSnapshot(const PanelConfig& cfg, RuntimeState& snap, bool runDetec
                     g_app.cfg.antigravityPath = p;
                 }
             }
-            if (const auto* cx = dJson.Get("codex")) {
-                snap.codexFound = cx->GetBool("found", false);
-                snap.codexLoggedIn = cx->GetBool("loggedIn", false);
-                snap.codexSummary = cx->GetWide("loginSummary", L"未检测到");
-                auto p = cx->GetWide("path");
-                if (snap.codexFound && !p.empty()) {
-                    std::lock_guard<std::mutex> lk(g_app.cfgMutex);
-                    g_app.cfg.codexPath = p;
-                }
+            if (!skipLoginCheck) {
+                const auto* auth = dJson.Get("nativeAuth");
+                snap.guardianAuthStatus = auth ? auth->GetWide("status", L"store_unavailable") : L"store_unavailable";
             }
             std::lock_guard<std::mutex> lk(g_app.cfgMutex);
             SavePanelConfig(g_app.cfg);
+        } else if (!skipLoginCheck) {
+            snap.guardianAuthStatus = L"store_unavailable";
         }
     } else {
         snap.agFound = !cfg.antigravityPath.empty() && FileExists(cfg.antigravityPath);
-        snap.codexFound = !cfg.codexPath.empty() && FileExists(cfg.codexPath);
     }
 }
 
@@ -651,10 +662,13 @@ void UpdateTrayAppearance() {
     if (!g_app.state.pluginInstalled || !g_app.state.serviceRunning) {
         hIcon = g_app.iconRed;
         tip += g_app.state.pluginInstalled ? L" · 服务未运行" : L" · 未安装";
+    } else if (g_app.state.takeoverEnabled == false) {
+        hIcon = g_app.iconAmber;
+        tip += L" · 插件接管已关闭";
     } else if (g_app.state.updateAvailable) {
         hIcon = g_app.iconBlue;
         tip += L" · 发现新版本 v" + g_app.state.availableUpdate.version;
-    } else if (g_app.state.detailedLogs || !g_app.state.codexLoggedIn) {
+    } else if (g_app.state.detailedLogs || g_app.state.guardianAuthStatus != L"credentials_found") {
         hIcon = g_app.iconAmber;
         tip += g_app.state.detailedLogs ? L" · 详细日志已开启" : L" · 请确认 Codex 登录";
     } else {
@@ -678,6 +692,12 @@ void SyncControlsToUi() {
     }
 
     SetWindowTextW(g_app.lblStatus, s.serviceDetail.c_str());
+    const wchar_t* takeoverText = L"接管状态未知";
+    if (g_app.busyTakeover) takeoverText = L"切换中…";
+    else if (s.takeoverEnabled.has_value()) takeoverText = *s.takeoverEnabled ? L"插件接管 开" : L"插件接管 关";
+    SetWindowTextW(g_app.btnApprovalTakeover, takeoverText);
+    EnableWindow(g_app.btnApprovalTakeover, s.pluginInstalled && s.takeoverEnabled.has_value() && !g_app.busyTakeover);
+    InvalidateRect(g_app.btnApprovalTakeover, nullptr, FALSE);
     SetWindowTextW(g_app.lblBackend, s.serviceBackend.c_str());
     SetWindowTextW(g_app.btnServiceAction, s.pluginInstalled ? (s.serviceRunning ? L"重启服务" : L"启动服务") : L"安装插件");
     EnableWindow(g_app.btnLaunchAg, !cfgCopy.antigravityPath.empty() && FileExists(cfgCopy.antigravityPath));
@@ -723,8 +743,11 @@ void SyncControlsToUi() {
     SetWindowTextW(g_app.lblAgTitle, (s.agVersion.empty() ? L"Antigravity" : L"Antigravity · v" + s.agVersion).c_str());
     SetWindowTextW(g_app.lblAgPath, agText.c_str());
 
-    std::wstring cxText = cfgCopy.codexPath.empty() ? L"未检测到" : s.codexSummary + L" · " + cfgCopy.codexPath;
-    SetWindowTextW(g_app.lblCodexPath, cxText.c_str());
+    const wchar_t* authText = L"未检测";
+    if (s.guardianAuthStatus == L"credentials_found") authText = L"已读取本机凭据";
+    else if (s.guardianAuthStatus == L"credentials_missing") authText = L"未找到登录凭据";
+    else if (s.guardianAuthStatus == L"store_unavailable") authText = L"无法读取凭据存储";
+    SetWindowTextW(g_app.lblGuardianAuth, authText);
 
     EnableWindow(g_app.btnUninstall, FileExists(JoinPath(cfgCopy.dataDirectory, L"installation.json")));
     UpdateTrayAppearance();
@@ -906,6 +929,25 @@ void ExecutePendingUpdateAndExit() {
     }
 }
 
+void StartTakeoverWorker() {
+    if (!g_app.state.takeoverEnabled.has_value() || g_app.busyAction.exchange(true)) return;
+    PanelConfig cfgCopy;
+    {
+        std::lock_guard<std::mutex> lk(g_app.cfgMutex);
+        cfgCopy = g_app.cfg;
+    }
+    const bool enable = !*g_app.state.takeoverEnabled;
+    g_app.busyTakeover = true;
+    SyncControlsToUi();
+    std::thread([cfgCopy, enable]() {
+        auto res = std::make_unique<WorkResult>();
+        res->kind = WorkKind::ToggleApprovalTakeover;
+        res->snapshot.takeoverEnabled = RunTakeoverCommand(cfgCopy, enable);
+        res->ok = res->snapshot.takeoverEnabled == enable;
+        PostWorkResult(std::move(res));
+    }).detach();
+}
+
 void StartDetailedLogsWorker(bool enable) {
     if (g_app.busyAction.exchange(true)) return;
     PanelConfig cfgCopy;
@@ -1019,7 +1061,6 @@ void StartInstallScriptWorker() {
         std::wstring args = L"-NoProfile -ExecutionPolicy Bypass -File \"" + script + L"\" -GeminiRoot \"" + cfgCopy.geminiRoot +
                             L"\" -DataDirectory \"" + cfgCopy.dataDirectory + L"\"";
         if (!cfgCopy.antigravityPath.empty()) args += L" -AntigravityPath \"" + cfgCopy.antigravityPath + L"\"";
-        if (!cfgCopy.codexPath.empty()) args += L" -CodexPath \"" + cfgCopy.codexPath + L"\"";
 
         CommandResult cr = RunHiddenCommand(psExe, args, GetDirectoryName(script), 45000);
         QueryCoreSnapshot(cfgCopy, snapBase, false, true);
@@ -1155,6 +1196,7 @@ void CreateChildControls(HWND hwnd) {
 
     g_app.lblTitle = label(L"自动审批");
     g_app.lblStatus = label(L"", SS_ENDELLIPSIS);
+    g_app.btnApprovalTakeover = button(L"接管状态未知", ID_BTN_APPROVAL_TAKEOVER);
     g_app.lblBackend = label(L"", SS_ENDELLIPSIS);
     g_app.btnServiceAction = button(L"启动服务", ID_BTN_SERVICE_ACTION);
     g_app.btnRefresh = button(L"刷新", ID_BTN_REFRESH);
@@ -1175,10 +1217,9 @@ void CreateChildControls(HWND hwnd) {
     g_app.lblAgTitle = label(L"Antigravity");
     g_app.lblAgPath = label(L"", SS_PATHELLIPSIS);
     g_app.btnBrowseAg = button(L"更改…", ID_BTN_BROWSE_AG);
-    g_app.lblCodexTitle = label(L"Codex CLI");
-    g_app.lblCodexPath = label(L"", SS_ENDELLIPSIS);
+    g_app.lblGuardianTitle = label(L"Guardian 登录");
+    g_app.lblGuardianAuth = label(L"", SS_ENDELLIPSIS);
     g_app.btnDetectEnv = button(L"检测", ID_BTN_DETECT_ENV);
-    g_app.btnBrowseCodex = button(L"更改…", ID_BTN_BROWSE_CODEX);
     g_app.btnInstallRepair = button(L"安装 / 修复插件", ID_BTN_INSTALL_REPAIR);
     g_app.btnUninstall = button(L"完整卸载", ID_BTN_UNINSTALL);
 
@@ -1212,8 +1253,9 @@ void PositionControls(const PanelLayout& layout) {
                      SWP_NOZORDER | SWP_NOACTIVATE | (show ? SWP_SHOWWINDOW : SWP_HIDEWINDOW));
     };
     place(a.lblTitle, a.fontTitle, 55, 13, 320, 34);
-    place(a.lblStatus, a.fontBold, 50, 68, a.state.serviceRunning ? 106 : 336, 20);
-    place(a.lblBackend, a.fontSmall, 170, 69, 216, 19, a.state.serviceRunning && !a.state.serviceBackend.empty());
+    place(a.lblStatus, a.fontBold, 50, 68, a.state.serviceRunning ? 106 : a.state.pluginInstalled ? 150 : 336, 20);
+    place(a.btnApprovalTakeover, a.fontSmall, a.state.serviceRunning ? 158 : 204, 64, 123, 26, a.state.pluginInstalled);
+    place(a.lblBackend, a.fontSmall, 293, 69, 93, 19, a.state.serviceRunning && !a.state.serviceBackend.empty());
     place(a.btnServiceAction, a.fontRegular, 28, 97, 91, 31);
     place(a.btnRefresh, a.fontRegular, 127, 97, 68, 31);
     place(a.btnLaunchAg, a.fontBold, 203, 97, 183, 31);
@@ -1238,10 +1280,9 @@ void PositionControls(const PanelLayout& layout) {
     place(a.lblAgTitle, a.fontBold, 54, apps + 40, 246, 17);
     place(a.lblAgPath, a.fontSmall, 54, apps + 58, 253, 17);
     place(a.btnBrowseAg, a.fontRegular, 317, apps + 42, 69, 27);
-    place(a.lblCodexTitle, a.fontBold, 54, apps + 82, 185, 17);
-    place(a.lblCodexPath, a.fontSmall, 54, apps + 100, 187, 17);
-    place(a.btnDetectEnv, a.fontRegular, 248, apps + 84, 61, 27);
-    place(a.btnBrowseCodex, a.fontRegular, 317, apps + 84, 69, 27);
+    place(a.lblGuardianTitle, a.fontBold, 54, apps + 82, 253, 17);
+    place(a.lblGuardianAuth, a.fontSmall, 54, apps + 100, 253, 17);
+    place(a.btnDetectEnv, a.fontRegular, 317, apps + 84, 69, 27);
     place(a.btnInstallRepair, a.fontRegular, 28, apps + 125, 175, 28);
     place(a.btnUninstall, a.fontRegular, 211, apps + 125, 175, 28);
 
@@ -1330,6 +1371,7 @@ void DrawOwnerButton(const DRAWITEMSTRUCT& item) {
     auto S = [&](int dp) { return Scale(g_app.hwnd, dp); };
     const bool disabled = (item.itemState & ODS_DISABLED) != 0;
     const bool pressed = (item.itemState & ODS_SELECTED) != 0;
+    const bool takeover = item.CtlID == ID_BTN_APPROVAL_TAKEOVER;
     const bool primary = item.CtlID == ID_BTN_LAUNCH_AG;
     const bool disclosure = item.CtlID == ID_BTN_PREFERENCES;
     const bool danger = item.CtlID == ID_BTN_UNINSTALL;
@@ -1343,8 +1385,19 @@ void DrawOwnerButton(const DRAWITEMSTRUCT& item) {
         border = fill;
         if (!disabled) ink = RGB(255, 255, 255);
     }
-    FillRoundedRect(hdc, rc, S(disclosure ? 18 : 12), fill, border);
     const int cy = (rc.top + rc.bottom) / 2;
+    if (takeover) {
+        const bool enabled = g_app.state.takeoverEnabled.value_or(false);
+        const RECT track{rc.left + S(4), cy - S(8), rc.left + S(38), cy + S(8)};
+        const COLORREF trackColor = disabled ? RGB(191, 199, 210) : enabled ? kBlue : kSecondary;
+        FillRoundedRect(hdc, track, S(16), trackColor, trackColor);
+        const int thumb = enabled ? track.right - S(8) : track.left + S(8);
+        const RECT knob{thumb - S(5), cy - S(5), thumb + S(5), cy + S(5)};
+        constexpr COLORREF white = RGB(255, 255, 255);
+        FillRoundedRect(hdc, knob, S(10), white, white);
+    } else {
+        FillRoundedRect(hdc, rc, S(disclosure ? 18 : 12), fill, border);
+    }
     if (item.CtlID == ID_BTN_STATS_DATE) {
         const int cx = (rc.left + rc.right) / 2;
         HPEN pen = CreatePen(PS_SOLID, S(1), ink);
@@ -1368,7 +1421,8 @@ void DrawOwnerButton(const DRAWITEMSTRUCT& item) {
         SetTextColor(hdc, ink);
         RECT textRect = rc;
         if (disclosure) textRect.left += S(12);
-        DrawTextW(hdc, text, -1, &textRect, (disclosure ? DT_LEFT : DT_CENTER) | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        if (takeover) textRect.left += S(44);
+        DrawTextW(hdc, text, -1, &textRect, (disclosure || takeover ? DT_LEFT : DT_CENTER) | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
         SelectObject(hdc, oldFont);
         if (disclosure) {
             int x = rc.right - S(20);
@@ -1428,8 +1482,8 @@ void PaintWindowCards(HWND hwnd, HDC hdc) {
     HPEN divider = CreatePen(PS_SOLID, 1, border);
     SelectObject(hdc, divider);
     if (g_app.state.serviceRunning && !g_app.state.serviceBackend.empty()) {
-        MoveToEx(hdc, S(160), Y(69), nullptr);
-        LineTo(hdc, S(160), Y(85));
+        MoveToEx(hdc, S(284), Y(69), nullptr);
+        LineTo(hdc, S(284), Y(85));
     }
     for (int row : {34, 76, 118}) {
         MoveToEx(hdc, S(28), Y(layout.apps + row), nullptr);
@@ -1647,7 +1701,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         } else if (ctrl == g_app.lblStatsCost) {
             SetTextColor(hdc, kGreen);
         } else if (ctrl == g_app.lblBackend || ctrl == g_app.lblStatsSub || ctrl == g_app.lblStatsTokens || ctrl == g_app.lblPricingNote ||
-                   ctrl == g_app.lblAgPath || ctrl == g_app.lblCodexPath || ctrl == g_app.lblVersionInfo) {
+                   ctrl == g_app.lblAgPath || ctrl == g_app.lblGuardianAuth || ctrl == g_app.lblVersionInfo) {
             SetTextColor(hdc, kSecondary);
         } else {
             SetTextColor(hdc, kText);
@@ -1684,7 +1738,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_APP_WORK_DONE: {
         std::unique_ptr<WorkResult> res(reinterpret_cast<WorkResult*>(lParam));
         if (!res) return 0;
-        if (res->kind == WorkKind::ToggleDetailedLogs) {
+        if (res->kind == WorkKind::ToggleApprovalTakeover) {
+            g_app.busyAction = false;
+            g_app.busyTakeover = false;
+            ++g_app.state.takeoverRevision;
+            g_app.state.takeoverEnabled = res->snapshot.takeoverEnabled;
+            SyncControlsToUi();
+            if (!res->ok)
+                MessageBoxW(hwnd, L"无法确认插件接管状态，请刷新后重试。", L"切换插件接管", MB_OK | MB_ICONERROR);
+        } else if (res->kind == WorkKind::ToggleDetailedLogs) {
             if (res->ok) {
                 g_app.state.detailedLogs = res->targetDetailedLogs;
                 SyncControlsToUi();
@@ -1730,6 +1792,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             bool waitAg = g_app.state.waitingAntigravityExit;
             auto updMan = g_app.state.availableUpdate;
             auto dlZip = g_app.state.downloadedZipPath;
+            if (g_app.busyTakeover || res->snapshot.takeoverRevision != g_app.state.takeoverRevision) {
+                res->snapshot.takeoverEnabled = g_app.state.takeoverEnabled;
+                res->snapshot.takeoverRevision = g_app.state.takeoverRevision;
+            }
             g_app.state = std::move(res->snapshot);
             g_app.state.updateAvailable = updAvail;
             g_app.state.updateDownloaded = updDl;
@@ -1775,6 +1841,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case ID_BTN_SERVICE_ACTION:
             if (g_app.state.pluginInstalled) StartServiceWorker();
             else StartInstallScriptWorker();
+            break;
+        case ID_BTN_APPROVAL_TAKEOVER:
+            if (HIWORD(wParam) == BN_CLICKED) StartTakeoverWorker();
             break;
         case ID_BTN_REFRESH:
         case ID_MENU_REFRESH:
@@ -1860,18 +1929,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case ID_BTN_DETECT_ENV:
             StartRefreshWorker(false, true, false);
             break;
-        case ID_BTN_BROWSE_CODEX: {
-            std::wstring picked = BrowseExecutableFile(hwnd, L"选择 Codex CLI (codex.exe / codex.cmd)", g_app.cfg.codexPath.c_str());
-            if (!picked.empty()) {
-                {
-                    std::lock_guard<std::mutex> lk(g_app.cfgMutex);
-                    g_app.cfg.codexPath = picked;
-                    SavePanelConfig(g_app.cfg);
-                }
-                StartRefreshWorker(false, true, false);
-            }
-            break;
-        }
         case ID_BTN_INSTALL_REPAIR:
             StartInstallScriptWorker();
             break;
@@ -1926,10 +1983,10 @@ int RunSelfTest(const std::wstring& localFeedDir) {
     // 1. JSON Unicode & Windows path roundtrip
     JsonValue parsed;
     std::string err;
-    const char* sample = "{\"name\":\"审批面板\",\"path\":\"C:\\\\Users\\\\Demo\\\\codex.exe\",\"count\":42,\"ok\":true}";
+    const char* sample = "{\"name\":\"审批面板\",\"path\":\"C:\\\\Users\\\\Demo\\\\ag-guardian-host.exe\",\"count\":42,\"ok\":true}";
     if (!check(JsonValue::Parse(sample, parsed, &err), "JsonValue::Parse failed")) return 1;
     if (!check(parsed.GetWide("name") == L"审批面板", "JSON UTF-8 Chinese decode failed")) return 1;
-    if (!check(parsed.GetWide("path") == L"C:\\Users\\Demo\\codex.exe", "JSON path unescape failed")) return 1;
+    if (!check(parsed.GetWide("path") == L"C:\\Users\\Demo\\ag-guardian-host.exe", "JSON path unescape failed")) return 1;
     if (!check(parsed.GetInt64("count") == 42 && parsed.GetBool("ok"), "JSON int/bool decode failed")) return 1;
     JsonValue reparsed;
     if (!check(JsonValue::Parse(parsed.Dump(false), reparsed) && reparsed.GetWide("name") == L"审批面板", "JSON Dump roundtrip failed")) return 1;
@@ -2011,6 +2068,19 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
     if (argv) LocalFree(argv);
 
     if (selfTest) {
+        if (!optPlugin.empty() && !optData.empty() && !optGemini.empty()) {
+            g_app.cfg.pluginDirectory = optPlugin;
+            g_app.cfg.dataDirectory = optData;
+            g_app.cfg.geminiRoot = optGemini;
+            LoadPanelPreferences(g_app.cfg);
+            RuntimeState snapshot;
+            QueryCoreSnapshot(g_app.cfg, snapshot, true, false);
+            if (!snapshot.pluginInstalled || !snapshot.serviceRunning || snapshot.guardianAuthStatus != L"credentials_found") {
+                WriteStdoutUtf8("FAIL panel could not read the installed Guardian authentication state\n");
+                return 1;
+            }
+            WriteStdoutUtf8("PASS panel detected the installed Guardian and its test credentials\n");
+        }
         return RunSelfTest(optLocalFeed);
     }
 

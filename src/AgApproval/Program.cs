@@ -20,21 +20,10 @@ public static class Program
             if (command == "detect")
             {
                 string? agOpt = Option(args, "--antigravity");
-                string? codexOpt = Option(args, "--codex");
                 string? geminiRoot = Option(args, "--gemini-root");
                 string? dataDir = Option(args, "--data-dir");
                 bool skipLogin = args.Contains("--skip-login-check");
-                if (string.IsNullOrWhiteSpace(codexOpt) && File.Exists(config))
-                {
-                    try
-                    {
-                        var rawCfg = JsonNode.Parse(File.ReadAllText(config));
-                        codexOpt = Json.Text(rawCfg, "codexPath");
-                        dataDir ??= Json.Text(rawCfg, "dataDirectory");
-                    }
-                    catch { }
-                }
-                Console.WriteLine(Json.Encode(EnvironmentDiscovery.DetectAll(agOpt, codexOpt, geminiRoot, dataDir, skipLogin)));
+                Console.WriteLine(Json.Encode(EnvironmentDiscovery.DetectAll(agOpt, geminiRoot, dataDir, skipLogin, Option(args, "--config"))));
                 return 0;
             }
             if (command == "stats")
@@ -77,7 +66,27 @@ public static class Program
                 Console.WriteLine(Json.Encode(new { ok = true, persisted = true, liveUpdated, detailedLogs = s.DetailedLogsActive }));
                 return 0;
             }
-            var settings = Settings.Load(config);
+            var settings = Settings.Read(config);
+            if (command == "takeover")
+            {
+                if (args.Contains("--enabled"))
+                {
+                    if (!bool.TryParse(Option(args, "--enabled"), out bool enabled))
+                        throw new InvalidDataException("Expected --enabled <true|false>");
+                    settings.SetTakeoverEnabled(enabled);
+                }
+                Console.WriteLine(Json.Encode(new { takeoverEnabled = settings.IsTakeoverEnabled() }));
+                return 0;
+            }
+            if (command is ("review" or "chat" or "session" or "post") && !settings.IsTakeoverEnabled())
+            {
+                // Consume the hook payload without parsing it, including large requests written to the pipe.
+                using var input = Console.OpenStandardInput();
+                await input.CopyToAsync(Stream.Null);
+                Console.WriteLine(command == "review" ? "{\"decision\":\"allow\"}" : "{}");
+                return 0;
+            }
+            settings.Validate(config);
             failureSettings=settings;
             if (command == "chat")
             {
@@ -145,7 +154,7 @@ public static class Program
                 await Audit.AppendAsync(settings, completedEvent, ct.Token);
                 Console.WriteLine("{}"); return 0;
             }
-            Console.Error.WriteLine("Usage: ag-approval <host|ensure|review|status|stop|session|post|chat|detect|stats|set-logging|compact-logs> --config <absolute-file>");
+            Console.Error.WriteLine("Usage: ag-approval <host|ensure|review|status|stop|session|post|chat|detect|stats|set-logging|compact-logs|takeover> --config <absolute-file>");
             return 2;
         }
         catch (Exception e)
@@ -215,7 +224,7 @@ public static class Program
         try {
             var running=JsonNode.Parse(await RequestAsync(settings,new{operation="status"},TimeSpan.FromSeconds(1)))!;
             if(Json.Text(running,"version")!=typeof(Program).Assembly.GetName().Version!.ToString(3)||Json.Text(running,"adapterInstructionHash")!=ReviewAdapter.Hash||
-                Json.Text(running,"reviewerBackend")!=settings.ReviewerBackend||settings.ReviewerBackend=="NativeGuardian"&&Json.Text(running,"nativeBridgePolicyHash")!=Json.Hash(GuardianFacts.BridgePolicy))
+                Json.Text(running,"reviewerBackend")!="NativeGuardian"||Json.Text(running,"nativeBridgePolicyHash")!=Json.Hash(GuardianFacts.BridgePolicy))
                 throw new InvalidDataException("Running approval service differs from the installed package; fully exit Antigravity and restart");
             return;
         }
@@ -243,12 +252,11 @@ public static class Program
         {
             Directory.CreateDirectory(settings.DataDirectory);
             var policy = new Policy(settings.PolicyDirectory);
-            await using var native=settings.ReviewerBackend=="NativeGuardian"?new NativeGuardianReviewer(settings,policy):null;
-            IReviewer reviewer=native is null?new CodexReviewer(settings,policy):native;
+            await using var reviewer = new NativeGuardianReviewer(settings, policy);
             var gate = new ReviewGate(settings, policy, reviewer);
             using var stop = new CancellationTokenSource();
             var handlers = new List<Task>();
-            await Audit.AppendAsync(settings, new { at = DateTimeOffset.UtcNow, @event = "host_start", capabilities=Capabilities(settings,policy.HashFor(settings)), policyHash = policy.HashFor(settings) }, stop.Token);
+            await Audit.AppendAsync(settings, new { at = DateTimeOffset.UtcNow, @event = "host_start", capabilities=Capabilities(settings,policy.NativeHash), policyHash = policy.NativeHash }, stop.Token);
             while (!stop.IsCancellationRequested)
             {
                 var pipe = new NamedPipeServerStream(settings.PipeName, PipeDirection.InOut, 16, PipeTransmissionMode.Byte,
@@ -256,7 +264,7 @@ public static class Program
                 try { await pipe.WaitForConnectionAsync(stop.Token); }
                 catch (OperationCanceledException) { pipe.Dispose(); break; }
                 handlers.RemoveAll(t => t.IsCompleted);
-                handlers.Add(HandleAsync(pipe, settings, gate, stop,policy.HashFor(settings)));
+                handlers.Add(HandleAsync(pipe, settings, gate, stop,policy.NativeHash));
             }
             await Task.WhenAll(handlers);
         }
@@ -351,13 +359,12 @@ public static class Program
         Json.Hash(ReviewAdapter.Canonical(NativeTranscript.NormalizeToolCall(call))):null;
     private static object Capabilities(Settings settings,string policyHash)=>new{status="running",version=typeof(Program).Assembly.GetName().Version!.ToString(3),nativeRouting=settings.EnableNativeRouting,
         ruleVersion=ReviewRoute.Version,inputVersion=ReviewAdapter.InputVersion,adapterVersion=ReviewAdapter.Version,adapterInstructionHash=ReviewAdapter.Hash,transportVersion=ReviewAdapter.TransportVersion,
-        policyHash,reviewerSessions=settings.EnableReviewerSessions,sessionTransportVersion=ReviewerSessions.Version,evidenceSelectionVersion=ReviewEvidence.Version,
-        maxEvidenceBytes=settings.MaxEvidenceBytes,maxEvidenceRecords=settings.MaxEvidenceRecords,maxReviewerSessionTurns=settings.MaxReviewerSessionTurns,
+        policyHash,
         guardVersion=DenialGuard.Version,guardScope="bound_request",guardStateDirectory=Path.Combine(settings.DataDirectory,"denial-guard"),guardState=DenialGuard.Diagnostics(settings),
         nativeTurnIdAvailable=false,nativeInterruptionAvailable=false,runtimeEffectiveScopeComplete=false,model=settings.Model,effort=settings.Effort,
-        reviewerBackend=settings.ReviewerBackend,nativeState=settings.EnableNativeState,guardianProtocol=settings.ReviewerBackend=="NativeGuardian"?GuardianFacts.Protocol:null,
-        nativeBridgePolicyHash=settings.ReviewerBackend=="NativeGuardian"?Json.Hash(GuardianFacts.BridgePolicy):null,
-        inferenceDispatchCap=(int?)null,maxAttempts=settings.ReviewerBackend=="NativeGuardian"?GuardianFacts.MaxReviewAttempts:(int?)null,
+        reviewerBackend="NativeGuardian",nativeState=settings.EnableNativeState,guardianProtocol=GuardianFacts.Protocol,
+        nativeBridgePolicyHash=Json.Hash(GuardianFacts.BridgePolicy),
+        inferenceDispatchCap=(int?)null,maxAttempts=GuardianFacts.MaxReviewAttempts,
         detailedLogs=settings.DetailedLogsActive,maxLogSegmentBytes=settings.MaxLogSegmentBytes,
-        adapter=settings.ReviewerBackend=="NativeGuardian"?"native-guardian":"codex-exec",pid=Environment.ProcessId};
+        adapter="native-guardian",pid=Environment.ProcessId};
 }

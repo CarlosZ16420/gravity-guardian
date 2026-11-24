@@ -41,17 +41,12 @@ try {
         if ($LASTEXITCODE -ne 0) { throw 'Verification failed' }
         $taskContract = Join-Path $taskRoot '.local/contract/input.json'
         $taskSchema = Join-Path $taskRoot 'schemas/review-input.schema.json'
-        $taskSessionContract = Join-Path $taskRoot '.local/contract/session.json'
-        $taskSessionSchema = Join-Path $taskRoot 'schemas/review-session.schema.json'
         $taskValidator = Join-Path $PSScriptRoot 'Validate-Schema.mjs'
         & node $taskValidator $taskContract $taskSchema
         if ($LASTEXITCODE -ne 0) { throw 'Review input contract validation failed' }
         & node $taskValidator $taskContract $taskSchema '--forged-role-check'
         if ($LASTEXITCODE -ne 0) { throw 'Schema accepted forged trusted message role' }
         Write-Host 'PASS published JSON schema validates actual input and rejects forged role'
-        & node $taskValidator $taskSessionContract $taskSessionSchema
-        if ($LASTEXITCODE -ne 0) { throw 'Reviewer session wire schema validates failed' }
-        Write-Host 'PASS reviewer session wire schema validates the captured delta transport'
         & (Join-Path $PSScriptRoot 'Test-LogStatistics.ps1')
     }
 

@@ -3,12 +3,9 @@ param(
     [string]$GeminiRoot = (Join-Path $env:USERPROFILE '.gemini'),
     [string]$DataDirectory = '',
     [string]$AntigravityPath = '',
-    [string]$CodexPath = '',
     [string]$Proxy = '',
     [ValidateSet('Codex','Preserve')][string]$ReviewMode = 'Codex',
     [ValidateSet('Conservative','ModelOnly')][string]$ReviewRouting = 'Conservative',
-    [ValidateSet('Sessions','Isolated')][string]$ReviewerTransport = 'Sessions',
-    [ValidateSet('NativeGuardian','Cli')][string]$ReviewerBackend = 'NativeGuardian',
     [switch]$EnableDetailedLogs,
     [switch]$PlanOnly,
     [switch]$NoStart,
@@ -38,8 +35,15 @@ foreach ($taskRequired in @($taskBundleAssembly, $taskBundleRuntime, $taskAppCon
     if (!(Test-Path -LiteralPath $taskRequired -PathType Leaf)) { throw ('Required file missing: ' + $taskRequired) }
 }
 
-# Auto-discover Antigravity and Codex CLI when omitted.
-if ([string]::IsNullOrWhiteSpace($AntigravityPath) -or [string]::IsNullOrWhiteSpace($CodexPath)) {
+$taskOldApprovalPath = Join-Path $taskPlugin 'approval.json'
+$taskOldApproval = if (Test-Path -LiteralPath $taskOldApprovalPath) {
+    Get-Content -Encoding UTF8 -LiteralPath $taskOldApprovalPath -Raw | ConvertFrom-JsonHashtable
+}
+if ($taskOldApproval -and !$PSBoundParameters.ContainsKey('DataDirectory') -and $taskOldApproval.dataDirectory) {
+    $DataDirectory = [string]$taskOldApproval.dataDirectory
+}
+if ($taskOldApproval -and !$PSBoundParameters.ContainsKey('Proxy')) { $Proxy = [string]$taskOldApproval.proxy }
+if ([string]::IsNullOrWhiteSpace($AntigravityPath)) {
     $taskPrevError = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
     try {
         $taskDetectRaw = & $taskBundleRuntime $taskBundleAssembly detect --gemini-root $GeminiRoot --data-dir $DataDirectory --skip-login-check 2>$null
@@ -48,21 +52,12 @@ if ([string]::IsNullOrWhiteSpace($AntigravityPath) -or [string]::IsNullOrWhiteSp
             if ([string]::IsNullOrWhiteSpace($AntigravityPath) -and $taskDetected.antigravity.found) {
                 $AntigravityPath = [string]$taskDetected.antigravity.path
             }
-            if ([string]::IsNullOrWhiteSpace($CodexPath) -and $taskDetected.codex.found) {
-                $CodexPath = [string]$taskDetected.codex.path
-            }
         }
     } catch {} finally { $ErrorActionPreference = $taskPrevError }
 }
 
 if (![string]::IsNullOrWhiteSpace($AntigravityPath) -and !(Test-Path -LiteralPath $AntigravityPath -PathType Leaf)) {
     throw ('Specified Antigravity executable not found: ' + $AntigravityPath)
-}
-if (![string]::IsNullOrWhiteSpace($CodexPath) -and !(Test-Path -LiteralPath $CodexPath -PathType Leaf)) {
-    throw ('Specified Codex executable not found: ' + $CodexPath)
-}
-if ($ReviewerBackend -eq 'Cli' -and [string]::IsNullOrWhiteSpace($CodexPath)) {
-    throw 'Codex CLI executable was not found; install Codex CLI or pass -CodexPath.'
 }
 
 $taskConfigHash = (Get-FileHash -LiteralPath $taskAppConfig -Algorithm SHA256).Hash
@@ -73,8 +68,8 @@ $taskOldSidecar = if ($taskAppState.sidecars) { $taskAppState.sidecars[$taskSide
 
 $taskPlan = @{
     pluginDirectory = $taskPlugin; applicationConfig = $taskAppConfig; dataDirectory = $DataDirectory
-    antigravityPath = $AntigravityPath; codexPath = $CodexPath; proxy = $Proxy
-    model = 'codex-auto-review'; effort = 'low'; reviewMode = $ReviewMode; reviewRouting = $ReviewRouting; reviewerTransport = $ReviewerTransport; reviewerBackend = $ReviewerBackend
+    antigravityPath = $AntigravityPath; proxy = $Proxy
+    model = 'codex-auto-review'; effort = 'low'; reviewMode = $ReviewMode; reviewRouting = $ReviewRouting; reviewerBackend = 'NativeGuardian'
     commitMethod = $(if ($UseVerifiedCopyCommit) { 'verified-copy' } else { 'directory-move' })
     changes = @('Install official plugin folder', 'Enable only codex-approval/reviewer sidecar', 'Keep Antigravity network and proxy untouched')
     preserved = @('All existing Allow/Ask/Deny rules', 'Unrelated project settings', 'Existing Codex config and login')
@@ -82,7 +77,7 @@ $taskPlan = @{
 if ($ReviewMode -eq 'Codex') { $taskPlan.changes += 'Use Default + sandbox globally and for explicit Auto project overrides; Codex Hook owns automatic review' }
 if ($PlanOnly) { $taskPlan | ConvertTo-Json -Depth 8; return }
 
-if ($ReviewerBackend -eq 'NativeGuardian' -and !(Test-Path -LiteralPath (Join-Path $taskBundle 'native/ag-guardian-host.exe'))) {
+if (!(Test-Path -LiteralPath (Join-Path $taskBundle 'native/ag-guardian-host.exe'))) {
     throw 'Native Guardian executable is missing; build the complete package first'
 }
 if (![string]::IsNullOrWhiteSpace($AntigravityPath) -and [IO.Path]::GetFileName($AntigravityPath) -ieq 'Antigravity.exe') {
@@ -102,36 +97,37 @@ Copy-Item -LiteralPath $taskAppConfig -Destination (Join-Path $taskBackup 'confi
 
 $taskStage = Join-Path $taskData ('staging-' + [Guid]::NewGuid().ToString('N'))
 Copy-Item -LiteralPath $taskBundle -Destination $taskStage -Recurse
+$taskInstalledPricing = Join-Path $taskPlugin 'pricing.json'
+if ($taskOldApproval -and (Test-Path -LiteralPath $taskInstalledPricing -PathType Leaf)) {
+    Copy-Item -LiteralPath $taskInstalledPricing -Destination (Join-Path $taskStage 'pricing.json') -Force
+}
 
-$taskResolvedCodex = if ([string]::IsNullOrWhiteSpace($CodexPath)) { '' } else { [IO.Path]::GetFullPath($CodexPath) }
 $taskResolvedAntigravity = if ([string]::IsNullOrWhiteSpace($AntigravityPath)) { '' } else { [IO.Path]::GetFullPath($AntigravityPath) }
+$taskCodexHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $env:USERPROFILE '.codex' }
 
 $taskApproval = @{
-    model = 'codex-auto-review'; effort = 'low'; codexPath = $taskResolvedCodex; proxy = $Proxy
-    codexHome = (Join-Path $env:USERPROFILE '.codex'); dataDirectory = $taskData
+    model = 'codex-auto-review'; effort = 'low'; proxy = $Proxy
+    codexHome = $taskCodexHome; dataDirectory = $taskData
     antigravityConfigDirectory = $taskConfigRoot; policyDirectory = (Join-Path $taskPlugin 'policy/effective-codex')
     transcriptRoots = @((Join-Path $GeminiRoot 'antigravity/brain'), (Join-Path $GeminiRoot 'antigravity-cli/brain'), (Join-Path $GeminiRoot 'antigravity-ide/brain'))
-    reviewTimeoutSeconds = 90; hookTimeoutSeconds = 100; maxInputBytes = 524288; maxContextBytes = 131072; maxQueue = 8
+    reviewTimeoutSeconds = 90; hookTimeoutSeconds = 100; maxInputBytes = 524288; maxQueue = 8
     enableNativeRouting = ($ReviewRouting -eq 'Conservative')
-    enableReviewerSessions = ($ReviewerTransport -eq 'Sessions')
-    reviewerBackend = $ReviewerBackend; guardianPath = (Join-Path $taskPlugin 'native/ag-guardian-host.exe')
-    enableNativeState = ($ReviewerBackend -eq 'NativeGuardian'); nativeStateLogPath = (Join-Path $env:APPDATA 'Antigravity/logs/main.log'); nativeStateTimeoutMilliseconds = 4000; maxNativeHistoryBytes = 8388608
+    enableNativeState = $true; nativeStateLogPath = (Join-Path $env:APPDATA 'Antigravity/logs/main.log'); nativeStateTimeoutMilliseconds = 4000; maxNativeHistoryBytes = 8388608
     enableNativeAskHandoff = $false
     enableDetailedLogs = [bool]$EnableDetailedLogs; maxLogSegmentBytes = 16777216
-    maxEvidenceBytes = 49152; maxEvidenceRecords = 40; maxEvidenceContentBytes = 4096
-    maxReviewerSessionTurns = 8; maxReviewerSessionBytes = 262144; maxReviewerSessionInputTokens = 96000
 }
 
-$taskOldApprovalPath = Join-Path $taskPlugin 'approval.json'
-if (Test-Path -LiteralPath $taskOldApprovalPath) {
-    $taskOldApproval = Get-Content -Encoding UTF8 -LiteralPath $taskOldApprovalPath -Raw | ConvertFrom-JsonHashtable
-    if (!$PSBoundParameters.ContainsKey('EnableDetailedLogs') -and $taskOldApproval.ContainsKey('enableDetailedLogs')) {
-        $taskApproval.enableDetailedLogs = [bool]$taskOldApproval.enableDetailedLogs
+if ($taskOldApproval) {
+    $taskInstallOptions = @{
+        proxy = 'Proxy'; enableDetailedLogs = 'EnableDetailedLogs'; enableNativeRouting = 'ReviewRouting'
     }
     foreach ($taskKey in $taskOldApproval.Keys) {
-        if (!$taskApproval.ContainsKey($taskKey)) { $taskApproval[$taskKey] = $taskOldApproval[$taskKey] }
+        if ($taskKey -in @('dataDirectory','antigravityConfigDirectory','model','effort')) { continue }
+        if ($taskInstallOptions.ContainsKey($taskKey) -and $PSBoundParameters.ContainsKey($taskInstallOptions[$taskKey])) { continue }
+        $taskApproval[$taskKey] = $taskOldApproval[$taskKey]
     }
 }
+Update-ApprovalReviewerConfig -Config $taskApproval -PluginDirectory $taskPlugin
 $taskApproval | ConvertTo-Json -Depth 8 | Set-Utf8NoBom -LiteralPath (Join-Path $taskStage 'approval.json') -Encoding utf8
 
 $taskSidecar = Join-Path $taskStage 'sidecars/reviewer'
@@ -226,7 +222,7 @@ if ($ReviewMode -eq 'Codex') { $taskModeChanges = @(Set-CodexReviewMode -ConfigR
 
 $taskManifest = @{
     installedAt = [DateTime]::UtcNow.ToString('O'); pluginDirectory = $taskPlugin; configRoot = $taskConfigRoot
-    geminiRoot = [IO.Path]::GetFullPath($GeminiRoot); antigravityPath = $taskResolvedAntigravity; codexPath = $taskResolvedCodex
+    geminiRoot = [IO.Path]::GetFullPath($GeminiRoot); antigravityPath = $taskResolvedAntigravity
     backupDirectory = $taskRestoreBackup; latestUpgradeBackup = $taskBackup
     hadPreviousPlugin = $taskRestorePreviousPlugin; oldSidecar = $taskRestoreSidecar; sidecarId = $taskSidecarId
     reviewMode = $ReviewMode; reviewModeChanges = @($taskModeChanges)
@@ -247,8 +243,7 @@ $taskPanel.dataDirectory = $taskData
 $taskPanel.geminiRoot = [IO.Path]::GetFullPath($GeminiRoot)
 if ($taskResolvedAntigravity) { $taskPanel.antigravityPath = $taskResolvedAntigravity }
 elseif (!$taskPanel.ContainsKey('antigravityPath')) { $taskPanel.antigravityPath = '' }
-if ($taskResolvedCodex) { $taskPanel.codexPath = $taskResolvedCodex }
-elseif (!$taskPanel.ContainsKey('codexPath')) { $taskPanel.codexPath = '' }
+$taskPanel.Remove('codexPath')
 if (!$taskPanel.ContainsKey('autoCheckUpdates')) { $taskPanel.autoCheckUpdates = $true }
 if (!$taskPanel.ContainsKey('autoUpdate')) { $taskPanel.autoUpdate = $true }
 $taskPanel | ConvertTo-Json -Depth 10 | Set-Utf8NoBom -LiteralPath $taskPanelPath -Encoding utf8

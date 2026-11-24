@@ -1,53 +1,78 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Runtime.Versioning;
-using System.Text.RegularExpressions;
+using System.Text.Json.Nodes;
 using Microsoft.Win32;
 
 namespace AgApproval;
 
 public sealed record AntigravityDetection(bool Found, string Path, string? Version, string Source);
 
-public sealed record CodexDetection(
-    bool Found,
-    string Path,
-    string? Version,
-    bool LoggedIn,
-    string LoginSummary,
-    bool AuthFilePresent,
-    string Source);
-
 public sealed record EnvironmentDetectionReport(
     AntigravityDetection Antigravity,
-    CodexDetection Codex,
     string GeminiRoot,
     string DataDirectory,
     bool PluginInstalled,
-    string PluginDirectory);
+    string PluginDirectory)
+{
+    public JsonObject? NativeAuth { get; init; }
+}
 
 public static class EnvironmentDiscovery
 {
     public static EnvironmentDetectionReport DetectAll(
         string? configuredAntigravityPath = null,
-        string? configuredCodexPath = null,
         string? geminiRoot = null,
         string? dataDirectory = null,
-        bool skipLoginCheck = false)
+        bool skipLoginCheck = false,
+        string? approvalConfig = null)
     {
         var userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         var resolvedGemini = string.IsNullOrWhiteSpace(geminiRoot)
             ? Path.Combine(userProfile, ".gemini")
             : Path.GetFullPath(geminiRoot);
-        var resolvedData = string.IsNullOrWhiteSpace(dataDirectory)
-            ? Path.Combine(resolvedGemini, "codex-approval-data")
-            : Path.GetFullPath(dataDirectory);
         var pluginDir = Path.Combine(resolvedGemini, "config", "plugins", "codex-approval");
         bool installed = File.Exists(Path.Combine(pluginDir, "plugin.json")) &&
                          File.Exists(Path.Combine(pluginDir, "approval.json"));
 
         var ag = DetectAntigravity(configuredAntigravityPath);
-        var codex = DetectCodexCli(configuredCodexPath, Path.Combine(userProfile, ".codex"), skipLoginCheck);
-        return new EnvironmentDetectionReport(ag, codex, resolvedGemini, resolvedData, installed, pluginDir);
+        var configPath = approvalConfig ?? Path.Combine(pluginDir, "approval.json");
+        var defaultHome = Environment.GetEnvironmentVariable("CODEX_HOME");
+        if (string.IsNullOrWhiteSpace(defaultHome)) defaultHome = Path.Combine(userProfile, ".codex");
+        JsonObject? config = null;
+        if (File.Exists(configPath))
+        {
+            try { config = JsonNode.Parse(File.ReadAllText(configPath)) as JsonObject; }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException or System.Text.Json.JsonException) { }
+        }
+        var codexHome = Json.Text(config, "codexHome") ?? defaultHome;
+        var configuredData = dataDirectory ?? Json.Text(config, "dataDirectory");
+        var resolvedData = string.IsNullOrWhiteSpace(configuredData)
+            ? Path.Combine(resolvedGemini, "codex-approval-data")
+            : Path.GetFullPath(configuredData);
+        var executable = Json.Text(config, "guardianPath");
+        if (string.IsNullOrWhiteSpace(executable))
+            executable = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(configPath))!, "native", "ag-guardian-host.exe");
+        var nativeAuth = skipLoginCheck ? null
+            : ProbeNativeAuth(executable, codexHome, Path.Combine(resolvedData, "guardian-workspace"));
+        return new EnvironmentDetectionReport(ag, resolvedGemini, resolvedData, installed, pluginDir) { NativeAuth = nativeAuth };
+    }
+
+    private static JsonObject ProbeNativeAuth(string executable, string codexHome, string workspace)
+    {
+        try
+        {
+            NativeGuardianReviewer.VerifyBinary(executable);
+            var probe = RunQuick(executable, ["--check-auth"], 5000,
+                new Dictionary<string, string> { ["CODEX_HOME"] = codexHome }, Directory.Exists(workspace) ? workspace : null);
+            if (JsonNode.Parse(probe.Output) is JsonObject reply && (probe.ExitCode, Json.Text(reply, "status")) is
+                (0, "credentials_found") or (1, "credentials_missing") or (2, "store_unavailable"))
+                return reply;
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or System.Text.Json.JsonException or
+            Win32Exception or ArgumentException or InvalidOperationException) { }
+        return new JsonObject { ["status"] = "store_unavailable", ["codexHome"] = codexHome,
+            ["storeMode"] = null, ["storeError"] = "guardian_probe_unavailable" };
     }
 
     public static AntigravityDetection DetectAntigravity(string? configuredPath = null)
@@ -107,177 +132,6 @@ public static class EnvironmentDiscovery
         return new AntigravityDetection(false, "", null, "not_found");
     }
 
-    public static CodexDetection DetectCodexCli(string? configuredPath = null, string? codexHome = null, bool skipLoginCheck = false)
-    {
-        var userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-        var resolvedHome = string.IsNullOrWhiteSpace(codexHome) ? Path.Combine(userProfile, ".codex") : codexHome;
-        bool authPresent = File.Exists(Path.Combine(resolvedHome, "auth.json"));
-
-        string? resolvedExe = null;
-        string source = "not_found";
-
-        if (!string.IsNullOrWhiteSpace(configuredPath) && File.Exists(configuredPath))
-        {
-            resolvedExe = ResolveCodexShim(configuredPath) ?? (configuredPath.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ? Path.GetFullPath(configuredPath) : null);
-            if (resolvedExe != null) source = "configured";
-        }
-
-        if (resolvedExe == null)
-        {
-            var pathVar = Environment.GetEnvironmentVariable("PATH") ?? "";
-            foreach (var dir in pathVar.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
-            {
-                foreach (var name in new[] { "codex.exe", "codex.cmd", "codex.ps1" })
-                {
-                    var candidate = SafeCombine(dir, name);
-                    if (candidate == null || !File.Exists(candidate)) continue;
-                    var resolved = name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)
-                        ? Path.GetFullPath(candidate)
-                        : ResolveCodexShim(candidate);
-                    if (resolved != null && File.Exists(resolved))
-                    {
-                        resolvedExe = resolved;
-                        source = "path";
-                        break;
-                    }
-                }
-                if (resolvedExe != null) break;
-            }
-        }
-
-        if (resolvedExe == null)
-        {
-            var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
-            var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-            var probeDirs = new[]
-            {
-                Path.Combine(appData, "npm"),
-                Path.Combine(localAppData, "pnpm"),
-                Path.Combine(userProfile, ".volta", "bin"),
-                Path.Combine(userProfile, "scoop", "shims"),
-                Path.Combine(userProfile, ".cargo", "bin"),
-                Path.Combine(localAppData, "Programs"),
-                Path.Combine(appData, "npm", "node_modules", "@openai", "codex", "node_modules", "@openai", "codex-win32-x64", "vendor", "x86_64-pc-windows-msvc", "bin"),
-                Path.Combine(appData, "npm", "node_modules", "@openai", "codex", "vendor", "x86_64-pc-windows-msvc", "codex")
-            };
-
-            foreach (var dir in probeDirs)
-            {
-                foreach (var name in new[] { "codex.exe", "codex.cmd" })
-                {
-                    var candidate = SafeCombine(dir, name);
-                    if (candidate == null || !File.Exists(candidate)) continue;
-                    var resolved = name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)
-                        ? Path.GetFullPath(candidate)
-                        : ResolveCodexShim(candidate);
-                    if (resolved != null && File.Exists(resolved))
-                    {
-                        resolvedExe = resolved;
-                        source = "standard_location";
-                        break;
-                    }
-                }
-                if (resolvedExe != null) break;
-            }
-        }
-
-        if (resolvedExe == null)
-        {
-            return new CodexDetection(
-                Found: false,
-                Path: "",
-                Version: null,
-                LoggedIn: authPresent,
-                LoginSummary: authPresent ? "已检测到 .codex/auth.json（未检测到 Codex CLI）" : "未检测到 Codex CLI",
-                AuthFilePresent: authPresent,
-                Source: "not_found");
-        }
-
-        string? version = null;
-        bool loggedIn = authPresent;
-        string loginSummary = authPresent ? "已检测到登录凭证" : "未登录";
-
-        if (!skipLoginCheck)
-        {
-            var verRes = RunQuick(resolvedExe, ["--version"], 3000);
-            if (verRes.ExitCode == 0 && !string.IsNullOrWhiteSpace(verRes.Output))
-                version = verRes.Output.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries).FirstOrDefault()?.Trim();
-
-            var loginRes = RunQuick(resolvedExe, ["login", "status"], 3000, new Dictionary<string, string> { ["CODEX_HOME"] = resolvedHome });
-            if (loginRes.ExitCode == 0)
-            {
-                loggedIn = true;
-                var msg = (loginRes.Output + " " + loginRes.Error).Trim();
-                loginSummary = string.IsNullOrWhiteSpace(msg) ? "已登录" : msg.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries).First().Trim();
-            }
-            else if (loginRes.ExitCode is not null)
-            {
-                loggedIn = false;
-                var msg = (loginRes.Error + " " + loginRes.Output).Trim();
-                loginSummary = string.IsNullOrWhiteSpace(msg) ? "未登录" : msg.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries).First().Trim();
-            }
-        }
-
-        return new CodexDetection(true, resolvedExe, version, loggedIn, loginSummary, authPresent, source);
-    }
-
-    public static string? ResolveCodexShim(string shimPath)
-    {
-        if (string.IsNullOrWhiteSpace(shimPath) || !File.Exists(shimPath))
-            return null;
-        var full = Path.GetFullPath(shimPath);
-        if (full.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
-            return full;
-
-        var dir = Path.GetDirectoryName(full);
-        if (string.IsNullOrEmpty(dir)) return null;
-
-        // Typical npm layout: <prefix>\codex.cmd alongside <prefix>\node_modules\@openai\codex\...
-        var directCandidates = new[]
-        {
-            Path.Combine(dir, "codex.exe"),
-            Path.Combine(dir, "node_modules", "@openai", "codex", "node_modules", "@openai", "codex-win32-x64", "vendor", "x86_64-pc-windows-msvc", "bin", "codex.exe"),
-            Path.Combine(dir, "node_modules", "@openai", "codex", "vendor", "x86_64-pc-windows-msvc", "codex", "codex.exe"),
-            Path.Combine(dir, "node_modules", "@openai", "codex", "bin", "codex.exe")
-        };
-
-        foreach (var candidate in directCandidates)
-        {
-            if (File.Exists(candidate))
-                return Path.GetFullPath(candidate);
-        }
-
-        // Parse .cmd/.ps1 content for relative path to @openai/codex or codex.exe
-        try
-        {
-            var text = File.ReadAllText(full);
-            var exeMatch = Regex.Match(text, @"([A-Za-z0-9_.\-\\/%~]+\.exe)", RegexOptions.IgnoreCase);
-            if (exeMatch.Success)
-            {
-                var raw = exeMatch.Groups[1].Value.Replace("%dp0%", dir + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
-                    .Replace("%~dp0", dir + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
-                    .Replace("$basedir", dir, StringComparison.OrdinalIgnoreCase);
-                if (!Path.IsPathFullyQualified(raw)) raw = Path.Combine(dir, raw);
-                if (File.Exists(raw)) return Path.GetFullPath(raw);
-            }
-
-            var jsMatch = Regex.Match(text, @"node_modules[\\/]@openai[\\/]codex[\\/]", RegexOptions.IgnoreCase);
-            if (jsMatch.Success)
-            {
-                // Also support pnpm nested .pnpm layout under <dir>\node_modules
-                var pnpmRoot = Path.Combine(dir, "node_modules", ".pnpm");
-                if (Directory.Exists(pnpmRoot))
-                {
-                    foreach (var found in Directory.EnumerateFiles(pnpmRoot, "codex.exe", SearchOption.AllDirectories))
-                        return Path.GetFullPath(found);
-                }
-            }
-        }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
-
-        return null;
-    }
-
     [SupportedOSPlatform("windows")]
     private static string? ProbeUninstallRegistryForAntigravity()
     {
@@ -321,12 +175,6 @@ public static class EnvironmentDiscovery
         return null;
     }
 
-    private static string? SafeCombine(string dir, string file)
-    {
-        try { return Path.Combine(dir, file); }
-        catch (ArgumentException) { return null; }
-    }
-
     private static string? ReadFileVersion(string path)
     {
         try
@@ -337,7 +185,8 @@ public static class EnvironmentDiscovery
         catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return null; }
     }
 
-    private static (int? ExitCode, string Output, string Error) RunQuick(string exe, string[] args, int timeoutMs, Dictionary<string, string>? env = null)
+    private static (int? ExitCode, string Output, string Error) RunQuick(string exe, string[] args, int timeoutMs,
+        Dictionary<string, string>? env = null, string? workingDirectory = null)
     {
         try
         {
@@ -345,6 +194,7 @@ public static class EnvironmentDiscovery
             {
                 UseShellExecute = false,
                 CreateNoWindow = true,
+                WorkingDirectory = workingDirectory ?? "",
                 RedirectStandardOutput = true,
                 RedirectStandardError = true
             };

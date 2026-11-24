@@ -9,6 +9,7 @@ param(
     [switch]$SkipProcessCheck
 )
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'Review-Mode.ps1')
 
 function Write-Utf8NoBom([string]$Path, [string]$Text) {
     [IO.File]::WriteAllText($Path, $Text, [Text.UTF8Encoding]::new($false))
@@ -165,8 +166,7 @@ try {
     }
 
     # Ensure approval.json retains user settings and points to installed plugin paths.
-    $taskOldApproval['policyDirectory'] = Join-Path $taskPlugin 'policy/effective-codex'
-    $taskOldApproval['guardianPath'] = Join-Path $taskPlugin 'native/ag-guardian-host.exe'
+    Update-ApprovalReviewerConfig -Config $taskOldApproval -PluginDirectory $taskPlugin
     Write-Utf8NoBom (Join-Path $taskStageDir 'approval.json') ($taskOldApproval | ConvertTo-Json -Depth 16)
 
     $taskStageSidecarDir = Join-Path $taskStageDir 'sidecars/reviewer'

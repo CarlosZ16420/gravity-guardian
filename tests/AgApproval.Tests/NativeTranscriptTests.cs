@@ -26,7 +26,7 @@ public static class NativeTranscriptTests
             try
             {
                 var input=await ReviewContext.BuildAsync(payload,settings,default);
-                if(settings.ReviewerBackend=="NativeGuardian")_=GuardianFacts.Build(input,settings,5000);
+                _=GuardianFacts.Build(input,settings,5000);
                 var doc=JsonNode.Parse(input.Prompt)!;
                 result["valid"]=true;result["bindingMethod"]=Json.Text(doc["native_binding"],"binding_method");
             }
