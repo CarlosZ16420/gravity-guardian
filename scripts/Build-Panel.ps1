@@ -25,7 +25,7 @@ if (Test-Path -LiteralPath $taskVswhere) {
 $taskVcvars = $taskVcvarsCandidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
 if (!$taskVcvars) { throw 'Visual Studio 2022 x64 C++ BuildTools (vcvars64.bat) not found.' }
 
-$taskExe = Join-Path $taskOutDir 'CodexApprovalPanel.exe'
+$taskExe = Join-Path $taskOutDir 'GravityGuardian.exe'
 $taskRes = Join-Path $taskOutDir 'resource.res'
 $taskRc = Join-Path $taskPanelSrc 'resource.rc'
 
@@ -65,7 +65,7 @@ $taskDeps = @($taskOut | ForEach-Object { $_.Trim() } | Where-Object { $_ -match
 $taskAllowed = @('KERNEL32.dll','USER32.dll','GDI32.dll','gdiplus.dll','COMCTL32.dll','SHELL32.dll','ADVAPI32.dll','OLE32.dll','COMDLG32.dll','WINHTTP.dll','bcrypt.dll','dwmapi.dll')
 foreach ($dep in $taskDeps) {
     if ($taskAllowed -inotcontains $dep) {
-        throw "Unexpected non-system DLL dependency in CodexApprovalPanel.exe: $dep"
+        throw "Unexpected non-system DLL dependency in GravityGuardian.exe: $dep"
     }
 }
 

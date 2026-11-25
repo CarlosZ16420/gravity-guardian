@@ -216,7 +216,7 @@ public static class Program
                 await Audit.AppendAsync(settings, completedEvent, ct.Token);
                 Console.WriteLine("{}"); return 0;
             }
-            Console.Error.WriteLine("Usage: ag-approval <host|ensure|review|status|stop|session|post|detect|stats|set-logging|set-protected-delegation|compact-logs|takeover> --config <absolute-file>");
+            Console.Error.WriteLine("Usage: gravity-guardian <host|ensure|review|status|stop|session|post|detect|stats|set-logging|set-protected-delegation|compact-logs|takeover> --config <absolute-file>");
             return 2;
         }
         catch (Exception e)
@@ -412,7 +412,7 @@ public static class Program
             }
             catch { }
         }
-        return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".gemini", "codex-approval-data");
+        return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".gemini", "gravity-guardian-data");
     }
     private static string? ResolvePricingPath(string[] args, string config)
     {

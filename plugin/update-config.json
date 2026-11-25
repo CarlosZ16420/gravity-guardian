@@ -1,6 +1,6 @@
 {
   "provider": "github-releases",
-  "repository": "CarlosZ16420/gravity-steward",
+  "repository": "CarlosZ16420/gravity-guardian",
   "channel": "stable",
   "manifestAsset": "release-manifest.json",
   "localFeedDirectory": ""

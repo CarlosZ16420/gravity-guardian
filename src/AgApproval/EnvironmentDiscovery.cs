@@ -31,7 +31,7 @@ public static class EnvironmentDiscovery
         var resolvedGemini = string.IsNullOrWhiteSpace(geminiRoot)
             ? Path.Combine(userProfile, ".gemini")
             : Path.GetFullPath(geminiRoot);
-        var pluginDir = Path.Combine(resolvedGemini, "config", "plugins", "codex-approval");
+        var pluginDir = Path.Combine(resolvedGemini, "config", "plugins", "gravity-guardian");
         bool installed = File.Exists(Path.Combine(pluginDir, "plugin.json")) &&
                          File.Exists(Path.Combine(pluginDir, "approval.json"));
 
@@ -48,7 +48,7 @@ public static class EnvironmentDiscovery
         var codexHome = Json.Text(config, "codexHome") ?? defaultHome;
         var configuredData = dataDirectory ?? Json.Text(config, "dataDirectory");
         var resolvedData = string.IsNullOrWhiteSpace(configuredData)
-            ? Path.Combine(resolvedGemini, "codex-approval-data")
+            ? Path.Combine(resolvedGemini, "gravity-guardian-data")
             : Path.GetFullPath(configuredData);
         var executable = Json.Text(config, "guardianPath");
         if (string.IsNullOrWhiteSpace(executable))

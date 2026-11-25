@@ -20,7 +20,7 @@ foreach ($type in @('standalone', 'lite')) {
     }
     $destination = Join-Path $sandbox $type
     [IO.Compression.ZipFile]::ExtractToDirectory($zip, $destination)
-    $releases[$type] = Join-Path $destination ('gravity-steward-' + $manifest.version)
+    $releases[$type] = Join-Path $destination ('gravity-guardian-' + $manifest.version)
     $assetPaths[$type] = $zip
 }
 if ($manifest.assetName -cne $manifest.distributions.standalone.assetName -or $manifest.sha256 -cne $manifest.distributions.standalone.sha256) {
@@ -35,7 +35,7 @@ function New-TestProfile([string]$Name) {
     New-Item -ItemType Directory -Path $config, $data -Force | Out-Null
     @{ userSettings = @{ permissionPreset = 'AGENT_PERMISSION_PRESET_DEFAULT'; enableTerminalSandbox = $true }; sidecars = @{} } |
         ConvertTo-Json -Depth 6 | Set-Utf8NoBom -LiteralPath (Join-Path $config 'config.json')
-    return @{ gemini = $gemini; data = $data; plugin = (Join-Path $config 'plugins/codex-approval') }
+    return @{ gemini = $gemini; data = $data; plugin = (Join-Path $config 'plugins/gravity-guardian') }
 }
 
 function Test-Installed([hashtable]$Profile, [string]$Type) {
@@ -49,7 +49,7 @@ function Test-Installed([hashtable]$Profile, [string]$Type) {
     if ($sidecar.command -ine $dotnet -or $install.dotnetPath -ine $dotnet -or $install.distribution -cne $Type) {
         throw 'Installed runtime selection is inconsistent'
     }
-    $status = & $dotnet (Join-Path $Profile.plugin 'scripts/ag-approval.dll') status --config (Join-Path $Profile.plugin 'approval.json') | ConvertFrom-Json
+    $status = & $dotnet (Join-Path $Profile.plugin 'scripts/gravity-guardian.dll') status --config (Join-Path $Profile.plugin 'approval.json') | ConvertFrom-Json
     if ($LASTEXITCODE -ne 0 -or $status.status -ne 'running' -or $status.version -ne $manifest.version) {
         throw "Expected running $Type service $($manifest.version)"
     }
@@ -103,14 +103,14 @@ function Stop-TestInstall([hashtable]$Profile) {
     $config = Join-Path $Profile.plugin 'approval.json'
     if (!(Test-Path -LiteralPath $config)) { return }
     [IO.File]::WriteAllText((Join-Path $Profile.data 'uninstalled'), 'test cleanup')
-    & (Resolve-ApprovalRuntime $Profile.plugin -Installed) (Join-Path $Profile.plugin 'scripts/ag-approval.dll') stop --config $config | Out-Null
+    & (Resolve-ApprovalRuntime $Profile.plugin -Installed) (Join-Path $Profile.plugin 'scripts/gravity-guardian.dll') stop --config $config | Out-Null
 }
 
 function New-BrokenGuardianZip {
     $path = Join-Path $sandbox 'broken-guardian.zip'
     Copy-Item -LiteralPath $assetPaths.lite -Destination $path
-    $prefix = "gravity-steward-$($manifest.version)/"
-    $bundle = 'artifacts/codex-approval/native/'
+    $prefix = "gravity-guardian-$($manifest.version)/"
+    $bundle = 'artifacts/gravity-guardian/native/'
     $zip = [IO.Compression.ZipFile]::Open($path, [IO.Compression.ZipArchiveMode]::Update)
     try {
         function Read-ZipJson([string]$Name) {
@@ -169,7 +169,7 @@ try {
     $version = [version]$manifest.version
     $advertised.version = '{0}.{1}.{2}' -f $version.Major, $version.Minor, ($version.Build + 1)
     $advertised | ConvertTo-Json -Depth 8 | Set-Utf8NoBom -LiteralPath (Join-Path $dualFeed 'release-manifest.json')
-    $panelOutput = & (Join-Path $standalone.plugin 'app/CodexApprovalPanel.exe') --self-test --local-feed $dualFeed | ForEach-Object { $_ }
+    $panelOutput = & (Join-Path $standalone.plugin 'app/GravityGuardian.exe') --self-test --local-feed $dualFeed | ForEach-Object { $_ }
     $panelOutput | Write-Host
     if ($LASTEXITCODE -ne 0 -or !($panelOutput -match 'PASS local feed selected and verified separate Lite asset')) {
         throw 'Native panel did not verify both feed assets'
@@ -237,7 +237,7 @@ try {
         try {
             & (Join-Path $release 'scripts/Install.ps1') -GeminiRoot $previous.gemini -DataDirectory $previous.data -AntigravityPath $env:ComSpec | Out-Null
             $previousDotnet = Resolve-ApprovalRuntime $previous.plugin -Installed
-            $previousStatus = & $previousDotnet (Join-Path $previous.plugin 'scripts/ag-approval.dll') status --config (Join-Path $previous.plugin 'approval.json') | ConvertFrom-Json
+            $previousStatus = & $previousDotnet (Join-Path $previous.plugin 'scripts/gravity-guardian.dll') status --config (Join-Path $previous.plugin 'approval.json') | ConvertFrom-Json
             if ($LASTEXITCODE -ne 0 -or $previousStatus.status -cne 'running' -or [version]$previousStatus.version -ge [version]$manifest.version) {
                 throw 'Expected an earlier running service for version upgrade'
             }

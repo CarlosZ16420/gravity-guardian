@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:codex-approval:review-input:2.0",
+  "$id": "urn:gravity-guardian:review-input:2.0",
   "title": "Antigravity sourced review input v2",
   "type": "object",
   "additionalProperties": false,

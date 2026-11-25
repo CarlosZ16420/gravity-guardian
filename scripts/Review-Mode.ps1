@@ -229,14 +229,14 @@ function Resolve-ApprovalRuntime([string]$Bundle, [switch]$Installed, [string[]]
         if ($path.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase) -or $path.Contains('%')) { continue }
         if (Test-ApprovalX64Runtime $path) { return $path }
     }
-    throw 'Gravity Steward Lite requires the x64 .NET 10 Runtime. Install it with winget install Microsoft.DotNet.Runtime.10 --architecture x64 or download https://dotnet.microsoft.com/download/dotnet/10.0.'
+    throw 'Gravity Guardian Lite requires the x64 .NET 10 Runtime. Install it with winget install Microsoft.DotNet.Runtime.10 --architecture x64 or download https://dotnet.microsoft.com/download/dotnet/10.0.'
 }
 
 function Set-ApprovalHookRuntime([string]$Bundle, [string]$Runtime) {
     if ((Get-ApprovalDistribution $Bundle) -ne 'lite') { return }
     $path = Join-Path $Bundle 'hooks.json'
     $hooks = Get-Content -Encoding UTF8 -LiteralPath $path -Raw | ConvertFrom-JsonHashtable
-    $events = $hooks['codex-approval']
+    $events = $hooks['gravity-guardian']
     $commands = foreach ($event in $events.Values) {
         foreach ($item in $event) {
             if ($item.Contains('hooks')) { $item['hooks'] } else { $item }

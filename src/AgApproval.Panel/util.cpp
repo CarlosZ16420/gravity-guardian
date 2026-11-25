@@ -703,7 +703,7 @@ bool IsProcessRunningByPath(const std::wstring& exePath) {
 
 namespace {
 constexpr const wchar_t* kRunKey = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
-constexpr const wchar_t* kRunValue = L"AntigravityCodexApproval";
+constexpr const wchar_t* kRunValue = L"GravityGuardian";
 } // namespace
 
 std::wstring GetAutostartCommand() {

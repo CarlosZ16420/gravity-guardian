@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([string]$DataDirectory=(Join-Path $env:USERPROFILE '.gemini/codex-approval-data'),[Alias('SkipCodexLoginCheck')][switch]$SkipGuardianAuthCheck)
+param([string]$DataDirectory=(Join-Path $env:USERPROFILE '.gemini/gravity-guardian-data'),[Alias('SkipCodexLoginCheck')][switch]$SkipGuardianAuthCheck)
 $ErrorActionPreference='Stop'
 $taskManifest=Get-Content -Encoding UTF8 -LiteralPath (Join-Path $DataDirectory 'installation.json') -Raw | ConvertFrom-Json
 $taskPlugin=$taskManifest.pluginDirectory
@@ -41,12 +41,12 @@ if (Test-Path -LiteralPath $taskLedgerPath -PathType Leaf) {
 }
 Write-Host ('Active delegated protected grants: '+$taskOwnedCount)
 $taskHooks=Get-Content -Encoding UTF8 -LiteralPath (Join-Path $taskPlugin 'hooks.json') -Raw|ConvertFrom-Json
-$taskOuterTimeout=$taskHooks.'codex-approval'.PreToolUse[0].hooks[0].timeout
+$taskOuterTimeout=$taskHooks.'gravity-guardian'.PreToolUse[0].hooks[0].timeout
 Write-Host ('Deadlines (review/client/native hook): '+$taskConfig.reviewTimeoutSeconds+'/'+$taskConfig.hookTimeoutSeconds+'/'+$taskOuterTimeout+' seconds')
 if($taskConfig.reviewTimeoutSeconds -ge $taskConfig.hookTimeoutSeconds -or $taskConfig.hookTimeoutSeconds -ge $taskOuterTimeout){Write-Warning 'Nested approval deadlines are out of order; the outer hook may discard the reviewer result.'}
 $taskRuntime = Resolve-ApprovalRuntime $taskPlugin -Installed
 Write-Host ('Distribution: ' + (Get-ApprovalDistribution $taskPlugin) + '; .NET: ' + $taskRuntime)
-$taskAssembly = Join-Path $taskPlugin 'scripts/ag-approval.dll'
+$taskAssembly = Join-Path $taskPlugin 'scripts/gravity-guardian.dll'
 $taskConfigPath = Join-Path $taskPlugin 'approval.json'
 if(!$SkipGuardianAuthCheck){
     $taskDetectionRaw = & $taskRuntime $taskAssembly detect --config $taskConfigPath --gemini-root $taskManifest.geminiRoot --data-dir $DataDirectory

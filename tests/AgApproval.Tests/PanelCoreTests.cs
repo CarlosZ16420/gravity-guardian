@@ -188,7 +188,7 @@ public static class PanelCoreTests
                 if (Path.GetFileNameWithoutExtension(start.FileName).Equals("dotnet", StringComparison.OrdinalIgnoreCase))
                     start.ArgumentList.Add(assembly);
                 else
-                    start.FileName = Path.Combine(Path.GetDirectoryName(assembly)!, "ag-approval.exe");
+                    start.FileName = Path.Combine(Path.GetDirectoryName(assembly)!, "gravity-guardian.exe");
                 foreach (var arg in new[] { command, "--config", configPath }.Concat(options)) start.ArgumentList.Add(arg);
                 using var child = Process.Start(start)!;
                 using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
@@ -491,7 +491,7 @@ public static class PanelCoreTests
             if (Path.GetFileNameWithoutExtension(crashStart.FileName).Equals("dotnet", StringComparison.OrdinalIgnoreCase))
                 crashStart.ArgumentList.Add(asm);
             else
-                crashStart.FileName = Path.Combine(Path.GetDirectoryName(asm)!, "ag-approval.exe");
+                crashStart.FileName = Path.Combine(Path.GetDirectoryName(asm)!, "gravity-guardian.exe");
             foreach (var a in new[] { "review", "--config", dpCfgPath }) crashStart.ArgumentList.Add(a);
             using (var crashProc = Process.Start(crashStart)!)
             {

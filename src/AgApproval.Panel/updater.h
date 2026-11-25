@@ -8,7 +8,7 @@ namespace panel {
 
 struct UpdateConfig {
     std::wstring provider = L"github-releases";
-    std::wstring repository = L"CarlosZ16420/gravity-steward";
+    std::wstring repository = L"CarlosZ16420/gravity-guardian";
     std::wstring channel = L"stable";
     std::wstring manifestAsset = L"release-manifest.json";
     std::wstring localFeedDirectory;

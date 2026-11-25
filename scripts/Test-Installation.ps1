@@ -18,9 +18,24 @@ $taskProjectFile = Join-Path $taskProjects 'auto-project.json'
 $taskUserModeFile = Join-Path $taskProjects 'later-user-selection.json'
 @{ id = 'later-user-selection'; projectResources = @{}; settings = @{ permissionPreset = 'AGENT_PERMISSION_PRESET_AUTO' } } | ConvertTo-Json -Depth 10 | Set-Utf8NoBom -LiteralPath $taskUserModeFile -Encoding utf8
 
+$taskLegacyPlugin = Join-Path $taskConfig 'plugins/codex-approval'
+New-Item -ItemType Directory -Path $taskLegacyPlugin -Force | Out-Null
+$taskBeforeLegacyCheck = (Get-FileHash -LiteralPath (Join-Path $taskConfig 'config.json')).Hash
+$taskLegacyFailure = $null
+try {
+    & (Join-Path $PSScriptRoot 'Install.ps1') -GeminiRoot $taskGemini -DataDirectory $taskData @taskExecutables
+} catch { $taskLegacyFailure = $_.Exception.Message }
+if ($taskLegacyFailure -notlike 'Legacy Gravity Steward installation detected.*' -or
+    (Get-FileHash -LiteralPath (Join-Path $taskConfig 'config.json')).Hash -cne $taskBeforeLegacyCheck -or
+    (Test-Path -LiteralPath $taskData) -or (Test-Path -LiteralPath (Join-Path $taskConfig 'plugins/gravity-guardian'))) {
+    throw 'Legacy installation was not rejected before changing configuration or data'
+}
+[IO.Directory]::Delete($taskLegacyPlugin)
+Write-Host 'PASS legacy plugin requires explicit migration before any installation changes'
+
 & (Join-Path $PSScriptRoot 'Install.ps1') -GeminiRoot $taskGemini -DataDirectory $taskData @taskExecutables
 $taskInstalled = Get-Content -Encoding UTF8 -LiteralPath (Join-Path $taskConfig 'config.json') -Raw | ConvertFrom-Json
-if (!$taskInstalled.sidecars.other.enabled -or !$taskInstalled.sidecars.'codex-approval/reviewer'.enabled) { throw 'Sidecar merge failed' }
+if (!$taskInstalled.sidecars.other.enabled -or !$taskInstalled.sidecars.'gravity-guardian/reviewer'.enabled) { throw 'Sidecar merge failed' }
 if ($taskInstalled.userSettings.globalPermissionGrants.deny[0] -ne 'write_file(private)') { throw 'User permission rules changed' }
 if ($taskInstalled.userSettings.globalPermissionGrants.allow -cnotcontains 'command(git status)' -or
     $taskInstalled.userSettings.globalPermissionGrants.allow -cnotcontains 'read_file(.git)' -or
@@ -33,21 +48,21 @@ if ($taskInstalled.userSettings.permissionPreset -ne 'AGENT_PERMISSION_PRESET_DE
 $taskProject = Get-Content -Encoding UTF8 -LiteralPath $taskProjectFile -Raw | ConvertFrom-Json
 if ($taskProject.settings.permissionPreset -ne 'AGENT_PERMISSION_PRESET_DEFAULT' -or $taskProject.permissionGrants.permissionGrants.ask[0] -ne 'command(rm)') { throw 'Project Auto migration changed explicit rules' }
 
-$taskPlugin = Join-Path $taskConfig 'plugins/codex-approval'
+$taskPlugin = Join-Path $taskConfig 'plugins/gravity-guardian'
 $taskReview = Get-Content -Encoding UTF8 -LiteralPath (Join-Path $taskPlugin 'approval.json') -Raw | ConvertFrom-Json
 if ($taskReview.model -ne 'codex-auto-review' -or !$taskReview.enableNativeRouting -or !(Test-Path -LiteralPath $taskReview.policyDirectory)) { throw 'Installed runtime configuration invalid' }
 if ($taskReview.reviewerBackend -ne 'NativeGuardian' -or !$taskReview.enableNativeState -or !(Test-Path -LiteralPath $taskReview.guardianPath)) { throw 'Native Guardian was not installed as the selected backend' }
 if (![string]::IsNullOrEmpty($taskReview.proxy)) { throw 'Default open-source proxy must be empty' }
-foreach ($expectedAsset in @('pricing.json', 'update-config.json', 'app/CodexApprovalPanel.exe', 'scripts/Apply-Update.ps1')) {
+foreach ($expectedAsset in @('pricing.json', 'update-config.json', 'app/GravityGuardian.exe', 'scripts/Apply-Update.ps1')) {
     if (!(Test-Path -LiteralPath (Join-Path $taskPlugin $expectedAsset) -PathType Leaf)) { throw ('Missing expected panel/update asset: ' + $expectedAsset) }
 }
 if (Test-Path -LiteralPath (Join-Path $taskPlugin 'rules/project-authorizations.md')) { throw 'Deprecated project-authorizations rule file should not be installed' }
 if (Test-Path -LiteralPath (Join-Path $taskPlugin 'rules/antigravity-scratch.md')) { throw 'Deprecated antigravity-scratch rule file should not be installed' }
 if (!(Test-Path -LiteralPath (Join-Path $taskPlugin 'host-protected-paths.json') -PathType Leaf)) { throw 'Missing host-protected-paths.json catalog' }
 $taskInstalledHooks = Get-Content -Encoding UTF8 -LiteralPath (Join-Path $taskPlugin 'hooks.json') -Raw | ConvertFrom-Json
-if ($null -ne $taskInstalledHooks.'codex-approval'.PreInvocation) { throw 'Installed hooks.json should not register PreInvocation' }
+if ($null -ne $taskInstalledHooks.'gravity-guardian'.PreInvocation) { throw 'Installed hooks.json should not register PreInvocation' }
 if ($taskReview.escalateAuthorizedDenials -ne $true -or $taskReview.delegateProtectedPaths -ne $true) { throw 'Default escalateAuthorizedDenials and delegateProtectedPaths must be true' }
-if ($taskReview.reviewTimeoutSeconds -ne 90 -or $taskReview.hookTimeoutSeconds -ne 100 -or $taskInstalledHooks.'codex-approval'.PreToolUse[0].hooks[0].timeout -ne 120) { throw 'Nested review, client, and native hook deadlines are not coordinated' }
+if ($taskReview.reviewTimeoutSeconds -ne 90 -or $taskReview.hookTimeoutSeconds -ne 100 -or $taskInstalledHooks.'gravity-guardian'.PreToolUse[0].hooks[0].timeout -ne 120) { throw 'Nested review, client, and native hook deadlines are not coordinated' }
 
 & (Join-Path $PSScriptRoot 'Test-Hooks.ps1') -PluginDirectory $taskPlugin
 $taskReviewPath = Join-Path $taskPlugin 'approval.json'
@@ -60,7 +75,7 @@ $taskCustomConfig.codexHome = $taskFixtureHome
 $taskCustomConfig | ConvertTo-Json -Depth 20 | Set-Utf8NoBom -LiteralPath $taskReviewPath -Encoding utf8
 & (Join-Path $PSScriptRoot 'Doctor.ps1') -DataDirectory $taskData
 $taskRuntime = Join-Path $taskPlugin 'runtime/dotnet.exe'
-$taskAssembly = Join-Path $taskPlugin 'scripts/ag-approval.dll'
+$taskAssembly = Join-Path $taskPlugin 'scripts/gravity-guardian.dll'
 $taskDetect = & $taskRuntime $taskAssembly detect --config $taskReviewPath --gemini-root $taskGemini | ConvertFrom-Json
 if ($LASTEXITCODE -ne 0 -or $taskDetect.nativeAuth.status -ne 'credentials_found' -or $taskDetect.nativeAuth.storeMode -ne 'file') {
     throw 'Native discovery did not read the isolated credential fixture'
@@ -89,7 +104,7 @@ $taskOldPanelConfig.autoCheckUpdates = $false
 $taskOldPanelConfig | ConvertTo-Json -Depth 10 | Set-Utf8NoBom -LiteralPath $taskOldPanel
 $taskDetect = & $taskRuntime $taskAssembly detect --config $taskReviewPath --gemini-root $taskGemini | ConvertFrom-Json
 if ($LASTEXITCODE -ne 0 -or $taskDetect.nativeAuth.status -ne 'credentials_found') { throw 'Legacy configuration did not use the native credential check' }
-$taskPanel = Join-Path $taskPlugin 'app/CodexApprovalPanel.exe'
+$taskPanel = Join-Path $taskPlugin 'app/GravityGuardian.exe'
 $taskPanelOutput = & $taskPanel --self-test --plugin-dir $taskPlugin --data-dir $taskData --gemini-root $taskGemini | ForEach-Object { $_ }
 $taskPanelOutput | ForEach-Object { Write-Host $_ }
 if ($LASTEXITCODE -ne 0 -or !($taskPanelOutput -join "`n").Contains('PASS panel detected the installed Guardian')) {
@@ -178,7 +193,7 @@ if (!(Get-Process -Name dotnet -ErrorAction SilentlyContinue | Where-Object { $_
 
 # The native panel starts Windows PowerShell from outside the installation and then exits.
 $taskWindowsPowerShell = Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'
-$taskPanelAsset = Join-Path $taskPlugin 'app/CodexApprovalPanel.exe'
+$taskPanelAsset = Join-Path $taskPlugin 'app/GravityGuardian.exe'
 $taskPanelLockReady = Join-Path $taskFixture 'panel-lock-ready'
 $taskHoldPanelAsset = @'
 $taskFile = [IO.File]::Open('{0}', 'Open', 'Read', 'Read')
@@ -211,7 +226,7 @@ if (Get-Process -Name dotnet -ErrorAction SilentlyContinue | Where-Object { $_.P
 if (!(Test-Path -LiteralPath (Join-Path $taskFixture 'personal-file.txt'))) { throw 'Uninstaller removed a file outside the installation' }
 if ([IO.File]::ReadAllText($taskLegacyLauncher) -ne 'ORIGINAL_LAUNCHER') { throw 'Uninstaller did not restore the launcher from the background-only edition' }
 $taskRestored = Get-Content -Encoding UTF8 -LiteralPath (Join-Path $taskConfig 'config.json') -Raw | ConvertFrom-Json
-if (!$taskRestored.sidecars.other.enabled -or $null -ne $taskRestored.sidecars.'codex-approval/reviewer') { throw 'Uninstall affected another sidecar' }
+if (!$taskRestored.sidecars.other.enabled -or $null -ne $taskRestored.sidecars.'gravity-guardian/reviewer') { throw 'Uninstall affected another sidecar' }
 if ($taskRestored.userSettings.permissionPreset -ne 'AGENT_PERMISSION_PRESET_AUTO' -or $null -ne $taskRestored.userSettings.enableTerminalSandbox -or $null -ne $taskRestored.userSettings.autoExecutionPolicy) { throw 'Uninstall lost original native mode or absent fields' }
 if (@($taskRestored.userSettings.globalPermissionGrants.allow) -cne @('command(git status)')) { throw 'Uninstall left delegated protected-path grants or removed user allow rule' }
 $taskRestoredProject = Get-Content -Encoding UTF8 -LiteralPath $taskProjectFile -Raw | ConvertFrom-Json

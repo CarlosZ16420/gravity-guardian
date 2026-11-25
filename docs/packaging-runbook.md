@@ -1,8 +1,8 @@
-# Gravity Steward Windows 打包与验收手册
+# Gravity Guardian Windows 打包与验收手册
 
-从 `gravity-steward` 仓库根目录执行。每次发布用同一提交生成 Standalone 和 Lite，核对两个 ZIP 后再准备发布草稿。常规版本沿用已验收的 Rust 参数和锁定的 .NET 运行时。
+从仓库根目录执行。每次发布用同一提交生成 Standalone 和 Lite，核对两个 ZIP 后再准备发布草稿。常规版本沿用已验收的 Rust 参数和锁定的 .NET 运行时。
 
-> 日常本地开发与验证无需打包 ZIP，请使用 `.\scripts\Update-Local.ps1`（自动复用 Guardian 并按改动组件构建后直接更新本机；涉及 Rust 调试可使用 `-Components Guardian -GuardianProfile Dev` 与 `node .\scripts\Test-NativePrompt.mjs .local\prompt-dev --dev`）。`Package.ps1` 会校验 `artifacts/codex-approval/native/SOURCE.json` 必须为 `Release` 构建，防止误将 Dev 产物打包发布。
+> 日常本地开发与验证无需打包 ZIP，请使用 `.\scripts\Update-Local.ps1`（自动复用 Guardian 并按改动组件构建后直接更新本机；涉及 Rust 调试可使用 `-Components Guardian -GuardianProfile Dev` 与 `node .\scripts\Test-NativePrompt.mjs .local\prompt-dev --dev`）。`Package.ps1` 会校验 `artifacts/gravity-guardian/native/SOURCE.json` 必须为 `Release` 构建，防止误将 Dev 产物打包发布。
 
 ## 1. 准备版本与构建环境
 
@@ -27,18 +27,18 @@ $ErrorActionPreference = 'Stop'
 有上一版可用包时，把最后一条替换为以下命令。测试会先安装上一版，再用**本次新版更新器**升级并验证服务与 Hook。
 
 ```powershell
-$previous = 'C:\release-inputs\gravity-steward-0.6.3-windows-x64.zip'
+$previous = 'C:\release-inputs\gravity-guardian-0.6.5-windows-x64.zip'
 .\scripts\Test-Distributions.ps1 -PreviousPackage $previous
 ```
 
-若从 CI 取包，选择与发布提交 SHA 相同且结果成功的 Windows 构建，下载 `gravity-steward-windows-x64` 构建产物。[Windows 构建工作流](../.github/workflows/release.yml)
+若从 CI 取包，选择与发布提交 SHA 相同且结果成功的 Windows 构建，下载 `gravity-guardian-windows-x64` 构建产物。[Windows 构建工作流](../.github/workflows/release.yml)
 
 ## 3. 核对产物与运行结果
 
 | 产物 | 核验内容 |
 | --- | --- |
-| `gravity-steward-<版本>-windows-x64.zip` | Standalone。带 `runtime/dotnet.exe` 和锁定的单一 x64 .NET 10.0.x。 |
-| `gravity-steward-<版本>-lite-windows-x64.zip` | Lite。包内没有 `runtime/`。安装器会运行系统 x64 `dotnet.exe`，确认有可用的 .NET 10。 |
+| `gravity-guardian-<版本>-windows-x64.zip` | Standalone。带 `runtime/dotnet.exe` 和锁定的单一 x64 .NET 10.0.x。 |
+| `gravity-guardian-<版本>-lite-windows-x64.zip` | Lite。包内没有 `runtime/`。安装器会运行系统 x64 `dotnet.exe`，确认有可用的 .NET 10。 |
 | `release-manifest.json` | 顶层资产指向 Standalone。`distributions` 分别记录两包的文件名、URL、字节数和 SHA-256。 |
 | `checksums.sha256` | 两条 ZIP 校验值与发布清单一致。 |
 | `release-build-info.json` | 审计留档。记录两包的文件清单、总大小、运行时版本和 Guardian 哈希。 |

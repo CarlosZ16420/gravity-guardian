@@ -208,12 +208,12 @@ try {
         try { Get-Content -Encoding UTF8 -LiteralPath $taskStatePath -Raw | ConvertFrom-Json } catch { $null }
     } else { $null }
 
-    $taskBundle = Join-Path $taskRoot 'artifacts/codex-approval'
-    $taskPanelCacheExe = Join-Path $taskLocal 'panel-build/CodexApprovalPanel.exe'
+    $taskBundle = Join-Path $taskRoot 'artifacts/gravity-guardian'
+    $taskPanelCacheExe = Join-Path $taskLocal 'panel-build/GravityGuardian.exe'
     $taskBundlePluginJson = Join-Path $taskBundle 'plugin.json'
     $taskBundleHooksJson = Join-Path $taskBundle 'hooks.json'
-    $taskBundleServiceDll = Join-Path $taskBundle 'scripts/ag-approval.dll'
-    $taskBundlePanelExe = Join-Path $taskBundle 'app/CodexApprovalPanel.exe'
+    $taskBundleServiceDll = Join-Path $taskBundle 'scripts/gravity-guardian.dll'
+    $taskBundlePanelExe = Join-Path $taskBundle 'app/GravityGuardian.exe'
     $taskBundlePolicySource = Join-Path $taskBundle 'policy/effective-codex/SOURCE.json'
     $taskRepoPolicySource = Join-Path $taskRoot 'policy/effective-codex/SOURCE.json'
 
@@ -394,7 +394,7 @@ try {
         $taskReusedList.Add('Panel')
     }
 
-    # Incrementally sync artifacts/codex-approval without generating release ZIPs.
+    # Incrementally sync artifacts/gravity-guardian without generating release ZIPs.
     $swSync = [Diagnostics.Stopwatch]::StartNew()
     New-Item -ItemType Directory -Path $taskBundle -Force | Out-Null
 
@@ -515,12 +515,12 @@ try {
             $effectiveDataDir = if ($PSBoundParameters.ContainsKey('DataDirectory') -and ![string]::IsNullOrWhiteSpace($DataDirectory)) {
                 $DataDirectory
             } else {
-                $installedApprovalPath = Join-Path $effectiveGeminiRoot 'config/plugins/codex-approval/approval.json'
+                $installedApprovalPath = Join-Path $effectiveGeminiRoot 'config/plugins/gravity-guardian/approval.json'
                 if (Test-Path -LiteralPath $installedApprovalPath -PathType Leaf) {
                     $installedApproval = Get-Content -Encoding UTF8 -LiteralPath $installedApprovalPath -Raw | ConvertFrom-Json
-                    if ($installedApproval.dataDirectory) { [string]$installedApproval.dataDirectory } else { Join-Path $effectiveGeminiRoot 'codex-approval-data' }
+                    if ($installedApproval.dataDirectory) { [string]$installedApproval.dataDirectory } else { Join-Path $effectiveGeminiRoot 'gravity-guardian-data' }
                 } else {
-                    Join-Path $effectiveGeminiRoot 'codex-approval-data'
+                    Join-Path $effectiveGeminiRoot 'gravity-guardian-data'
                 }
             }
             & (Join-Path $PSScriptRoot 'Doctor.ps1') -DataDirectory $effectiveDataDir -SkipGuardianAuthCheck:$SkipGuardianAuthCheck | Out-Host

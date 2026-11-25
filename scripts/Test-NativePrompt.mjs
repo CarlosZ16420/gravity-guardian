@@ -104,7 +104,9 @@ const server = createServer(async (req, res) => {
         const index = requests.length;
         const outcome = ['allow', 'deny'][(index - 1) % 2];
         assert.ok(index <= 2 * repetitions + 2, 'unexpected extra inference');
-        if (index <= 2) writeFileSync(join(output, 'model-request-' + index + '.json'), JSON.stringify(frame, null, 2));
+        if (index <= 2 || index >= 2 * repetitions + 1) {
+            writeFileSync(join(output, 'model-request-' + index + '.json'), JSON.stringify(frame, null, 2));
+        }
         const id = 'fixture-' + index;
         const events = [
             {type: 'response.created', response: {id}},
@@ -173,6 +175,32 @@ try {
     }
     const trunkTurn1 = requests[requests.length - 2];
     const trunkTurn2 = requests[requests.length - 1];
+    assert.equal(trunkTurn1.prompt_cache_key, trunkTurn2.prompt_cache_key, 'TrunkReused must preserve prompt_cache_key');
+    const isCacheBreakpointCandidate = item =>
+        item.role === 'user' || item.type === 'function_call_output' || item.type === 'custom_tool_call_output';
+    const hasAuthEvidence = item =>
+        item.role === 'user' && item.content?.some(p => p.text?.startsWith(authPrefix));
+    const authIdx1 = trunkTurn1.input.findIndex(hasAuthEvidence);
+    const authIdx2 = trunkTurn2.input.findIndex(hasAuthEvidence);
+    assert.ok(authIdx1 > 0 && authIdx1 === authIdx2,
+        'authorization must follow developer prefix and stay at the same index across reused turns');
+    assert.ok(trunkTurn1.input.slice(0, authIdx1).every(item => item.role === 'developer'),
+        'only developer tools/base instructions may precede authorization');
+    const lastCacheableIdx1 = trunkTurn1.input.findLastIndex(isCacheBreakpointCandidate);
+    const lastCacheableIdx2 = trunkTurn2.input.findLastIndex(isCacheBreakpointCandidate);
+    assert.ok(lastCacheableIdx1 > authIdx1, 'authorization must precede persisted history/action breakpoint');
+    assert.ok(trunkTurn1.input.slice(lastCacheableIdx1 + 1).every(item => item.role === 'assistant'),
+        'only ephemeral assistant facts may trail the turn-1 cache breakpoint');
+    for (let i = 0; i <= lastCacheableIdx1; i++) {
+        assert.deepEqual(trunkTurn2.input[i], trunkTurn1.input[i],
+            `TrunkReused prefix item ${i} diverged before the implicit cache breakpoint`);
+    }
+    const turn2ActionIdx = trunkTurn2.input.findIndex(
+        item => item.type === 'function_call' && item.call_id === 'proposed-offline-fixture-turn-2');
+    assert.ok(turn2ActionIdx > lastCacheableIdx1, 'distinct turn-2 action must follow turn-1 cache breakpoint');
+    assert.ok(lastCacheableIdx2 > lastCacheableIdx1, 'turn-2 cache breakpoint must advance past turn-1');
+    assert.ok(trunkTurn2.input.slice(lastCacheableIdx2 + 1).every(item => item.role === 'assistant'),
+        'only ephemeral assistant facts may trail the turn-2 cache breakpoint');
     assert.equal(JSON.parse(trunkTurn1.input.find(i => i.role === 'assistant' && i.content?.some(p => p.text?.startsWith(factsPrefix))).content.find(p => p.text?.startsWith(factsPrefix)).text.slice(factsPrefix.length)).turn, 1);
     assert.equal(JSON.parse(trunkTurn2.input.find(i => i.role === 'assistant' && i.content?.some(p => p.text?.startsWith(factsPrefix))).content.find(p => p.text?.startsWith(factsPrefix)).text.slice(factsPrefix.length)).turn, 2);
     assert.ok(trunkTurn2.input.some(i => i.role === 'user' && i.content?.some(p => p.text?.includes('Delta turn 2 observed context.'))), 'TrunkReused missing delta history');
@@ -182,11 +210,12 @@ try {
         capturedModelRequests: requests.length, toolDefinitions: 0, actionBytes: Buffer.byteLength(content),
         fullActionMatched: true, authorizationOrderMatched: true, simulatedVerdicts: ['allow', 'deny'],
         authorizationSourceCount: instructions.length, projectScopesMatched: true, oversizedAuthorizationRejectedBeforeInference: true,
-        trunkReusedVerified: true, oversizedActionAttributedCorrectly: true,
+        trunkReusedVerified: true, cachePrefixBreakpointVerified: true, oversizedActionAttributedCorrectly: true,
         profile: isDev ? 'Debug' : 'Release', buildOptions: profile,
         releaseOptions: profile, reviewP50Ms: percentile(0.50), reviewP95Ms: percentile(0.95),
     }, null, 2));
     console.log('PASS final Responses bodies preserved the exact action, ordered user evidence, and separate project scope with zero tools');
+    console.log('PASS TrunkReused preserved exact raw prefix through the implicit cache breakpoint with authorization up front');
     console.log('PASS authorization exceeding the model budget stopped before inference');
 } finally {
     server.close();

@@ -1,6 +1,6 @@
 <div align="center">
 
-# Gravity Steward
+# Gravity Guardian
 
 **通过随包提供的 Native Guardian 审核 Antigravity 的工具请求。**
 
@@ -9,21 +9,23 @@ Tool approvals for Antigravity on Windows via Native Guardian.
 ![Windows x64](https://img.shields.io/badge/Windows-x64-2558a8?style=flat-square)
 ![Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-26735d?style=flat-square)
 
-**[下载 Windows 版](https://github.com/CarlosZ16420/gravity-steward/releases/latest)** · [English](README.en.md) · [反馈问题](https://github.com/CarlosZ16420/gravity-steward/issues)
+**[下载 Windows 版](https://github.com/CarlosZ16420/gravity-guardian/releases/latest)** · [English](README.en.md) · [反馈问题](https://github.com/CarlosZ16420/gravity-guardian/issues)
 
 [快速开始](#快速开始) · [功能介绍](#功能介绍) · [开发与开源](#开发与开源) · [友链](#友链)
 
 </div>
 
-Gravity Steward 自带 Native Guardian，由它调用 `codex-auto-review` 模型审核 Antigravity 的工具请求。Antigravity 负责执行，并保留你设置的显式允许、询问和拒绝规则。运行插件无需安装 Codex CLI。
+Gravity Guardian 内置 Codex 原生审核宿主（Native Guardian），由它调用 `codex-auto-review` 模型审核 Antigravity 的工具请求。Antigravity 负责执行，并保留你设置的显式允许、询问和拒绝规则。运行插件无需安装 Codex CLI。
 
 ## 快速开始
 
 1. 在 Windows x64 上至少打开一次 Antigravity。准备有权使用 `codex-auto-review` 的 Codex 账号，并在同一 Windows 用户下登录 Codex。
-2. 从 [Releases](https://github.com/CarlosZ16420/gravity-steward/releases/latest) 下载 `gravity-steward-*-windows-x64.zip`，完整解压到可写目录。
+2. 从 [Releases](https://github.com/CarlosZ16420/gravity-guardian/releases/latest) 下载 `gravity-guardian-*-windows-x64.zip`，完整解压到可写目录。
 3. 完全退出 Antigravity，在解压目录的 PowerShell 中运行 `.\scripts\Install.ps1`，然后重新打开 Antigravity。
 
-运行 `GravitySteward.exe` 可以打开面板「安装 / 修复插件」、查看审批结果，并在「Guardian 登录」检测本机凭据。升级时，旧 CLI 审核设置会自动迁移到 Guardian，自定义凭据目录和历史审批统计会保留。支持的验证范围见[验收记录](docs/guardian-0.172.0-validation.md)。
+从 Gravity Steward 升级时，先按[0.6.6 升级说明](docs/release-0.6.6.md#从-gravity-steward-升级)移除旧安装并保留数据，再安装新版。
+
+运行 `GravityGuardian.exe` 可以打开面板「安装 / 修复插件」、查看审批结果，并在「Guardian 登录」检测本机凭据。升级时，旧 CLI 审核设置会自动迁移到 Guardian，自定义凭据目录和历史审批统计会保留。支持的验证范围见[验收记录](docs/guardian-0.172.0-validation.md)。
 
 **Standalone** 沿用原安装包文件名，自带 x64 .NET 10。**Lite** 的文件名带 `-lite-`，需要系统已安装 x64 .NET 10，可运行 `winget install Microsoft.DotNet.Runtime.10 --architecture x64` 安装。切换类型时，完整解压目标 ZIP，再从该目录运行「安装 / 修复插件」。下载后可对照同页的 `checksums.sha256` 核对 ZIP。升级或卸载前先完全退出 Antigravity。
 
@@ -47,7 +49,7 @@ Gravity Steward 自带 Native Guardian，由它调用 `codex-auto-review` 模型
 .\scripts\Update-Local.ps1 -Components Service   # 仅构建 C# 服务并更新本机
 .\scripts\Update-Local.ps1 -Components Panel     # 仅构建 C++ 面板并更新本机
 .\scripts\Update-Local.ps1 -Components Guardian  # 使用 Rust Dev 配置快速增量构建 Guardian 并更新本机
-.\scripts\Update-Local.ps1 -BuildOnly            # 仅构建到 artifacts/codex-approval，不安装
+.\scripts\Update-Local.ps1 -BuildOnly            # 仅构建到 artifacts/gravity-guardian，不安装
 node .\scripts\Test-NativePrompt.mjs .local\prompt-dev --dev
 ```
 
@@ -65,9 +67,9 @@ node .\scripts\Test-NativePrompt.mjs .local\prompt-test
 
 用 `Measure-GuardianBuild.ps1 -Tuning` 测量 Rust 发布配置。可选 `Baseline`、`Symbols`、`Thin`、`ThinSingleUnit` 和 `ThinSize`。依次运行，记录冷构建耗时、编译进程内存、包体占用和本机模拟审核延迟。
 
-项目采用 [Apache-2.0](LICENSE)，上游与分发声明见 [NOTICE](NOTICE)。Gravity Steward 是独立的开源项目。
+项目采用 [Apache-2.0](LICENSE)，上游与分发声明见 [NOTICE](NOTICE)。Gravity Guardian 是独立的开源项目。
 
-反馈问题时请附插件版本和复现步骤，并隐去私人路径、凭据及原始对话。[提交问题](https://github.com/CarlosZ16420/gravity-steward/issues)
+反馈问题时请附插件版本和复现步骤，并隐去私人路径、凭据及原始对话。[提交问题](https://github.com/CarlosZ16420/gravity-guardian/issues)
 
 ## 友链
 

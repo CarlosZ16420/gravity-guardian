@@ -1,6 +1,6 @@
 [CmdletBinding(SupportsShouldProcess)]
 param(
-    [string]$DataDirectory = (Join-Path $env:USERPROFILE '.gemini/codex-approval-data'),
+    [string]$DataDirectory = (Join-Path $env:USERPROFILE '.gemini/gravity-guardian-data'),
     [switch]$PurgeData,
     [int]$WaitPid,
     [string]$PanelExecutablePath,
@@ -12,7 +12,7 @@ function Show-UninstallResult([string]$Message, [bool]$Succeeded) {
     if (!$ShowResult) { return }
     Add-Type -AssemblyName System.Windows.Forms
     $icon = if ($Succeeded) { 'Information' } else { 'Error' }
-    [void][System.Windows.Forms.MessageBox]::Show($Message, 'Gravity Steward', 'OK', $icon)
+    [void][System.Windows.Forms.MessageBox]::Show($Message, 'Gravity Guardian', 'OK', $icon)
 }
 
 trap {
@@ -44,8 +44,8 @@ Assert-NoReparsePoint $taskManifestPath
 $taskManifest = Get-Content -Encoding UTF8 -LiteralPath $taskManifestPath -Raw | ConvertFrom-JsonHashtable
 $taskConfigRoot = [IO.Path]::GetFullPath($taskManifest.configRoot)
 $taskPlugin = [IO.Path]::GetFullPath($taskManifest.pluginDirectory)
-$taskExpected = [IO.Path]::GetFullPath((Join-Path $taskConfigRoot 'plugins/codex-approval'))
-if ($taskPlugin -ine $taskExpected -or $taskManifest.sidecarId -cne 'codex-approval/reviewer') {
+$taskExpected = [IO.Path]::GetFullPath((Join-Path $taskConfigRoot 'plugins/gravity-guardian'))
+if ($taskPlugin -ine $taskExpected -or $taskManifest.sidecarId -cne 'gravity-guardian/reviewer') {
     throw 'Invalid installation manifest target'
 }
 if ($taskData -ieq $taskConfigRoot -or (Test-WithinDirectory $taskConfigRoot $taskData) -or (Test-WithinDirectory $taskData $taskConfigRoot) -or
@@ -62,7 +62,7 @@ $taskPluginManifest = Join-Path $taskPlugin 'plugin.json'
 foreach ($path in @($taskConfig, $taskStopMarker, $taskApproval, $taskPluginManifest, $taskBackup)) { Assert-NoReparsePoint $path }
 if (Test-Path -LiteralPath $taskPluginManifest) {
     $pluginName = (Get-Content -Encoding UTF8 -LiteralPath $taskPluginManifest -Raw | ConvertFrom-Json).name
-    if ($pluginName -cne 'codex-approval') { throw 'Refusing to remove a different plugin' }
+    if ($pluginName -cne 'gravity-guardian') { throw 'Refusing to remove a different plugin' }
 } elseif ((Test-Path -LiteralPath $taskPlugin) -and !(Test-Path -LiteralPath $taskStopMarker)) {
     throw 'Cannot verify ownership of the installed plugin directory'
 }
@@ -82,7 +82,7 @@ if ($PurgeData) {
         $owned = if ($item.PSIsContainer) {
             $item.Name -in $ownedDirectories -or $item.Name -match '^(staging-[a-f0-9]{32}|uninstalled-plugin-\d{8}-\d{6})$'
         } else {
-            $item.Name -in $ownedFiles -or $item.Name -match '^(ag-codex-[a-f0-9]{20}\.lock|stats-cache\.json\.[a-f0-9]{32}\.tmp)$'
+            $item.Name -in $ownedFiles -or $item.Name -match '^(gravity-guardian-[a-f0-9]{20}\.lock|stats-cache\.json\.[a-f0-9]{32}\.tmp)$'
         }
         if (!$owned) { throw "Unexpected item in the data directory. Move it out before purging: $($item.FullName)" }
     }
@@ -110,7 +110,7 @@ if ($taskLauncher) {
             # Older manifests did not distinguish a new launcher from a missing backup.
             # Preserve the verified launcher and strip the installer's approval startup block.
             $taskLauncherText = [IO.File]::ReadAllText($taskLauncher)
-            $taskLine = '"{0}" "{1}" ensure --config "{2}"' -f (Resolve-ApprovalRuntime $taskPlugin -Installed), (Join-Path $taskPlugin 'scripts/ag-approval.dll'), $taskApproval
+            $taskLine = '"{0}" "{1}" ensure --config "{2}"' -f (Resolve-ApprovalRuntime $taskPlugin -Installed), (Join-Path $taskPlugin 'scripts/gravity-guardian.dll'), $taskApproval
             $taskBlock = (@($taskLine, 'if errorlevel 1 (', '  echo Codex automatic approval is unavailable. Antigravity has not been started.', '  pause', '  exit /b 1', ')') -join "`r`n") + "`r`n"
             if (!$taskLauncherText.Contains($taskBlock)) { throw 'Launcher backup is missing and its approval startup block could not be identified' }
             $taskCleanLauncher = $taskLauncherText.Replace($taskBlock, '')
@@ -124,7 +124,7 @@ if (!$PSCmdlet.ShouldProcess("$taskPlugin and $taskData", $taskAction)) { return
 if ($WaitPid) {
     $taskInitiator = Get-Process -Id $WaitPid -ErrorAction SilentlyContinue
     if ($taskInitiator -and $taskInitiator.Path -ieq $PanelExecutablePath -and !$taskInitiator.WaitForExit(10000)) {
-        throw 'Close the Gravity Steward panel and retry.'
+        throw 'Close the Gravity Guardian panel and retry.'
     }
 }
 
@@ -138,18 +138,18 @@ if (Get-Process -Name Antigravity -ErrorAction SilentlyContinue | Where-Object {
 $taskRuntime = if (Test-Path -LiteralPath $taskPlugin) {
     try { Resolve-ApprovalRuntime $taskPlugin -Installed } catch { Write-Warning $_.Exception.Message }
 }
-$taskAssembly = Join-Path $taskPlugin 'scripts/ag-approval.dll'
+$taskAssembly = Join-Path $taskPlugin 'scripts/gravity-guardian.dll'
 $taskGuardian = Join-Path $taskPlugin 'native/ag-guardian-host.exe'
-$taskDataPanel = Join-Path $taskData 'panel/CodexApprovalPanel.exe'
-$taskInstalledPanel = Join-Path $taskPlugin 'app/CodexApprovalPanel.exe'
+$taskDataPanel = Join-Path $taskData 'panel/GravityGuardian.exe'
+$taskInstalledPanel = Join-Path $taskPlugin 'app/GravityGuardian.exe'
 $taskPanels = @($taskDataPanel, $taskInstalledPanel, $PanelExecutablePath)
 $taskRunKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
-$taskRunName = 'AntigravityCodexApproval'
+$taskRunName = 'GravityGuardian'
 $taskRunEntry = (Get-ItemProperty -LiteralPath $taskRunKey -Name $taskRunName -ErrorAction SilentlyContinue).$taskRunName
 if ($taskRunEntry -match '^"([^"]+)" --minimized$' -and ($Matches[1] -in $taskPanels -or $taskConfigRoot -ieq $taskDefaultConfig)) {
     Remove-ItemProperty -LiteralPath $taskRunKey -Name $taskRunName
 }
-Get-Process -Name CodexApprovalPanel,GravitySteward -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path -in $taskPanels } | ForEach-Object {
+Get-Process -Name GravityGuardian -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path -in $taskPanels } | ForEach-Object {
     if (!$_.HasExited) { $_.Kill() }
     if (!$_.WaitForExit(5000)) { throw 'The approval panel is still running. Close it and retry.' }
 }
@@ -181,7 +181,7 @@ if (Test-Path -LiteralPath $taskConfig -PathType Leaf) {
         } else {
             $taskState.sidecars[$taskManifest.sidecarId] = $taskManifest.oldSidecar
         }
-        $taskTemp = $taskConfig + '.codex-approval.tmp'
+        $taskTemp = $taskConfig + '.gravity-guardian.tmp'
         Assert-NoReparsePoint $taskTemp
         try {
             $taskState | ConvertTo-Json -Depth 100 | Set-Utf8NoBom -LiteralPath $taskTemp -Encoding utf8
@@ -222,7 +222,7 @@ if ($PurgeData) {
     if ($remaining.Count) { throw "Files appeared during uninstall. Close the approval panel and retry: $taskData" }
     Remove-Item -LiteralPath $taskStopMarker, $taskManifestPath -Force
     [IO.Directory]::Delete($taskData)
-    $taskResult = 'Uninstalled Gravity Steward and deleted its local logs, settings, and backups.'
+    $taskResult = 'Uninstalled Gravity Guardian and deleted its local logs, settings, and backups.'
 } else {
     $taskArchive = Join-Path $taskData ('uninstalled-plugin-' + [DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss'))
     if (Test-Path -LiteralPath $taskArchive) { throw 'Uninstall archive already exists' }

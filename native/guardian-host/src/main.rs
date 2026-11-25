@@ -16,7 +16,7 @@ const UPSTREAM: &str = "3d86e43b075adeba2193ec5c22ac92f55afd82e6";
 const MAX_FRAME: usize = 12 * 1024 * 1024;
 const MAX_SESSIONS: usize = 8;
 const MAX_PARENT_REVIEWS: usize = 64;
-const MAX_REVIEW_INPUT: i64 = 96_000;
+const MAX_REVIEW_INPUT_GROWTH: i64 = 96_000;
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct UserInstruction {
@@ -44,8 +44,25 @@ struct Request {
     #[serde(default = "default_timeout")] timeout_ms: u64,
 }
 fn default_timeout() -> u64 { 80_000 }
-struct Parent { thread: Arc<CodexThread>, id: ThreadId, conversation_id: Option<String>, history: Vec<Value>, policy: String, touched: Instant, reviews: usize, last_input: i64 }
-fn needs_checkpoint(reviews: usize, input: i64) -> bool { reviews >= MAX_PARENT_REVIEWS || input >= MAX_REVIEW_INPUT }
+struct Parent { thread: Arc<CodexThread>, id: ThreadId, conversation_id: Option<String>, history: Vec<Value>, policy: String, touched: Instant, reviews: usize, base_input: Option<i64>, last_input: i64 }
+fn needs_checkpoint(reviews: usize, base_input: Option<i64>, last_input: i64) -> bool {
+    reviews >= MAX_PARENT_REVIEWS
+        || base_input.is_some_and(|base| last_input.saturating_sub(base) >= MAX_REVIEW_INPUT_GROWTH)
+}
+fn record_review_input(
+    base_input: &mut Option<i64>,
+    last_input: &mut i64,
+    usage_input: Option<i64>,
+    dispatches: Option<i64>,
+) {
+    let Some(input) = usage_input.filter(|&value| value >= 0) else {
+        return;
+    };
+    let count = dispatches.unwrap_or(1).max(1);
+    let per_call = input / count;
+    *last_input = per_call;
+    *base_input = Some(base_input.map_or(per_call, |base| base.min(per_call)));
+}
 struct NoUserInstructions;
 impl UserInstructionsProvider for NoUserInstructions {
     fn load_user_instructions(&self) -> LoadInstructionsFuture<'_> {
@@ -255,9 +272,9 @@ async fn serve(config: Config, auth: Arc<AuthManager>, manager: Arc<ThreadManage
                     "inferenceDispatchCount":0,"attemptCount":0,"sessionReason":reset}));
             }
             let compatible = parents.get(&request.scope).is_some_and(|p|
-                p.touched.elapsed() < Duration::from_secs(1800) && !needs_checkpoint(p.reviews,p.last_input) && request.extra_policy == p.policy && request.history.starts_with(&p.history));
+                p.touched.elapsed() < Duration::from_secs(1800) && !needs_checkpoint(p.reviews, p.base_input, p.last_input) && request.extra_policy == p.policy && request.history.starts_with(&p.history));
             if !compatible {
-                if let Some(old) = parents.remove(&request.scope) { reset = if needs_checkpoint(old.reviews,old.last_input) {"review_budget_checkpoint"} else {"history_rewrite_or_idle"}; retire(&manager, old).await; }
+                if let Some(old) = parents.remove(&request.scope) { reset = if needs_checkpoint(old.reviews, old.base_input, old.last_input) {"review_budget_checkpoint"} else {"history_rewrite_or_idle"}; retire(&manager, old).await; }
                 if let Some(cid) = &request.conversation_id {
                     let stale_scopes: Vec<String> = parents.iter()
                         .filter(|(key, parent)| *key != &request.scope && parent.conversation_id.as_deref() == Some(cid.as_str()))
@@ -276,7 +293,7 @@ async fn serve(config: Config, auth: Arc<AuthManager>, manager: Arc<ThreadManage
                 let mut parent_config = config.clone();
                 parent_config.guardian_extra_policy = Some(request.extra_policy.clone());
                 let NewThread {thread_id, thread, ..} = manager.start_thread(StartThreadOptions::new(parent_config)).await?;
-                parents.insert(request.scope.clone(), Parent {thread, id: thread_id, conversation_id: request.conversation_id.clone(), history: Vec::new(), policy: request.extra_policy.clone(), touched: Instant::now(), reviews:0,last_input:0});
+                parents.insert(request.scope.clone(), Parent {thread, id: thread_id, conversation_id: request.conversation_id.clone(), history: Vec::new(), policy: request.extra_policy.clone(), touched: Instant::now(), reviews: 0, base_input: None, last_input: 0});
             } else { reset = "continued"; }
             let parent = parents.get_mut(&request.scope).unwrap();
             let delta = request.history[parent.history.len()..].to_vec();
@@ -338,7 +355,13 @@ async fn serve(config: Config, auth: Arc<AuthManager>, manager: Arc<ThreadManage
                 return Ok(failed);
             }
             parent.history = request.history.clone(); parent.touched = Instant::now();
-            parent.reviews += 1; parent.last_input=result["usage"]["input_tokens"].as_i64().unwrap_or(MAX_REVIEW_INPUT);
+            parent.reviews += 1;
+            record_review_input(
+                &mut parent.base_input,
+                &mut parent.last_input,
+                result["usage"]["input_tokens"].as_i64(),
+                result["inferenceDispatchCount"].as_i64(),
+            );
             Ok::<_, anyhow::Error>(json!({"id":request.id,"ok":true,"result":result,"sessionReason":reset}))
         }.await;
         match result {
@@ -387,7 +410,27 @@ mod tests {
         assert!(read_request(&mut std::io::Cursor::new(vec![b'x';MAX_FRAME+1])).is_err());
     }
     #[test] fn sustained_reviews_checkpoint_before_unbounded_growth() {
-        assert!(!needs_checkpoint(63,95_999));assert!(needs_checkpoint(64,100));assert!(needs_checkpoint(1,96_000));
+        assert!(!needs_checkpoint(0, None, 200_000));
+        assert!(!needs_checkpoint(20, Some(150_000), 245_999));
+        assert!(needs_checkpoint(64, Some(1_000), 1_000));
+        assert!(needs_checkpoint(1, Some(150_000), 246_000));
+    }
+    #[test] fn record_review_input_normalizes_dispatches_and_lowers_baseline() {
+        let mut base = None;
+        let mut last = 0;
+        record_review_input(&mut base, &mut last, Some(150_000), Some(1));
+        assert_eq!((base, last), (Some(150_000), 150_000));
+        assert!(!needs_checkpoint(1, base, last));
+
+        record_review_input(&mut base, &mut last, Some(60_000), Some(1));
+        assert_eq!((base, last), (Some(60_000), 60_000));
+
+        record_review_input(&mut base, &mut last, Some(396_000), Some(3));
+        assert_eq!((base, last), (Some(60_000), 132_000));
+        assert!(!needs_checkpoint(3, base, last));
+
+        record_review_input(&mut base, &mut last, None, Some(1));
+        assert_eq!((base, last), (Some(60_000), 132_000));
     }
     #[test] fn wire_validation_admits_large_actions_to_elastic_budgeting() {
         let mut value=request();

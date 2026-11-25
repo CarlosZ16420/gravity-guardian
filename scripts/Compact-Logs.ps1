@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$DataDirectory = (Join-Path $env:USERPROFILE '.gemini/codex-approval-data'),
+    [string]$DataDirectory = (Join-Path $env:USERPROFILE '.gemini/gravity-guardian-data'),
     [switch]$PlanOnly
 )
 $ErrorActionPreference = 'Stop'

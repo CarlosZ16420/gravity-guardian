@@ -43,7 +43,7 @@ try {
     })
     if (!$taskSawControl) { throw ('The Windows process trace missed the positive control PID ' + $taskControlId) }
     $taskCli = @($taskObserved | Where-Object { $_ -eq 'codex.exe' })
-    foreach ($taskExpected in @('ag-guardian-host.exe', 'CodexApprovalPanel.exe', 'dotnet.exe')) {
+    foreach ($taskExpected in @('ag-guardian-host.exe', 'GravityGuardian.exe', 'dotnet.exe')) {
         if ($taskExpected -notin $taskObserved) { throw ('The process trace missed the exercised executable ' + $taskExpected) }
     }
     @{
@@ -51,7 +51,7 @@ try {
         tracedProcessStarts = $taskObserved.Count
         codexExeStarts = $taskCli.Count
         guardianStarts = @($taskObserved | Where-Object { $_ -eq 'ag-guardian-host.exe' }).Count
-        panelStarts = @($taskObserved | Where-Object { $_ -eq 'CodexApprovalPanel.exe' }).Count
+        panelStarts = @($taskObserved | Where-Object { $_ -eq 'GravityGuardian.exe' }).Count
         scenarios = @('install', 'diagnostics', 'panel discovery', 'native Hooks', 'repair', 'self-update', 'uninstall')
     } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $taskOutput 'summary.json') -Encoding utf8
     if ($taskCli.Count) { throw 'The candidate launched codex.exe' }

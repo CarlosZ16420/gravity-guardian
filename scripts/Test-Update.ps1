@@ -19,9 +19,9 @@ Set-Content -LiteralPath (Join-Path $taskCodexHome 'config.toml') 'cli_auth_cred
 
 # 1. Install the current package into an isolated directory.
 & (Join-Path $PSScriptRoot 'Install.ps1') -GeminiRoot $taskGemini -DataDirectory $taskData -AntigravityPath $env:ComSpec
-$taskPlugin = Join-Path $taskConfig 'plugins/codex-approval'
+$taskPlugin = Join-Path $taskConfig 'plugins/gravity-guardian'
 $taskRuntime = Join-Path $taskPlugin 'runtime/dotnet.exe'
-$taskAssembly = Join-Path $taskPlugin 'scripts/ag-approval.dll'
+$taskAssembly = Join-Path $taskPlugin 'scripts/gravity-guardian.dll'
 $taskApprovalPath = Join-Path $taskPlugin 'approval.json'
 $taskBaseVersion = (Get-Content -Encoding UTF8 -LiteralPath (Join-Path $taskPlugin 'plugin.json') -Raw | ConvertFrom-Json).version
 $taskBaseParts = [version]$taskBaseVersion
@@ -49,9 +49,9 @@ New-Item -ItemType Directory -Path $taskGuardDir -Force | Out-Null
 [IO.File]::WriteAllText((Join-Path $taskGuardDir 'sentinel.json'), '{"keep":true}')
 
 # 2. Use the verified build and simulate an advertised newer version in the local feed.
-$taskBaseZip = Get-Item -LiteralPath (Join-Path $taskRoot "artifacts/gravity-steward-$taskBaseVersion-windows-x64.zip")
+$taskBaseZip = Get-Item -LiteralPath (Join-Path $taskRoot "artifacts/gravity-guardian-$taskBaseVersion-windows-x64.zip")
 if (!$taskBaseZip) { throw 'Packaged release zip not found' }
-$taskNextName = "gravity-steward-$taskNextVersion-windows-x64.zip"
+$taskNextName = "gravity-guardian-$taskNextVersion-windows-x64.zip"
 $taskNextZip = Join-Path $taskFeed $taskNextName
 Copy-Item -LiteralPath $taskBaseZip.FullName -Destination $taskNextZip
 
@@ -67,7 +67,7 @@ $taskNextSha = (Get-FileHash -LiteralPath $taskNextZip -Algorithm SHA256).Hash.T
 
 try {
     # Test A: Panel self-test against local feed (verifies SemVer detection + BCrypt SHA-256)
-    $taskPanelExe = Join-Path $taskPlugin 'app/CodexApprovalPanel.exe'
+    $taskPanelExe = Join-Path $taskPlugin 'app/GravityGuardian.exe'
     $taskPanelOut = & $taskPanelExe --self-test --local-feed $taskFeed | ForEach-Object { $_ }
     $taskPanelOut | ForEach-Object { Write-Host $_ }
     if ($LASTEXITCODE -ne 0 -or !($taskPanelOut -join "`n").Contains('PASS local update feed check')) {

@@ -22,7 +22,7 @@ function Show-InstallResult([string]$Message, [bool]$Succeeded) {
     if (!$ShowResult) { return }
     Add-Type -AssemblyName System.Windows.Forms
     $icon = if ($Succeeded) { 'Information' } else { 'Error' }
-    [void][System.Windows.Forms.MessageBox]::Show($Message, 'Gravity Steward', 'OK', $icon)
+    [void][System.Windows.Forms.MessageBox]::Show($Message, 'Gravity Guardian', 'OK', $icon)
 }
 
 trap {
@@ -34,15 +34,15 @@ trap {
 . (Join-Path $PSScriptRoot 'Review-Mode.ps1')
 
 if ([string]::IsNullOrWhiteSpace($DataDirectory)) {
-    $DataDirectory = Join-Path $GeminiRoot 'codex-approval-data'
+    $DataDirectory = Join-Path $GeminiRoot 'gravity-guardian-data'
 }
 
 $taskRoot = Split-Path $PSScriptRoot -Parent
 $taskBundle = if (![string]::IsNullOrWhiteSpace($BundlePath)) {
     [IO.Path]::GetFullPath($BundlePath)
 } else {
-    $candidate = Join-Path $taskRoot 'artifacts/codex-approval'
-    if (!(Test-Path -LiteralPath (Join-Path $candidate 'scripts/ag-approval.dll')) -and (Test-Path -LiteralPath (Join-Path $taskRoot 'scripts/ag-approval.dll'))) {
+    $candidate = Join-Path $taskRoot 'artifacts/gravity-guardian'
+    if (!(Test-Path -LiteralPath (Join-Path $candidate 'scripts/gravity-guardian.dll')) -and (Test-Path -LiteralPath (Join-Path $taskRoot 'scripts/gravity-guardian.dll'))) {
         $taskRoot
     } else {
         $candidate
@@ -64,19 +64,23 @@ if ($WaitPid -gt 0) {
     if ($taskWaitProc) {
         try {
             if (!$taskWaitProc.WaitForExit(15000)) {
-                throw 'Timed out waiting for CodexApprovalPanel to exit before repairing.'
+                throw 'Timed out waiting for GravityGuardian to exit before repairing.'
             }
         } finally { $taskWaitProc.Dispose() }
     }
 }
 $taskDistribution = Get-ApprovalDistribution $taskBundle
-$taskBundleAssembly = Join-Path $taskBundle 'scripts/ag-approval.dll'
+$taskBundleAssembly = Join-Path $taskBundle 'scripts/gravity-guardian.dll'
 
 $taskConfigRoot = [IO.Path]::GetFullPath((Join-Path $GeminiRoot 'config'))
-$taskPlugin = [IO.Path]::GetFullPath((Join-Path $taskConfigRoot 'plugins/codex-approval'))
+$taskPlugin = [IO.Path]::GetFullPath((Join-Path $taskConfigRoot 'plugins/gravity-guardian'))
+$taskLegacyPlugin = Join-Path $taskConfigRoot 'plugins/codex-approval'
+if (Test-Path -LiteralPath $taskLegacyPlugin) {
+    throw 'Legacy Gravity Steward installation detected. Exit Antigravity and run the OLD package scripts/Uninstall.ps1 WITHOUT -PurgeData first. Then install Gravity Guardian; use -DataDirectory with the retained data path to keep historical logs. See docs/release-0.6.6.md.'
+}
 $taskBundleRuntime = Resolve-ApprovalRuntime $taskBundle -Installed:($taskBundle -eq $taskPlugin)
 $taskRuntime = if ($taskDistribution -eq 'lite') { $taskBundleRuntime } else { Join-Path $taskPlugin 'runtime/dotnet.exe' }
-if ($taskPlugin -ne [IO.Path]::GetFullPath((Join-Path $taskConfigRoot 'plugins/codex-approval'))) { throw 'Invalid plugin target' }
+if ($taskPlugin -ne [IO.Path]::GetFullPath((Join-Path $taskConfigRoot 'plugins/gravity-guardian'))) { throw 'Invalid plugin target' }
 $taskAppConfig = Join-Path $taskConfigRoot 'config.json'
 
 foreach ($taskRequired in @($taskBundleAssembly, $taskBundleRuntime, $taskAppConfig)) {
@@ -111,7 +115,7 @@ if (![string]::IsNullOrWhiteSpace($AntigravityPath) -and !(Test-Path -LiteralPat
 $taskConfigHash = (Get-FileHash -LiteralPath $taskAppConfig -Algorithm SHA256).Hash
 $taskAppState = Get-Content -Encoding UTF8 -LiteralPath $taskAppConfig -Raw | ConvertFrom-JsonHashtable
 if (!$taskAppState.ContainsKey('userSettings')) { throw 'Unknown Antigravity settings layout' }
-$taskSidecarId = 'codex-approval/reviewer'
+$taskSidecarId = 'gravity-guardian/reviewer'
 $taskOldSidecar = if ($taskAppState.sidecars) { $taskAppState.sidecars[$taskSidecarId] } else { $null }
 
 $taskPlan = @{
@@ -120,7 +124,7 @@ $taskPlan = @{
     distribution = $taskDistribution; dotnetPath = $taskRuntime
     model = 'codex-auto-review'; effort = 'low'; reviewMode = $ReviewMode; reviewRouting = $ReviewRouting; reviewerBackend = 'NativeGuardian'
     commitMethod = $(if ($UseVerifiedCopyCommit) { 'verified-copy' } else { 'directory-move' })
-    changes = @('Install official plugin folder', 'Enable only codex-approval/reviewer sidecar', 'Keep Antigravity network and proxy untouched')
+    changes = @('Install official plugin folder', 'Enable only gravity-guardian/reviewer sidecar', 'Keep Antigravity network and proxy untouched')
     preserved = @('All existing Allow/Ask/Deny rules', 'Unrelated project settings', 'Existing Codex config and login')
 }
 if ($ReviewMode -eq 'Codex') { $taskPlan.changes += 'Use Default + sandbox globally and for explicit Auto project overrides; Codex Hook owns automatic review' }
@@ -188,17 +192,18 @@ $taskApproval | ConvertTo-Json -Depth 8 | Set-Utf8NoBom -LiteralPath (Join-Path 
 
 $taskSidecar = Join-Path $taskStage 'sidecars/reviewer'
 New-Item -ItemType Directory -Path $taskSidecar -Force | Out-Null
-@{command = $taskRuntime; args = @((Join-Path $taskPlugin 'scripts/ag-approval.dll'), 'supervise', '--config', (Join-Path $taskPlugin 'approval.json')); restart_policy = 'on-failure'; display_name = 'Codex Approval'; description = 'Native codex-auto-review permission reviewer'} |
+@{command = $taskRuntime; args = @((Join-Path $taskPlugin 'scripts/gravity-guardian.dll'), 'supervise', '--config', (Join-Path $taskPlugin 'approval.json')); restart_policy = 'on-failure'; display_name = 'Gravity Guardian'; description = 'Native codex-auto-review permission reviewer'} |
     ConvertTo-Json -Depth 8 | Set-Utf8NoBom -LiteralPath (Join-Path $taskSidecar 'sidecar.json') -Encoding utf8
 
-$taskAssembly = Join-Path $taskPlugin 'scripts/ag-approval.dll'
+$taskAssembly = Join-Path $taskPlugin 'scripts/gravity-guardian.dll'
 $taskReviewConfig = Join-Path $taskPlugin 'approval.json'
 
 $taskHadPrevious = Test-Path -LiteralPath $taskPlugin
 if ($taskHadPrevious) {
     $taskExisting = Get-Content -Encoding UTF8 -LiteralPath (Join-Path $taskPlugin 'plugin.json') -Raw | ConvertFrom-Json
-    if ($taskExisting.name -ne 'codex-approval') { throw 'Refusing to replace a different plugin' }
+    if ($taskExisting.name -ne 'gravity-guardian') { throw 'Refusing to replace a different plugin' }
     $taskOldRuntime = Resolve-ApprovalRuntime $taskPlugin -Installed
+    if ((Get-FileHash -LiteralPath $taskAppConfig -Algorithm SHA256).Hash -ne $taskConfigHash) { throw 'Application settings changed during install; rerun without overwriting them' }
     [IO.File]::WriteAllText((Join-Path $taskData 'uninstalled'), 'upgrade in progress')
     Start-Sleep -Milliseconds 2200
     $taskOldHostId = $null
@@ -214,11 +219,17 @@ if ($taskHadPrevious) {
         if ($taskOldProcess) { try { if (!$taskOldProcess.WaitForExit(10000)) { throw 'Approval host is still shutting down; no plugin files were replaced' } } finally { $taskOldProcess.Dispose() } }
     }
     # Stop any running tray panel from the plugin folder before replacing files.
-    Get-Process -Name 'CodexApprovalPanel','GravitySteward' -ErrorAction SilentlyContinue | Where-Object {
+    Get-Process -Name 'GravityGuardian' -ErrorAction SilentlyContinue | Where-Object {
         $_.Path -and [IO.Path]::GetFullPath($_.Path).StartsWith($taskPlugin + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)
     } | ForEach-Object {
         try { $_.Kill(); $_.WaitForExit(5000) } catch {}
     }
+    Clear-DelegatedProtectedGrants -ConfigRoot $taskConfigRoot -DataDirectory $taskData
+    $taskConfigHash = (Get-FileHash -LiteralPath $taskAppConfig -Algorithm SHA256).Hash
+    $taskAppState = Get-Content -Encoding UTF8 -LiteralPath $taskAppConfig -Raw | ConvertFrom-JsonHashtable
+    if (!$taskAppState.ContainsKey('userSettings')) { throw 'Unknown Antigravity settings layout' }
+    $taskOldSidecar = if ($taskAppState.sidecars) { $taskAppState.sidecars[$taskSidecarId] } else { $null }
+    Copy-Item -LiteralPath $taskAppConfig -Destination (Join-Path $taskBackup 'config.json.original') -Force
 }
 
 if ((Get-FileHash -LiteralPath $taskAppConfig -Algorithm SHA256).Hash -ne $taskConfigHash) { throw 'Application settings changed during install; rerun without overwriting them' }
@@ -253,7 +264,7 @@ try {
 catch {
     if ($UseVerifiedCopyCommit -and $taskCopyStarted -and (Test-Path -LiteralPath $taskPlugin)) {
         $taskFailedCopy = [IO.Path]::GetFullPath((Join-Path $taskBackup 'failed-plugin-copy'))
-        if ($taskPlugin -ne [IO.Path]::GetFullPath((Join-Path $taskConfigRoot 'plugins/codex-approval')) -or !$taskFailedCopy.StartsWith($taskBackup + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) { throw 'Rollback target escaped installation directories' }
+        if ($taskPlugin -ne [IO.Path]::GetFullPath((Join-Path $taskConfigRoot 'plugins/gravity-guardian')) -or !$taskFailedCopy.StartsWith($taskBackup + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) { throw 'Rollback target escaped installation directories' }
         Move-Item -LiteralPath $taskPlugin -Destination $taskFailedCopy
     }
     if ($taskHadPrevious -and !(Test-Path -LiteralPath $taskPlugin)) { Move-Item -LiteralPath $taskReplacedPath -Destination $taskPlugin }
@@ -262,7 +273,7 @@ catch {
 
 if (!$taskAppState.sidecars) { $taskAppState.sidecars = @{} }
 $taskAppState.sidecars[$taskSidecarId] = @{ enabled = $true }
-$taskTemp = $taskAppConfig + '.codex-approval.tmp'
+$taskTemp = $taskAppConfig + '.gravity-guardian.tmp'
 $taskAppState | ConvertTo-Json -Depth 100 | Set-Utf8NoBom -LiteralPath $taskTemp -Encoding utf8
 if ((Get-FileHash -LiteralPath $taskAppConfig -Algorithm SHA256).Hash -ne $taskConfigHash) { throw 'Application settings changed before commit; original backup is available' }
 Move-Item -LiteralPath $taskTemp -Destination $taskAppConfig -Force
@@ -321,12 +332,12 @@ if (!$NoStart) {
 }
 
 if ($RelaunchPanel) {
-    $panelExe = Join-Path $taskPlugin 'app/CodexApprovalPanel.exe'
+    $panelExe = Join-Path $taskPlugin 'app/GravityGuardian.exe'
     if (Test-Path -LiteralPath $panelExe -PathType Leaf) {
         Start-Process -FilePath $panelExe -WorkingDirectory (Split-Path $panelExe -Parent) -ArgumentList @('--plugin-dir', ('"' + $taskPlugin + '"'), '--data-dir', ('"' + $taskData + '"'), '--gemini-root', ('"' + [IO.Path]::GetFullPath($GeminiRoot) + '"')) | Out-Null
     }
 } elseif ($ShowResult) {
-    Show-InstallResult 'Gravity Steward 已完成安装并启用审批服务。' $true
+    Show-InstallResult 'Gravity Guardian 已完成安装并启用审批服务。' $true
 }
 
 $taskPlan | ConvertTo-Json -Depth 8

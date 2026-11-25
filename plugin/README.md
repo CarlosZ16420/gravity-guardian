@@ -1,4 +1,4 @@
-# Gravity Steward
+# Gravity Guardian
 
 Antigravity 提出并执行工具请求，固定版本的 Codex Native Guardian（codex-auto-review / low）负责审核。插件将真实的用户指令、适用项目规则、权限快照和待审动作交给 Guardian，并在放行前再次核对动作和授权。
 

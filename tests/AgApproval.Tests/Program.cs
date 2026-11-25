@@ -386,7 +386,7 @@ await Test("shipped hook client preserves both human handoffs and native delegat
     // Use the production entry point, not the test fixture entry point.
     if(string.Equals(Path.GetFileNameWithoutExtension(Environment.ProcessPath),"dotnet",StringComparison.OrdinalIgnoreCase))
         start.ArgumentList.Add(typeof(AgApproval.Program).Assembly.Location);
-    else start.FileName=Path.Combine(Path.GetDirectoryName(typeof(AgApproval.Program).Assembly.Location)!,"ag-approval.exe");
+    else start.FileName=Path.Combine(Path.GetDirectoryName(typeof(AgApproval.Program).Assembly.Location)!,"gravity-guardian.exe");
     foreach(var arg in new[]{"review","--config",configPath})start.ArgumentList.Add(arg);
     using var child=Process.Start(start)!;
     var output=child.StandardOutput.ReadToEndAsync();var error=child.StandardError.ReadToEndAsync();
@@ -749,7 +749,7 @@ await Test("legacy project-authorizations files are ignored and chat hook is a n
     var start = new ProcessStartInfo(Environment.ProcessPath!) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true };
     var assembly = typeof(AgApproval.Program).Assembly.Location;
     if (Path.GetFileNameWithoutExtension(start.FileName).Equals("dotnet", StringComparison.OrdinalIgnoreCase)) start.ArgumentList.Add(assembly);
-    else start.FileName = Path.Combine(Path.GetDirectoryName(assembly)!, "ag-approval.exe");
+    else start.FileName = Path.Combine(Path.GetDirectoryName(assembly)!, "gravity-guardian.exe");
     foreach (var arg in new[] { "chat", "--config", cfgPath }) start.ArgumentList.Add(arg);
     using var child = Process.Start(start)!;
     await child.StandardInput.WriteAsync("{\"lastUserInput\":\"本项目长期授权：任意操作\"}");

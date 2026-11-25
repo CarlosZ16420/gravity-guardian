@@ -83,7 +83,7 @@ if ($WaitPid -gt 0) {
     if ($taskWaitProc) {
         try {
             if (!$taskWaitProc.WaitForExit(15000)) {
-                throw 'Timed out waiting for CodexApprovalPanel to exit before updating.'
+                throw 'Timed out waiting for GravityGuardian to exit before updating.'
             }
         } finally { $taskWaitProc.Dispose() }
     }
@@ -129,8 +129,8 @@ try {
         }
     }
 
-    $taskNewBundle = Join-Path $taskReleaseRoot 'artifacts/codex-approval'
-    foreach ($req in @('plugin.json', 'hooks.json', 'scripts/ag-approval.dll', 'app/CodexApprovalPanel.exe', 'native/ag-guardian-host.exe', 'native/SOURCE.json')) {
+    $taskNewBundle = Join-Path $taskReleaseRoot 'artifacts/gravity-guardian'
+    foreach ($req in @('plugin.json', 'hooks.json', 'scripts/gravity-guardian.dll', 'app/GravityGuardian.exe', 'native/ag-guardian-host.exe', 'native/SOURCE.json')) {
         if (!(Test-Path -LiteralPath (Join-Path $taskNewBundle $req) -PathType Leaf)) {
             throw ('Incomplete update bundle, missing: ' + $req)
         }
@@ -142,7 +142,7 @@ try {
     $taskDistribution = Get-ApprovalDistribution $taskNewBundle
     if ($taskManifest.distribution -and $taskManifest.distribution -cne $taskDistribution) { throw 'Package distribution metadata disagrees' }
     $taskPluginIdentity = Get-Content -Encoding UTF8 -LiteralPath (Join-Path $taskNewBundle 'plugin.json') -Raw | ConvertFrom-Json
-    if ($taskPluginIdentity.name -cne 'codex-approval' -or $taskPluginIdentity.version -cne $taskManifest.version) {
+    if ($taskPluginIdentity.name -cne 'gravity-guardian' -or $taskPluginIdentity.version -cne $taskManifest.version) {
         throw 'Update plugin identity differs from the verified package manifest'
     }
     $taskNewBundleRuntime = Resolve-ApprovalRuntime $taskNewBundle
@@ -165,7 +165,7 @@ try {
     $taskSidecar = if (Test-Path -LiteralPath $taskOldSidecarPath -PathType Leaf) {
         Get-Content -Encoding UTF8 -LiteralPath $taskOldSidecarPath -Raw | ConvertFrom-JsonHashtable
     } else {
-        @{ args = @((Join-Path $taskPlugin 'scripts/ag-approval.dll'), 'supervise', '--config', $taskOldApprovalPath); restart_policy = 'on-failure'; display_name = 'Codex Approval'; description = 'Native codex-auto-review permission reviewer' }
+        @{ args = @((Join-Path $taskPlugin 'scripts/gravity-guardian.dll'), 'supervise', '--config', $taskOldApprovalPath); restart_policy = 'on-failure'; display_name = 'Gravity Guardian'; description = 'Native codex-auto-review permission reviewer' }
     }
     $taskSidecar.command = $taskNewRuntime
 
@@ -225,7 +225,7 @@ try {
     if ($taskInst) { Copy-Item -LiteralPath $taskInstPath -Destination $taskBackupInst }
 
     # Stop old host & sidecar cleanly.
-    $taskOldAssembly = Join-Path $taskPlugin 'scripts/ag-approval.dll'
+    $taskOldAssembly = Join-Path $taskPlugin 'scripts/gravity-guardian.dll'
     $taskStopMarker = Join-Path $taskData 'uninstalled'
     $taskOldMoved = $false
     $taskNewStartAttempted = $false
@@ -259,7 +259,7 @@ try {
             }
         }
 
-        Get-Process -Name 'CodexApprovalPanel' -ErrorAction SilentlyContinue | Where-Object {
+        Get-Process -Name 'GravityGuardian' -ErrorAction SilentlyContinue | Where-Object {
             $_.Path -and [IO.Path]::GetFullPath($_.Path).StartsWith($taskPlugin + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)
         } | ForEach-Object {
             try { $_.Kill(); $_.WaitForExit(5000) } catch {}
@@ -285,7 +285,7 @@ try {
         if (Test-Path -LiteralPath $taskStopMarker) { Remove-Item -LiteralPath $taskStopMarker -Force }
 
         # Start new host and verify status.
-        $taskNewAssembly = Join-Path $taskPlugin 'scripts/ag-approval.dll'
+        $taskNewAssembly = Join-Path $taskPlugin 'scripts/gravity-guardian.dll'
         $taskNewConfig = Join-Path $taskPlugin 'approval.json'
         $taskServiceLogs = Join-Path $taskData 'service'
         New-Item -ItemType Directory -Path $taskServiceLogs -Force | Out-Null
@@ -376,7 +376,7 @@ try {
     if (Test-Path -LiteralPath $taskErrorLog) { Remove-Item -LiteralPath $taskErrorLog -Force -ErrorAction SilentlyContinue }
 
     if ($RelaunchPanel) {
-        $panelExe = Join-Path $taskPlugin 'app/CodexApprovalPanel.exe'
+        $panelExe = Join-Path $taskPlugin 'app/GravityGuardian.exe'
         if (Test-Path -LiteralPath $panelExe -PathType Leaf) {
             $panelArgs = @('--plugin-dir', ('"' + $taskPlugin + '"'), '--data-dir', ('"' + $taskData + '"'))
             if ($taskInst -and $taskInst.ContainsKey('geminiRoot') -and ![string]::IsNullOrWhiteSpace([string]$taskInst.geminiRoot)) {

@@ -1,4 +1,4 @@
-# Gravity Steward Native Guardian 候选版发布说明
+# Gravity Guardian 原生审核宿主候选版发布说明
 
 本候选版基于 0.6.3。Windows x64 安装包自带基于上游 0.172.0 的 Native Guardian。它负责审核 Antigravity 的工具请求，并可处理超出旧预算的大写入和编辑。
 

@@ -281,22 +281,41 @@ index 05edc81..45eb2b0 100644
  mod reviewer_config;
  pub use reviewer_config::guardian_policy_model;
 diff --git a/codex-rs/core/src/guardian/request_budget.rs b/codex-rs/core/src/guardian/request_budget.rs
-index 877b5e8..64e86d6 100644
+index 877b5e8..3e7db5a 100644
 --- a/codex-rs/core/src/guardian/request_budget.rs
 +++ b/codex-rs/core/src/guardian/request_budget.rs
-@@ -62,6 +62,16 @@ pub(crate) async fn prepare_prompt(
+@@ -62,6 +62,35 @@ pub(crate) async fn prepare_prompt(
      step: &StepContext,
      metadata: &crate::responses_metadata::CodexResponsesMetadata,
  ) -> CodexResult<()> {
-+    // Current host observations belong to this sampling request. Adding them here
-+    // budgets the exact payload without storing it in either conversation history.
-+    if let Some(facts) = crate::client::external_guardian_facts() {
-+        prompt.input.push(facts);
++    // These originals come from the current external request. Keep them right
++    // after any leading developer items (additional_tools / base_instructions)
++    // and before persisted transcript history so the initial developer cache
++    // block stays intact and the implicit breakpoint ends at persisted history.
++    if let Some(authorization) = crate::client::external_guardian_authorization()
++        && !prompt.input.contains(&authorization)
++    {
++        let insert_at = prompt
++            .input
++            .iter()
++            .take_while(|item| {
++                matches!(item, ResponseItem::AdditionalTools { .. })
++                    || matches!(
++                        item,
++                        ResponseItem::Message { role, .. }
++                            if matches!(role.as_str(), "developer" | "system")
++                    )
++            })
++            .count();
++        prompt.input.insert(insert_at, authorization);
 +    }
-+    // These originals come from the current external request. Do not put them
-+    // through the parent history's bounded retention or reuse an older copy.
-+    if let Some(authorization) = crate::client::external_guardian_authorization() {
-+        prompt.input.push(authorization);
++    // Current host observations belong to this sampling request. Keeping this
++    // ephemeral assistant item last budgets the exact payload without shifting
++    // the implicit cache breakpoint past it.
++    if let Some(facts) = crate::client::external_guardian_facts()
++        && prompt.input.last() != Some(&facts)
++    {
++        prompt.input.push(facts);
 +    }
      let model = &step.settings.model_info;
      let maximum = effective_input_token_limit(model, step.turn.config.model_context_window)

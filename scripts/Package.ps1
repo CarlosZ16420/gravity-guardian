@@ -14,7 +14,7 @@ $env:TMP = $taskBuildTemp
 $env:TEMP = $taskBuildTemp
 try {
 $taskRuntime = Get-LockedDotnetRuntime
-$taskBundle = Join-Path $taskRoot 'artifacts/codex-approval'
+$taskBundle = Join-Path $taskRoot 'artifacts/gravity-guardian'
 $taskGuardianManifestPath = Join-Path $taskBundle 'native/SOURCE.json'
 if (!(Test-Path -LiteralPath $taskGuardianManifestPath -PathType Leaf)) {
     throw "Missing Guardian manifest in $taskBundle. Run .\scripts\Build.ps1 first."
@@ -27,8 +27,8 @@ $taskVersion = (Get-Content -Encoding UTF8 -LiteralPath (Join-Path $taskBundle '
 $taskStage = Join-Path $taskRoot ('artifacts/releases/stage-' + [Guid]::NewGuid().ToString('N'))
 
 function New-ReleaseArchive([ValidateSet('standalone','lite')][string]$Distribution) {
-$taskRelease = Join-Path (Join-Path $taskStage $Distribution) ('gravity-steward-' + $taskVersion)
-$taskPackageBundle = Join-Path $taskRelease 'artifacts/codex-approval'
+$taskRelease = Join-Path (Join-Path $taskStage $Distribution) ('gravity-guardian-' + $taskVersion)
+$taskPackageBundle = Join-Path $taskRelease 'artifacts/gravity-guardian'
 
 New-Item -ItemType Directory -Path $taskPackageBundle -Force | Out-Null
 foreach ($item in (Get-ChildItem -LiteralPath $taskBundle -Force)) {
@@ -37,7 +37,7 @@ foreach ($item in (Get-ChildItem -LiteralPath $taskBundle -Force)) {
 }
 @{ type = $Distribution } | ConvertTo-Json -Compress |
     Set-Utf8NoBom -LiteralPath (Join-Path $taskPackageBundle 'distribution.json')
-Copy-Item -LiteralPath (Join-Path $taskBundle 'app/CodexApprovalPanel.exe') -Destination (Join-Path $taskRelease 'GravitySteward.exe') -Force
+Copy-Item -LiteralPath (Join-Path $taskBundle 'app/GravityGuardian.exe') -Destination (Join-Path $taskRelease 'GravityGuardian.exe') -Force
 
 New-Item -ItemType Directory -Path (Join-Path $taskRelease 'scripts') -Force | Out-Null
 foreach ($taskName in @('Install.ps1','Uninstall.ps1','Review-Mode.ps1','Resolve-Runtime.ps1','Doctor.ps1','Analyze-Logs.ps1','Compact-Logs.ps1','Apply-Update.ps1','Test-Hooks.ps1')) {
@@ -69,7 +69,7 @@ $taskPackageManifest = Join-Path $taskRelease 'package-manifest.json'
     version = $taskVersion
     distribution = $Distribution
     builtAt = [DateTime]::UtcNow.ToString('O')
-    deploymentStatusSource = 'Use Doctor or CodexApprovalPanel status; package metadata is not live deployment state'
+    deploymentStatusSource = 'Use Doctor or GravityGuardian status; package metadata is not live deployment state'
     files = $taskFiles
 } | ConvertTo-Json -Depth 8 | Set-Utf8NoBom -LiteralPath $taskPackageManifest -Encoding utf8
 
@@ -78,7 +78,7 @@ foreach ($taskFile in $taskFiles) { $taskExpectedFiles.Add($taskFile.path, $task
 $taskExpectedFiles.Add('package-manifest.json', (Get-FileHash -LiteralPath $taskPackageManifest -Algorithm SHA256).Hash.ToLowerInvariant())
 
 $taskSuffix = if ($Distribution -eq 'lite') { '-lite' } else { '' }
-$taskZipName = "gravity-steward-$taskVersion$taskSuffix-windows-x64.zip"
+$taskZipName = "gravity-guardian-$taskVersion$taskSuffix-windows-x64.zip"
 $taskStagedZip = Join-Path $taskStage $taskZipName
 $taskPrefix = (Split-Path $taskRelease -Leaf) + '/'
 
@@ -107,16 +107,16 @@ try {
         $taskExpectedRuntime = if ($Distribution -eq 'standalone') {
             Get-LockedDotnetRuntimeFiles -Archive $taskRuntimeArchive -Version $taskRuntime.version
         } else { @{} }
-        $taskRuntimePrefix = 'artifacts/codex-approval/runtime/'
-        $taskNativeExe = 'artifacts/codex-approval/native/ag-guardian-host.exe'
-        $taskNativeManifest = 'artifacts/codex-approval/native/SOURCE.json'
-        $taskPanel = 'artifacts/codex-approval/app/CodexApprovalPanel.exe'
+        $taskRuntimePrefix = 'artifacts/gravity-guardian/runtime/'
+        $taskNativeExe = 'artifacts/gravity-guardian/native/ag-guardian-host.exe'
+        $taskNativeManifest = 'artifacts/gravity-guardian/native/SOURCE.json'
+        $taskPanel = 'artifacts/gravity-guardian/app/GravityGuardian.exe'
         $taskRequiredFiles = @(
-            'GravitySteward.exe', $taskNativeExe, $taskNativeManifest, $taskPanel
-            'artifacts/codex-approval/hooks.json'
-            'artifacts/codex-approval/scripts/ag-approval.dll'
-            'artifacts/codex-approval/scripts/ag-approval.deps.json'
-            'artifacts/codex-approval/scripts/ag-approval.runtimeconfig.json'
+            'GravityGuardian.exe', $taskNativeExe, $taskNativeManifest, $taskPanel
+            'artifacts/gravity-guardian/hooks.json'
+            'artifacts/gravity-guardian/scripts/gravity-guardian.dll'
+            'artifacts/gravity-guardian/scripts/gravity-guardian.deps.json'
+            'artifacts/gravity-guardian/scripts/gravity-guardian.runtimeconfig.json'
         )
         foreach ($taskRequired in $taskRequiredFiles) {
             if (!$taskExpectedFiles.ContainsKey($taskRequired)) { throw "Missing required release file: $taskRequired" }
@@ -172,7 +172,7 @@ try {
             $taskReader.Dispose()
         }
         if ($taskFileHashes[$taskNativeExe] -ne $taskGuardian.binarySha256) { throw 'Guardian SHA-256 differs from native/SOURCE.json' }
-        if ($taskFileHashes['GravitySteward.exe'] -cne $taskFileHashes[$taskPanel]) { throw 'Panel entry points differ' }
+        if ($taskFileHashes['GravityGuardian.exe'] -cne $taskFileHashes[$taskPanel]) { throw 'Panel entry points differ' }
     } finally {
         $taskRuntimeArchive.Dispose()
     }
@@ -202,14 +202,14 @@ $taskBuilds = [ordered]@{ standalone = $taskStandalone; lite = $taskLite }
 $taskSharedFiles = @{}
 foreach ($file in $taskStandalone.files) { $taskSharedFiles[$file.path] = $file.sha256 }
 foreach ($file in $taskLite.files) {
-    if ($file.path -in @('package-manifest.json','artifacts/codex-approval/distribution.json')) { continue }
+    if ($file.path -in @('package-manifest.json','artifacts/gravity-guardian/distribution.json')) { continue }
     if ($taskSharedFiles[$file.path] -cne $file.sha256) { throw "Distributions disagree on common file: $($file.path)" }
 }
 $taskStagedChecksums = Join-Path $taskStage 'checksums.sha256'
 $taskChecksumLines = foreach ($build in $taskBuilds.Values) { "$($build.zipSha256) *$($build.assetName)" }
 Set-Utf8NoBom -LiteralPath $taskStagedChecksums -Content (($taskChecksumLines -join [char]10) + [char]10)
 
-$taskRepo = 'CarlosZ16420/gravity-steward'
+$taskRepo = 'CarlosZ16420/gravity-guardian'
 $taskUpdCfgPath = Join-Path $taskBundle 'update-config.json'
 if (Test-Path -LiteralPath $taskUpdCfgPath -PathType Leaf) {
     $taskUpdCfg = Get-Content -Encoding UTF8 -LiteralPath $taskUpdCfgPath -Raw | ConvertFrom-Json
@@ -233,7 +233,7 @@ foreach ($build in $taskBuilds.Values) {
     sizeBytes = $taskAssets.standalone.sizeBytes
     distributions = $taskAssets
     minAntigravityVersion = '2.32.0'
-    releaseNotes = "Gravity Steward ${taskVersion}: Codex-powered tool approvals for Antigravity on Windows."
+    releaseNotes = "Gravity Guardian ${taskVersion}: Codex-powered tool approvals for Antigravity on Windows."
 } | ConvertTo-Json -Depth 8 | Set-Utf8NoBom -LiteralPath $taskStagedManifest -Encoding utf8
 
 $taskStagedBuildInfo = Join-Path $taskStage 'release-build-info.json'

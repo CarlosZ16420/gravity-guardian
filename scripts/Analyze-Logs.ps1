@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([string]$DataDirectory=(Join-Path $env:USERPROFILE '.gemini/codex-approval-data'),[ValidatePattern('^\d{4}-\d{2}-\d{2}$')][string]$UtcDate)
+param([string]$DataDirectory=(Join-Path $env:USERPROFILE '.gemini/gravity-guardian-data'),[ValidatePattern('^\d{4}-\d{2}-\d{2}$')][string]$UtcDate)
 $ErrorActionPreference='Stop'
 $taskLogs=Join-Path $DataDirectory 'logs'
 $taskRecords=[Collections.Generic.List[object]]::new()

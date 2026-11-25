@@ -78,12 +78,12 @@ try {
     }
 
     & (Join-Path $PSScriptRoot 'Build-Panel.ps1') -SkipSelfTest:$SkipPanelSelfTest
-    $taskPanelBinary = Join-Path $taskRoot '.local/panel-build/CodexApprovalPanel.exe'
+    $taskPanelBinary = Join-Path $taskRoot '.local/panel-build/GravityGuardian.exe'
     if ((Get-Item -LiteralPath $taskPanelBinary).VersionInfo.ProductVersion -cne "$taskReleaseVersion.0") {
         throw 'Built panel product version differs from the release version'
     }
 
-    $taskBundle = Join-Path $taskRoot ('.local/build-bundle/' + [Guid]::NewGuid().ToString('N') + '/codex-approval')
+    $taskBundle = Join-Path $taskRoot ('.local/build-bundle/' + [Guid]::NewGuid().ToString('N') + '/gravity-guardian')
     New-Item -ItemType Directory -Path $taskBundle -Force | Out-Null
     Copy-Item -Path (Join-Path $taskRoot 'plugin/*') -Destination $taskBundle -Recurse -Force
     $taskNative = Join-Path $taskBundle 'native'
@@ -97,7 +97,7 @@ try {
 
     $taskApp = Join-Path $taskBundle 'app'
     New-Item -ItemType Directory -Path $taskApp -Force | Out-Null
-    Copy-Item -LiteralPath $taskPanelBinary -Destination (Join-Path $taskApp 'CodexApprovalPanel.exe') -Force
+    Copy-Item -LiteralPath $taskPanelBinary -Destination (Join-Path $taskApp 'GravityGuardian.exe') -Force
 
     $taskPrograms = Join-Path $taskBundle 'scripts'
     New-Item -ItemType Directory -Path $taskPrograms -Force | Out-Null
@@ -124,8 +124,8 @@ try {
         $taskRuntimeArchive.Dispose()
     }
 
-    $taskPublishedBundle = [IO.Path]::GetFullPath((Join-Path $taskRoot 'artifacts/codex-approval'))
-    $taskOldBundle = [IO.Path]::GetFullPath((Join-Path $taskRoot ('.local/build-backups/' + [Guid]::NewGuid().ToString('N') + '/codex-approval')))
+    $taskPublishedBundle = [IO.Path]::GetFullPath((Join-Path $taskRoot 'artifacts/gravity-guardian'))
+    $taskOldBundle = [IO.Path]::GetFullPath((Join-Path $taskRoot ('.local/build-backups/' + [Guid]::NewGuid().ToString('N') + '/gravity-guardian')))
     $taskWorkspacePrefix = [IO.Path]::GetFullPath($taskRoot).TrimEnd('\') + '\'
     foreach ($taskMovePath in @($taskBundle, $taskPublishedBundle, $taskOldBundle)) {
         if (![IO.Path]::GetFullPath($taskMovePath).StartsWith($taskWorkspacePrefix, [StringComparison]::OrdinalIgnoreCase)) { throw 'Build target escaped workspace' }

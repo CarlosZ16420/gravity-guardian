@@ -76,7 +76,7 @@ int wmain(int argc, wchar_t** argv) {
     WNDCLASSEXW windowClass{sizeof(windowClass)};
     windowClass.lpfnWndProc = UiTestWindowProc;
     windowClass.hInstance = g_app.hInst;
-    windowClass.lpszClassName = L"GravityStewardPanelUiTests";
+    windowClass.lpszClassName = L"GravityGuardianPanelUiTests";
     RegisterClassExW(&windowClass);
     HWND hwnd = CreateWindowExW(kPanelExStyle, windowClass.lpszClassName, L"Panel UI tests",
         kPanelStyle, 0, 0, kPanelWidth, kCompactHeight, nullptr, nullptr, g_app.hInst, nullptr);

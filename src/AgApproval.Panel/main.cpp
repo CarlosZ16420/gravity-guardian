@@ -26,7 +26,7 @@ namespace panel {
 
 namespace {
 
-constexpr wchar_t kWindowClass[] = L"AntigravityCodexApprovalPanelWnd";
+constexpr wchar_t kWindowClass[] = L"GravityGuardianPanelWnd";
 constexpr UINT kDwmWindowCornerPreference = 33;
 constexpr DWORD kDwmRound = 2;
 // Approximately two thirds of the 406 x 902 reference, in logical pixels.
@@ -315,7 +315,7 @@ UpdateNotice GetUpdateNotice() {
         break;
     case UpdatePhase::Current:
         notice.title = L"当前无需更新";
-        notice.body = L"你正在使用最新版本。\n可以继续正常使用 Gravity Steward。";
+        notice.body = L"你正在使用最新版本。\n可以继续正常使用 Gravity Guardian。";
         if (g_app.state.availableUpdate.version.empty()) notice.latestVersion = notice.currentVersion;
         notice.icon = ID_ICON_UPDATE_SUCCESS;
         notice.accent = kGreen;
@@ -599,16 +599,16 @@ void InitPathsAndConfig(const std::wstring& optPlugin, const std::wstring& optDa
 
     PanelConfig cfg{};
     cfg.geminiRoot = !optGemini.empty() ? optGemini : JoinPath(profile, L".gemini");
-    cfg.dataDirectory = !optData.empty() ? optData : JoinPath(cfg.geminiRoot, L"codex-approval-data");
-    cfg.pluginDirectory = !optPlugin.empty() ? optPlugin : JoinPath(cfg.geminiRoot, L"config\\plugins\\codex-approval");
+    cfg.dataDirectory = !optData.empty() ? optData : JoinPath(cfg.geminiRoot, L"gravity-guardian-data");
+    cfg.pluginDirectory = !optPlugin.empty() ? optPlugin : JoinPath(cfg.geminiRoot, L"config\\plugins\\gravity-guardian");
 
     // Either distribution may be installed or opened as a portable panel.
-    std::wstring nestedBundle = JoinPath(exeDir, L"artifacts\\codex-approval");
-    if (FileExists(JoinPath(cfg.pluginDirectory, L"scripts\\ag-approval.dll"))) {
+    std::wstring nestedBundle = JoinPath(exeDir, L"artifacts\\gravity-guardian");
+    if (FileExists(JoinPath(cfg.pluginDirectory, L"scripts\\gravity-guardian.dll"))) {
         cfg.bundleDirectory = cfg.pluginDirectory;
-    } else if (FileExists(JoinPath(parentDir, L"scripts\\ag-approval.dll"))) {
+    } else if (FileExists(JoinPath(parentDir, L"scripts\\gravity-guardian.dll"))) {
         cfg.bundleDirectory = parentDir;
-    } else if (FileExists(JoinPath(nestedBundle, L"scripts\\ag-approval.dll"))) {
+    } else if (FileExists(JoinPath(nestedBundle, L"scripts\\gravity-guardian.dll"))) {
         cfg.bundleDirectory = nestedBundle;
     } else {
         cfg.bundleDirectory = cfg.pluginDirectory;
@@ -679,14 +679,14 @@ std::wstring GetBundleDotnet(const std::wstring& bundle) {
 }
 
 std::wstring GetDotnetExe(const PanelConfig& cfg) {
-    if (FileExists(JoinPath(cfg.pluginDirectory, L"scripts\\ag-approval.dll"))) return GetBundleDotnet(cfg.pluginDirectory);
+    if (FileExists(JoinPath(cfg.pluginDirectory, L"scripts\\gravity-guardian.dll"))) return GetBundleDotnet(cfg.pluginDirectory);
     return GetBundleDotnet(cfg.bundleDirectory);
 }
 
 std::wstring GetAssemblyDll(const PanelConfig& cfg) {
-    std::wstring p1 = JoinPath(cfg.pluginDirectory, L"scripts\\ag-approval.dll");
+    std::wstring p1 = JoinPath(cfg.pluginDirectory, L"scripts\\gravity-guardian.dll");
     if (FileExists(p1)) return p1;
-    return JoinPath(cfg.bundleDirectory, L"scripts\\ag-approval.dll");
+    return JoinPath(cfg.bundleDirectory, L"scripts\\gravity-guardian.dll");
 }
 
 std::wstring GetPricingJsonPath(const PanelConfig& cfg) {
@@ -725,9 +725,9 @@ StatsResult QueryApprovalStats(const PanelConfig& cfg, const std::optional<DateR
     std::wstring dll = GetAssemblyDll(cfg);
     std::wstring exeDir = GetDirectoryName(GetExecutablePath());
     // Use the core shipped with this panel for its read-only statistics, even with an older installed plugin.
-    for (const auto& bundle : {GetDirectoryName(exeDir), JoinPath(exeDir, L"artifacts\\codex-approval")}) {
+    for (const auto& bundle : {GetDirectoryName(exeDir), JoinPath(exeDir, L"artifacts\\gravity-guardian")}) {
         auto bundledDotnet = GetBundleDotnet(bundle);
-        auto bundledDll = JoinPath(bundle, L"scripts\\ag-approval.dll");
+        auto bundledDll = JoinPath(bundle, L"scripts\\gravity-guardian.dll");
         if (FileExists(bundledDotnet) && FileExists(bundledDll)) {
             dotnet = std::move(bundledDotnet);
             dll = std::move(bundledDll);
@@ -831,7 +831,7 @@ void StartStatsWorker() {
 
 std::optional<bool> RunTakeoverCommand(const PanelConfig& cfg, std::optional<bool> enabled = std::nullopt) {
     const auto dotnet = GetBundleDotnet(cfg.pluginDirectory);
-    const auto dll = JoinPath(cfg.pluginDirectory, L"scripts\\ag-approval.dll");
+    const auto dll = JoinPath(cfg.pluginDirectory, L"scripts\\gravity-guardian.dll");
     const auto approvalCfg = JoinPath(cfg.pluginDirectory, L"approval.json");
     std::wstring args = L"\"" + dll + L"\" takeover --config \"" + approvalCfg + L"\"";
     if (enabled.has_value()) args += *enabled ? L" --enabled true" : L" --enabled false";
@@ -941,7 +941,7 @@ void UpdateTrayAppearance() {
     const bool active = g_app.state.pluginInstalled && g_app.state.serviceRunning &&
                         g_app.state.takeoverEnabled.value_or(false);
     HICON hIcon = active ? g_app.iconNormal : g_app.iconGray;
-    std::wstring tip = L"Gravity Steward v" + g_app.state.serviceVersion;
+    std::wstring tip = L"Gravity Guardian v" + g_app.state.serviceVersion;
     if (!g_app.state.pluginInstalled || !g_app.state.serviceRunning) {
         tip += g_app.state.pluginInstalled ? L" · 服务未运行" : L" · 未安装";
     } else if (!g_app.state.takeoverEnabled.has_value()) {
@@ -1529,7 +1529,7 @@ void StartUninstallAndExit(HWND hwnd) {
     g_app.uninstallPromptOpen = true;
     const int answer = MessageBoxW(hwnd,
         L"面板将退出。卸载会移除已安装的插件，并永久删除本地审批日志、统计、设置和备份。\n\n确认完整卸载吗？",
-        L"完整卸载 Gravity Steward", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
+        L"完整卸载 Gravity Guardian", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
     g_app.uninstallPromptOpen = false;
     if (answer != IDYES) return;
 
@@ -1678,7 +1678,7 @@ void CreateChildControls(HWND hwnd) {
         return control;
     };
 
-    g_app.lblTitle = label(L"Gravity Steward");
+    g_app.lblTitle = label(L"Gravity Guardian");
     SetWindowSubclass(g_app.lblTitle, ControlSubclass, 1, 1);
     g_app.btnHeaderUpdate = button(L"检查应用更新", ID_BTN_CHECK_UPDATE);
     g_app.btnGitHub = button(L"打开 GitHub 项目", ID_BTN_GITHUB);
@@ -2264,7 +2264,7 @@ void PaintUpdatePopup(HWND hwnd, HDC hdc) {
     SetBkMode(hdc, TRANSPARENT);
     SetTextColor(hdc, kTertiary);
     RECT brand{S(68), S(43), S(268), S(58)};
-    DrawTextW(hdc, L"Gravity Steward", -1, &brand, DT_SINGLELINE | DT_NOPREFIX);
+    DrawTextW(hdc, L"Gravity Guardian", -1, &brand, DT_SINGLELINE | DT_NOPREFIX);
     SelectObject(hdc, g_app.fontSmall);
     SetTextColor(hdc, kSecondary);
     RECT current{S(32), S(146), S(124), S(162)};
@@ -2362,7 +2362,7 @@ LRESULT CALLBACK UpdatePopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             case UpdateAction::Check: StartCheckUpdateWorker(false); break;
             case UpdateAction::Download: StartDownloadAndApplyWorker(); break;
             case UpdateAction::OpenDownloads:
-                OpenPathWithShell(L"https://github.com/CarlosZ16420/gravity-steward/releases/latest");
+                OpenPathWithShell(L"https://github.com/CarlosZ16420/gravity-guardian/releases/latest");
                 break;
             case UpdateAction::Close: SendMessageW(hwnd, WM_CLOSE, 0, 0); break;
             }
@@ -2386,7 +2386,7 @@ LRESULT CALLBACK UpdatePopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
 void ShowUpdatePopup(bool show) {
     if (!g_app.updatePopup) {
         static bool registered = false;
-        constexpr wchar_t popupClass[] = L"GravityStewardUpdatePopup";
+        constexpr wchar_t popupClass[] = L"GravityGuardianUpdatePopup";
         if (!registered) {
             WNDCLASSEXW windowClass{sizeof(windowClass)};
             windowClass.lpfnWndProc = UpdatePopupProc;
@@ -2513,7 +2513,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         g_app.nid.uCallbackMessage = WM_APP_TRAY;
         g_app.nid.hIcon = g_app.iconGray;
         g_app.nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
-        wcsncpy_s(g_app.nid.szTip, L"Gravity Steward", _TRUNCATE);
+        wcsncpy_s(g_app.nid.szTip, L"Gravity Guardian", _TRUNCATE);
         g_app.trayAdded = Shell_NotifyIconW(NIM_ADD, &g_app.nid) == TRUE;
 
         SyncControlsToUi();
@@ -2805,7 +2805,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             ShowStatsPeriodMenu(hwnd);
             break;
         case ID_BTN_GITHUB:
-            OpenPathWithShell(L"https://github.com/CarlosZ16420/gravity-steward");
+            OpenPathWithShell(L"https://github.com/CarlosZ16420/gravity-guardian");
             break;
         case ID_BTN_HIDE:
         case IDCANCEL:
@@ -3031,7 +3031,7 @@ int RunSelfTest(const std::wstring& localFeedDir) {
 
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
     using namespace panel;
-    SetCurrentProcessExplicitAppUserModelID(L"GravitySteward.Panel");
+    SetCurrentProcessExplicitAppUserModelID(L"GravityGuardian.Panel");
 
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
@@ -3069,7 +3069,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
 
     InitPathsAndConfig(optPlugin, optData, optGemini);
 
-    std::wstring mutexName = L"Local\\AntigravityCodexApprovalPanel";
+    std::wstring mutexName = L"Local\\GravityGuardianPanel";
     HANDLE hMutex = CreateMutexW(nullptr, TRUE, mutexName.c_str());
     if (hMutex && GetLastError() == ERROR_ALREADY_EXISTS) {
         HWND existing = FindWindowW(kWindowClass, nullptr);
@@ -3118,7 +3118,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
         return 1;
     }
     HWND hwnd = CreateWindowExW(
-        kPanelExStyle, kWindowClass, L"Gravity Steward",
+        kPanelExStyle, kWindowClass, L"Gravity Guardian",
         kPanelStyle, x, y, fullW, fullH,
         nullptr, nullptr, hInst, nullptr);
     if (!hwnd) {

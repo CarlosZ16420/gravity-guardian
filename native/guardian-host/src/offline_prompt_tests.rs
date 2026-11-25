@@ -47,7 +47,7 @@ async fn run_final_native_prompt_roundtrip() -> anyhow::Result<()> {
         )).await;
         println!("native_review_ms={:.3}", started.elapsed().as_secs_f64() * 1000.0);
         retire(&manager, Parent { thread, id: thread_id, conversation_id: None, history: Vec::new(), policy: String::new(),
-            touched: Instant::now(), reviews: 0, last_input: 0 }).await;
+            touched: Instant::now(), reviews: 0, base_input: None, last_input: 0 }).await;
         let result = result?;
         ensure!(result["assessment"]["outcome"] == expected, "simulated verdict changed: {result}");
         ensure!(result["inferenceDispatchCount"] == 1, "expected exactly one inference");
@@ -68,13 +68,19 @@ async fn run_final_native_prompt_roundtrip() -> anyhow::Result<()> {
 
         let started2 = Instant::now();
         let delta = json!([{"type":"message","role":"assistant","content":[{"type":"input_text","text":"Delta turn 2 observed context."}]}]);
+        let mut turn2_action = request.action.clone();
+        turn2_action["call_id"] = json!("proposed-offline-fixture-turn-2");
+        turn2_action["arguments"] = json!(json!({
+            "Path": "turn-2-never-executed.ps1",
+            "Content": "# Turn 2 distinct synthetic proposal\n"
+        }).to_string());
         let turn2 = Box::pin(thread.assess_external_guardian(
-            delta, request.action.clone(), json!({"turn": 2}), authorization.clone(), 15_000,
+            delta, turn2_action, json!({"turn": 2}), authorization.clone(), 15_000,
             CancellationToken::new(),
         )).await?;
         println!("native_review_ms={:.3}", started2.elapsed().as_secs_f64() * 1000.0);
         retire(&manager, Parent { thread, id: thread_id, conversation_id: None, history: Vec::new(), policy: String::new(),
-            touched: Instant::now(), reviews: 0, last_input: 0 }).await;
+            touched: Instant::now(), reviews: 0, base_input: None, last_input: 0 }).await;
         ensure!(turn2["sessionKind"] == "Some(TrunkReused)" && turn2["inferenceDispatchCount"] == 1, "expected TrunkReused: {turn2}");
         ensure!(turn2["assessment"]["outcome"] == "deny" && turn2["actionExecuted"] == false && turn2["approvalPublished"] == false, "unexpected turn2 output: {turn2}");
     }
@@ -87,7 +93,7 @@ async fn run_final_native_prompt_roundtrip() -> anyhow::Result<()> {
         CancellationToken::new(),
     )).await;
     retire(&manager, Parent { thread, id: thread_id, conversation_id: None, history: Vec::new(), policy: String::new(),
-        touched: Instant::now(), reviews: 0, last_input: 0 }).await;
+        touched: Instant::now(), reviews: 0, base_input: None, last_input: 0 }).await;
     let failure = failure?;
     ensure!(failure["failure"]["reasonCode"] == "review_authorization_budget_exceeded"
         && failure["inferenceDispatchCount"] == 0, "oversized authorization reached inference: {failure}");
@@ -104,7 +110,7 @@ async fn run_final_native_prompt_roundtrip() -> anyhow::Result<()> {
         CancellationToken::new(),
     )).await;
     retire(&manager, Parent { thread, id: thread_id, conversation_id: None, history: Vec::new(), policy: String::new(),
-        touched: Instant::now(), reviews: 0, last_input: 0 }).await;
+        touched: Instant::now(), reviews: 0, base_input: None, last_input: 0 }).await;
     let action_failure = action_failure?;
     ensure!(action_failure["failure"]["reasonCode"] == "native_action_budget_exceeded"
         && action_failure["inferenceDispatchCount"] == 0, "oversized action was misattributed: {action_failure}");

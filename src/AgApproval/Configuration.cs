@@ -74,7 +74,7 @@ public sealed class Settings
         if (string.IsNullOrEmpty(PipeName))
         {
             var owner = OperatingSystem.IsWindows() ? WindowsIdentity.GetCurrent().User!.Value : Environment.UserName;
-            PipeName = "ag-codex-" + Json.Hash(owner + Path.GetFullPath(path))[..20];
+            PipeName = "gravity-guardian-" + Json.Hash(owner + Path.GetFullPath(path))[..20];
         }
     }
 

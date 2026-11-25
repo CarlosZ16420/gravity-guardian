@@ -112,7 +112,7 @@ New-Item -ItemType Directory -Path $taskConfig, $taskData -Force | Out-Null
     sidecars = @{}
 } | ConvertTo-Json -Depth 10 | Set-Utf8NoBom -LiteralPath (Join-Path $taskConfig 'config.json') -Encoding utf8
 
-$taskPlugin = Join-Path $taskConfig 'plugins/codex-approval'
+$taskPlugin = Join-Path $taskConfig 'plugins/gravity-guardian'
 $taskArtifacts = Join-Path $taskRoot 'artifacts'
 $taskExistingZips = @{}
 if (Test-Path -LiteralPath $taskArtifacts) {
@@ -202,7 +202,7 @@ try {
         if (Test-Path -LiteralPath $taskPlugin) {
             $rt = Resolve-ApprovalRuntime $taskPlugin -Installed
             [IO.File]::WriteAllText((Join-Path $taskData 'uninstalled'), 'test cleanup')
-            & $rt (Join-Path $taskPlugin 'scripts/ag-approval.dll') stop --config (Join-Path $taskPlugin 'approval.json') 2>$null | Out-Null
+            & $rt (Join-Path $taskPlugin 'scripts/gravity-guardian.dll') stop --config (Join-Path $taskPlugin 'approval.json') 2>$null | Out-Null
         }
     } catch {}
     if (Test-Path -LiteralPath $taskSandbox) {
