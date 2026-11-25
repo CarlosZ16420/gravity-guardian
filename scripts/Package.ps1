@@ -52,7 +52,7 @@ foreach ($taskName in @('Install.ps1','Uninstall.ps1','Review-Mode.ps1','Resolve
 $taskDocs = if ($taskPortable) { Join-Path $taskPackageBundle 'docs' } else { Join-Path $taskRelease 'docs' }
 New-Item -ItemType Directory -Path $taskDocs -Force | Out-Null
 Copy-Item -LiteralPath (Join-Path $taskRoot "docs/release-$taskVersion.md") -Destination $taskDocs
-foreach ($taskNote in @('guardian-0.172.0-validation.md', 'release-native-guardian.md')) {
+foreach ($taskNote in @('guardian-0.172.0-validation.md', 'release-native-guardian.md', 'portable.md')) {
     Copy-Item -LiteralPath (Join-Path $taskRoot "docs/$taskNote") -Destination $taskDocs
 }
 

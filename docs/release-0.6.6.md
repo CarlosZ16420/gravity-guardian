@@ -1,9 +1,14 @@
 # Gravity Guardian v0.6.6
 
-本版本正式将项目统一命名为 **Gravity Guardian**，移除「项目长期授权」，将"Guardian 判 `deny` 但判定用户明确授权（`user_authorization = high`）"的请求转为 Antigravity 原生人工确认（`force_ask`），并新增生命周期绑定的「受保护目录全局审核委派」。
+本版本正式将项目统一命名为 **Gravity Guardian**，新增本机免安装版 Portable，移除「项目长期授权」，将"Guardian 判 `deny` 但判定用户明确授权（`user_authorization = high`）"的请求转为 Antigravity 原生人工确认（`force_ask`），并新增生命周期绑定的「受保护目录全局审核委派」。
 
 ## 改动摘要
 
+- **新增 Portable 免安装版**：
+  - 完整解压 `gravity-guardian-0.6.6-portable-windows-x64.zip`，完全退出 Antigravity 后打开 `GravityGuardian.exe`，点击「连接 / 修复连接」即可使用。程序、配置、审批日志及统计集中在解压目录的 `app/`、`config/`、`data/` 中；宿主仅登记调用入口。
+  - 自带锁定的 .NET 运行时与同一 Native Guardian，沿用本机已有 Codex 登录。连接支持复制并校验现有安装的设置、日志、接管状态与自定义计价；断开保留本文件夹数据，重连刷新恢复基线，保留断开期间用户调整的宿主设置。
+  - 更新保留配置与日志，支持失败恢复；面板与脚本去重，打包门禁校验 Portable 的 ZIP 与干净解压体积均不超过同批 Standalone。完整操作见[免安装版说明](portable.md)。
+  - Standalone、Lite 继续提供；三种分发包来自同一提交，下载后可用 `checksums.sha256` 核对。
 - **品牌与底层标识统一命名为 Gravity Guardian**：
   - 对外品牌、插件 ID 与安装目录（`~/.gemini/config/plugins/gravity-guardian`）、数据目录（`~/.gemini/gravity-guardian-data`）、面板程序（`GravityGuardian.exe`）、核心服务（`gravity-guardian.dll`）、命名管道前缀（`gravity-guardian-*`）及开机启动项（`GravityGuardian`）全面统一为 Gravity Guardian。
   - 修复审核缓存前缀：当前授权放在开发者指令之后、持久历史之前，当前动作事实独立置于末尾；按每次推理输入的增量而非固定基础提示长度触发会话检查点，避免大基础提示导致每轮重建审核会话。

@@ -11,7 +11,7 @@
 3. 记录准备发布的提交 SHA。保留上一可用版本的 ZIP 和校验值，供测试升级与回退。构建目录与验收目录使用较短的路径并留足磁盘空间。
 4. 升级 Codex 时，按 `native/SOURCE.json` 更新锁定的上游来源并核对现有 Guardian 入口补丁。更换内置 .NET 时，在 `scripts/dotnet-runtime.lock.json` 同步更新微软 Windows x64 运行时的版本、下载 URL 和 SHA-256。
 
-## 2. 构建并生成双包
+## 2. 构建并生成三种分发包
 
 用 PowerShell 7 按顺序执行。任一步抛错时，修复后从该步继续。修改构建输入后，从构建重新开始。
 
@@ -26,7 +26,7 @@ $manifest = Get-Content artifacts/release-manifest.json -Raw | ConvertFrom-Json
 .\scripts\Test-Portable.ps1 -PackageZip (Join-Path artifacts $manifest.distributions.portable.assetName)
 ```
 
-有上一版可用包时，把最后一条替换为以下命令。测试会先安装上一版，再用**本次新版更新器**升级并验证服务与 Hook。
+有上一版同插件身份的可用包时，把 `Test-Distributions.ps1` 替换为以下命令。测试会先安装上一版，再用**本次新版更新器**升级并验证服务与 Hook；随后仍执行 Portable 验收。
 
 ```powershell
 $previous = 'C:\release-inputs\gravity-guardian-0.6.5-windows-x64.zip'
@@ -42,9 +42,9 @@ $previous = 'C:\release-inputs\gravity-guardian-0.6.5-windows-x64.zip'
 | `gravity-guardian-<版本>-windows-x64.zip` | Standalone。带 `runtime/dotnet.exe` 和锁定的单一 x64 .NET 10.0.x。 |
 | `gravity-guardian-<版本>-lite-windows-x64.zip` | Lite。包内没有 `runtime/`。安装器会运行系统 x64 `dotnet.exe`，确认有可用的 .NET 10。 |
 | `gravity-guardian-<版本>-portable-windows-x64.zip` | Portable。自带同一 .NET 和 Guardian，根面板与脚本各一份；使用中在根目录生成 `config/` 和 `data/`，宿主仅登记入口。 |
-| `release-manifest.json` | 顶层资产指向 Standalone。`distributions` 分别记录两包的文件名、URL、字节数和 SHA-256。 |
-| `checksums.sha256` | 两条 ZIP 校验值与发布清单一致。 |
-| `release-build-info.json` | 审计留档。记录两包的文件清单、总大小、运行时版本和 Guardian 哈希。 |
+| `release-manifest.json` | 顶层资产指向 Standalone。`distributions` 分别记录三包的文件名、URL、字节数和 SHA-256。 |
+| `checksums.sha256` | 三条 ZIP 校验值与发布清单一致。 |
+| `release-build-info.json` | 审计留档。记录三包的文件清单、总大小、运行时版本和 Guardian 哈希。 |
 
 `Package.ps1` 会重新读取三个 ZIP 并逐文件校验，检查无 PDB、ZIP 不超过 120 MiB、解压不超过 310 MiB，以及三包的 Guardian 哈希一致。Portable 的 ZIP 与解压程序均不得超过同批 Standalone；另保存改造前后的同条件体积对照。下载后可用 `Get-FileHash -Algorithm SHA256` 再核对。保留包清单、校验值和对应的验收日志。
 
@@ -59,7 +59,7 @@ node .\scripts\Test-NativePrompt.mjs .local\prompt-release
 
 ## 4. 发布与回退
 
-在 GitHub Releases 为已验收提交准备对应的 `v<版本>` 草稿，附上两个 ZIP、`checksums.sha256` 和 `release-manifest.json`，使用该版本的发布说明。核对远端附件名称、大小和 SHA-256 与本地验收产物一致后再公开。GitHub Actions 会归档产物，发布草稿单独处理。
+在 GitHub Releases 为已验收提交准备对应的 `v<版本>` 草稿，附上三个 ZIP、`checksums.sha256` 和 `release-manifest.json`，使用该版本的发布说明。核对远端附件名称、大小和 SHA-256 与本地验收产物一致后再公开。GitHub Actions 会归档产物，发布草稿单独处理。
 
 遇到升级故障，先备份升级后新增的日志。使用上一次更新备份恢复插件、配置及安装元数据，确认旧服务运行并复验 PreToolUse。
 
