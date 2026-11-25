@@ -31,6 +31,15 @@ $taskVersion=$taskVersionRaw|ConvertFrom-Json
 if($taskVersion.protocol -cne $taskGuardianManifest.protocol -or $taskVersion.upstreamCommit -cne $taskGuardianManifest.upstreamCommit){throw 'Native runtime version differs from source manifest'}
 Write-Host ('Native Guardian protocol/upstream/SHA256: '+$taskVersion.protocol+'/'+$taskVersion.upstreamCommit+'/'+$taskGuardianManifest.binarySha256)
 Write-Host ('Native read-only routing: '+$taskConfig.enableNativeRouting)
+$taskProtectedDelegation = if ($null -eq $taskConfig.delegateProtectedPaths) { $true } else { [bool]$taskConfig.delegateProtectedPaths }
+Write-Host ('Protected-path delegation: '+$taskProtectedDelegation)
+$taskLedgerPath = Join-Path $DataDirectory 'delegated-grants.json'
+$taskOwnedCount = 0
+if (Test-Path -LiteralPath $taskLedgerPath -PathType Leaf) {
+    $taskLedger = Get-Content -Encoding UTF8 -LiteralPath $taskLedgerPath -Raw | ConvertFrom-Json
+    if ($taskLedger.ownedGrants) { $taskOwnedCount = @($taskLedger.ownedGrants).Count }
+}
+Write-Host ('Active delegated protected grants: '+$taskOwnedCount)
 $taskHooks=Get-Content -Encoding UTF8 -LiteralPath (Join-Path $taskPlugin 'hooks.json') -Raw|ConvertFrom-Json
 $taskOuterTimeout=$taskHooks.'codex-approval'.PreToolUse[0].hooks[0].timeout
 Write-Host ('Deadlines (review/client/native hook): '+$taskConfig.reviewTimeoutSeconds+'/'+$taskConfig.hookTimeoutSeconds+'/'+$taskOuterTimeout+' seconds')
@@ -48,6 +57,11 @@ if(!$SkipGuardianAuthCheck){
 $taskRunningRaw=& $taskRuntime $taskAssembly status --config $taskConfigPath
 if($LASTEXITCODE -ne 0){throw 'Approval service is not responding; installed files do not prove a running upgrade'}
 $taskRunning=($taskRunningRaw -join [Environment]::NewLine).Trim()|ConvertFrom-Json
+$taskTakeoverRaw=& $taskRuntime $taskAssembly takeover --config $taskConfigPath
+$taskTakeoverEnabled=$LASTEXITCODE -eq 0 -and ($taskTakeoverRaw | ConvertFrom-Json).takeoverEnabled
+if ($taskOwnedCount -gt 0 -and (!$taskTakeoverEnabled -or $taskRunning.status -ne 'running')) {
+    Write-Warning 'Delegated protected-path grants exist while takeover is paused or the service is not running.'
+}
 $taskInstalled=Get-Content -Encoding UTF8 -LiteralPath (Join-Path $taskPlugin 'plugin.json') -Raw|ConvertFrom-Json
 Write-Host ('Installed/running version: '+$taskInstalled.version+'/'+$taskRunning.version)
 if($taskRunning.version -ne $taskInstalled.version){Write-Warning 'The running service is older than the installed package. Completely exit Antigravity and restart.'}

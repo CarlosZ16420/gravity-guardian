@@ -66,6 +66,36 @@ public static class Program
                 Console.WriteLine(Json.Encode(new { ok = true, persisted = true, liveUpdated, detailedLogs = s.DetailedLogsActive }));
                 return 0;
             }
+            if (command == "set-protected-delegation")
+            {
+                var enabledRaw = Option(args, "--enabled") ?? throw new InvalidDataException("Missing --enabled <true|false>");
+                bool enabled = enabledRaw.ToLowerInvariant() switch
+                {
+                    "true" or "1" or "yes" => true,
+                    "false" or "0" or "no" => false,
+                    _ => throw new InvalidDataException("Invalid --enabled value")
+                };
+                if (!File.Exists(config)) throw new FileNotFoundException("Configuration file not found", config);
+                var doc = JsonNode.Parse(File.ReadAllText(config))?.AsObject() ?? throw new InvalidDataException("Invalid configuration");
+                doc["delegateProtectedPaths"] = enabled;
+                var tmp = config + ".delegation.tmp";
+                File.WriteAllText(tmp, doc.ToJsonString(new System.Text.Json.JsonSerializerOptions { WriteIndented = true }), new UTF8Encoding(false));
+                File.Move(tmp, config, overwrite: true);
+
+                var s = Settings.Load(config);
+                bool liveUpdated = false;
+                try
+                {
+                    var reply = await RequestAsync(s, new { operation = "set_protected_delegation", enabled }, TimeSpan.FromSeconds(2));
+                    liveUpdated = JsonNode.Parse(reply)?["ok"]?.GetValue<bool>() == true;
+                }
+                catch (Exception e) when (e is IOException or TimeoutException or OperationCanceledException) { }
+                if (!liveUpdated)
+                    ProtectedPathDelegation.TrySync(s, hostActive: false, config);
+                Console.WriteLine(Json.Encode(new { ok = true, persisted = true, liveUpdated, delegateProtectedPaths = s.DelegateProtectedPaths,
+                    activeProtectedGrants = ProtectedPathDelegation.ReadOwnedGrants(s.DataDirectory).OrderBy(x => x, StringComparer.Ordinal).ToArray() }));
+                return 0;
+            }
             var settings = Settings.Read(config);
             if (command == "takeover")
             {
@@ -74,12 +104,26 @@ public static class Program
                     if (!bool.TryParse(Option(args, "--enabled"), out bool enabled))
                         throw new InvalidDataException("Expected --enabled <true|false>");
                     settings.SetTakeoverEnabled(enabled);
+                    bool hostOnline = false;
+                    if (enabled)
+                    {
+                        try
+                        {
+                            settings.Validate(config);
+                            var running = JsonNode.Parse(await RequestAsync(settings, new { operation = "status" }, TimeSpan.FromSeconds(1)));
+                            hostOnline = Json.Text(running, "status") == "running";
+                        }
+                        catch (Exception e) when (e is IOException or TimeoutException or OperationCanceledException or InvalidDataException or System.Text.Json.JsonException) { }
+                    }
+                    ProtectedPathDelegation.TrySync(settings, hostActive: enabled && hostOnline, config);
                 }
                 Console.WriteLine(Json.Encode(new { takeoverEnabled = settings.IsTakeoverEnabled() }));
                 return 0;
             }
             if (command is ("review" or "chat" or "session" or "post") && !settings.IsTakeoverEnabled())
             {
+                if (ProtectedPathDelegation.HasOwnedGrants(settings.DataDirectory))
+                    ProtectedPathDelegation.TryRevoke(settings);
                 // Consume the hook payload without parsing it, including large requests written to the pipe.
                 using var input = Console.OpenStandardInput();
                 await input.CopyToAsync(Stream.Null);
@@ -103,16 +147,27 @@ public static class Program
                 Console.WriteLine("{}");
                 return 0;
             }
-            if (command == "host") { await HostAsync(settings); return 0; }
+            if (command == "host") { await HostAsync(settings, config); return 0; }
             if (command == "ensure") { await EnsureAsync(settings, config); return 0; }
             if (command == "supervise")
             {
                 while (!File.Exists(Path.Combine(settings.DataDirectory,"uninstalled")))
                 {
-                    try { await EnsureAsync(settings, config); }
-                    catch (Exception e) when (e is IOException or InvalidOperationException) { Console.Error.WriteLine(e.GetType().Name); }
+                    try
+                    {
+                        var current = File.Exists(config) ? Settings.Read(config) : settings;
+                        current.Validate(config);
+                        await EnsureAsync(current, config);
+                        ProtectedPathDelegation.TrySync(current, hostActive: true, config);
+                    }
+                    catch (Exception e) when (e is IOException or InvalidOperationException or InvalidDataException or System.Text.Json.JsonException)
+                    {
+                        ProtectedPathDelegation.TryRevoke(settings);
+                        Console.Error.WriteLine(e.GetType().Name);
+                    }
                     await Task.Delay(2000);
                 }
+                ProtectedPathDelegation.TryRevoke(settings);
                 return 0;
             }
             if (command == "status") { Console.WriteLine(await RequestAsync(settings, new { operation = "status" }, TimeSpan.FromSeconds(3))); return 0; }
@@ -161,7 +216,7 @@ public static class Program
                 await Audit.AppendAsync(settings, completedEvent, ct.Token);
                 Console.WriteLine("{}"); return 0;
             }
-            Console.Error.WriteLine("Usage: ag-approval <host|ensure|review|status|stop|session|post|detect|stats|set-logging|compact-logs|takeover> --config <absolute-file>");
+            Console.Error.WriteLine("Usage: ag-approval <host|ensure|review|status|stop|session|post|detect|stats|set-logging|set-protected-delegation|compact-logs|takeover> --config <absolute-file>");
             return 2;
         }
         catch (Exception e)
@@ -175,6 +230,8 @@ public static class Program
                         : GateResponse.Failure("", "", "Invalid Hook input or configuration.");
                 if(failureSettings!=null)
                 {
+                    if (failure.ReasonCode == "reviewer_unavailable")
+                        ProtectedPathDelegation.TryRevoke(failureSettings);
                     object failEvent = failureSettings.DetailedLogsActive
                         ? new {at=DateTimeOffset.UtcNow,@event="hook_review_failed",error=e.GetType().Name,decision=failure.Decision,hookResponse=failure.HookOutput,payload=failurePayload}
                         : new {at=DateTimeOffset.UtcNow,@event="hook_review_failed",error=e.GetType().Name,decision=failure.Decision,conversationId=Json.Text(failurePayload,"conversationId"),stepIdx=failurePayload?["stepIdx"]?.DeepClone(),tool=Json.Text(failurePayload?["toolCall"],"name")};
@@ -227,6 +284,7 @@ public static class Program
             if(Json.Text(running,"version")!=typeof(Program).Assembly.GetName().Version!.ToString(3)||Json.Text(running,"adapterInstructionHash")!=ReviewAdapter.Hash||
                 Json.Text(running,"reviewerBackend")!="NativeGuardian"||Json.Text(running,"nativeBridgePolicyHash")!=Json.Hash(GuardianFacts.BridgePolicy))
                 throw new InvalidDataException("Running approval service differs from the installed package; fully exit Antigravity and restart");
+            ProtectedPathDelegation.TrySync(settings, hostActive: true, config);
             return;
         }
         catch (Exception e) when (e is IOException or TimeoutException or OperationCanceledException) { }
@@ -243,7 +301,7 @@ public static class Program
         throw new InvalidOperationException("Approval host did not become ready");
     }
 
-    internal static async Task HostAsync(Settings settings)
+    internal static async Task HostAsync(Settings settings, string? configPath = null)
     {
         Directory.CreateDirectory(settings.DataDirectory);
         FileStream hostLock;
@@ -252,26 +310,34 @@ public static class Program
         using (hostLock)
         {
             Directory.CreateDirectory(settings.DataDirectory);
-            var policy = new Policy(settings.PolicyDirectory);
-            await using var reviewer = new NativeGuardianReviewer(settings, policy);
-            var gate = new ReviewGate(settings, policy, reviewer);
-            using var stop = new CancellationTokenSource();
-            var handlers = new List<Task>();
-            await Audit.AppendAsync(settings, new { at = DateTimeOffset.UtcNow, @event = "host_start", capabilities=Capabilities(settings,policy.NativeHash), policyHash = policy.NativeHash }, stop.Token);
-            while (!stop.IsCancellationRequested)
+            ProtectedPathDelegation.TrySync(settings, hostActive: true, configPath);
+            try
             {
-                var pipe = new NamedPipeServerStream(settings.PipeName, PipeDirection.InOut, 16, PipeTransmissionMode.Byte,
-                    PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
-                try { await pipe.WaitForConnectionAsync(stop.Token); }
-                catch (OperationCanceledException) { pipe.Dispose(); break; }
-                handlers.RemoveAll(t => t.IsCompleted);
-                handlers.Add(HandleAsync(pipe, settings, gate, stop,policy.NativeHash));
+                var policy = new Policy(settings.PolicyDirectory);
+                await using var reviewer = new NativeGuardianReviewer(settings, policy);
+                var gate = new ReviewGate(settings, policy, reviewer);
+                using var stop = new CancellationTokenSource();
+                var handlers = new List<Task>();
+                await Audit.AppendAsync(settings, new { at = DateTimeOffset.UtcNow, @event = "host_start", capabilities=Capabilities(settings,policy.NativeHash), policyHash = policy.NativeHash }, stop.Token);
+                while (!stop.IsCancellationRequested)
+                {
+                    var pipe = new NamedPipeServerStream(settings.PipeName, PipeDirection.InOut, 16, PipeTransmissionMode.Byte,
+                        PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+                    try { await pipe.WaitForConnectionAsync(stop.Token); }
+                    catch (OperationCanceledException) { pipe.Dispose(); break; }
+                    handlers.RemoveAll(t => t.IsCompleted);
+                    handlers.Add(HandleAsync(pipe, settings, gate, stop,policy.NativeHash, configPath));
+                }
+                await Task.WhenAll(handlers);
             }
-            await Task.WhenAll(handlers);
+            finally
+            {
+                ProtectedPathDelegation.TryRevoke(settings);
+            }
         }
     }
 
-    private static async Task HandleAsync(NamedPipeServerStream pipe, Settings settings, ReviewGate gate, CancellationTokenSource stop,string policyHash)
+    private static async Task HandleAsync(NamedPipeServerStream pipe, Settings settings, ReviewGate gate, CancellationTokenSource stop,string policyHash, string? configPath = null)
     {
         await using (pipe)
         {
@@ -291,6 +357,7 @@ public static class Program
                     "status" => Capabilities(settings,policyHash),
                     "stop" => new { status = "stopping" },
                     "set_logging" => SetLoggingLive(settings, message),
+                    "set_protected_delegation" => SetProtectedDelegationLive(settings, message, configPath),
                     "stats" => UsageStats.Compute(settings.DataDirectory, ResolvePricingPathFromMessage(Json.Text(message, "pricingPath"))),
                     "review" => await gate.ReviewAsync(message?["payload"] ?? throw new InvalidDataException("Missing payload"), deadline.Token),
                     _ => throw new InvalidDataException("Unknown IPC operation")
@@ -322,6 +389,15 @@ public static class Program
             throw new InvalidDataException("Missing enabled flag");
         settings.EnableDetailedLogs = enabled;
         return new { ok = true, detailedLogs = settings.DetailedLogsActive };
+    }
+    private static object SetProtectedDelegationLive(Settings settings, JsonNode? message, string? configPath)
+    {
+        if (message?["enabled"] is not JsonValue val || !val.TryGetValue<bool>(out var enabled))
+            throw new InvalidDataException("Missing enabled flag");
+        settings.DelegateProtectedPaths = enabled;
+        ProtectedPathDelegation.TrySync(settings, hostActive: true, configPath);
+        return new { ok = true, delegateProtectedPaths = settings.DelegateProtectedPaths,
+            activeProtectedGrants = ProtectedPathDelegation.ReadOwnedGrants(settings.DataDirectory).OrderBy(x => x, StringComparer.Ordinal).ToArray() };
     }
     private static string ResolveDataDir(string[] args, string config)
     {
@@ -363,7 +439,10 @@ public static class Program
         policyHash,
         guardVersion=DenialGuard.Version,guardScope="bound_request",guardStateDirectory=Path.Combine(settings.DataDirectory,"denial-guard"),guardState=DenialGuard.Diagnostics(settings),
         nativeTurnIdAvailable=false,nativeInterruptionAvailable=false,runtimeEffectiveScopeComplete=false,model=settings.Model,effort=settings.Effort,
-        reviewerBackend="NativeGuardian",nativeState=settings.EnableNativeState,escalateAuthorizedDenials=settings.EscalateAuthorizedDenials,guardianProtocol=GuardianFacts.Protocol,
+        reviewerBackend="NativeGuardian",nativeState=settings.EnableNativeState,escalateAuthorizedDenials=settings.EscalateAuthorizedDenials,
+        delegateProtectedPaths=settings.DelegateProtectedPaths,
+        activeProtectedGrants=ProtectedPathDelegation.ReadOwnedGrants(settings.DataDirectory).OrderBy(x=>x,StringComparer.Ordinal).ToArray(),
+        guardianProtocol=GuardianFacts.Protocol,
         nativeBridgePolicyHash=Json.Hash(GuardianFacts.BridgePolicy),
         inferenceDispatchCap=(int?)null,maxAttempts=GuardianFacts.MaxReviewAttempts,
         detailedLogs=settings.DetailedLogsActive,maxLogSegmentBytes=settings.MaxLogSegmentBytes,

@@ -283,7 +283,7 @@ public static class ScopedRead
         ".csv",".yaml",".yml",".toml",".xml",".sql",".graphql",".gql",".proto",".svg",".patch",".diff"
     };
     private static readonly HashSet<string> SafeDotSegments=new(StringComparer.OrdinalIgnoreCase){
-        ".agent",".agents",".github",".vscode",".devcontainer",
+        ".agent",".agents",".github",".devcontainer",
         ".gitignore",".gitattributes",".editorconfig",".prettierrc",".eslintrc",".prettierignore",".eslintignore"
     };
     public static bool IsSafe(string target,string cwd,string[] roots,bool allowGlob,bool listing)

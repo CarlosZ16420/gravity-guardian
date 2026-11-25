@@ -259,6 +259,11 @@ int wmain(int argc, wchar_t** argv) {
     check(std::wstring(name).empty(), "logging disabled has no compact-mode badge");
     GetWindowTextW(g_app.lblVersionInfo, name, static_cast<int>(std::size(name)));
     check(std::wstring(name) == L"v" PANEL_VERSION_WIDE, "settings footer contains only the version number");
+    const auto openLogsRect = rect(g_app.btnOpenLogs);
+    const auto protectedDelegationRect = rect(g_app.chkProtectedDelegation);
+    const auto autostartRect = rect(g_app.chkAutostart);
+    check(openLogsRect.bottom < protectedDelegationRect.top && protectedDelegationRect.bottom < autostartRect.top,
+          "protected-path delegation checkbox sits cleanly between log actions and autostart");
 
     g_app.state.updateAvailable = false;
     g_app.state.availableUpdate = {};

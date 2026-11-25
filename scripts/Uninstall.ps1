@@ -76,7 +76,7 @@ if (Test-Path -LiteralPath $taskApproval) {
 if ($PurgeData) {
     # DataDirectory can be custom. Require a known app directory layout before deleting its contents.
     $ownedDirectories = @('backups', 'denial-guard', 'guardian-workspace', 'logs', 'panel', 'project-authorizations', 'reviewer-sessions', 'runtime', 'service', 'updates')
-    $ownedFiles = @('approval-takeover-paused', 'installation.json', 'panel-settings.json', 'panel-settings.json.tmp', 'stats-cache.json', 'uninstalled')
+    $ownedFiles = @('approval-takeover-paused', 'delegated-grants.json', 'delegated-grants.lock', 'installation.json', 'panel-settings.json', 'panel-settings.json.tmp', 'stats-cache.json', 'uninstalled')
     $taskDataEntries = @(Get-ChildItem -LiteralPath $taskData -Force)
     foreach ($item in $taskDataEntries) {
         $owned = if ($item.PSIsContainer) {
@@ -169,6 +169,8 @@ Get-Process -Name dotnet,ag-guardian-host -ErrorAction SilentlyContinue | Where-
 } | ForEach-Object {
     if (!$_.WaitForExit(12000)) { throw "The approval process is still running. Close it and retry: $($_.Path)" }
 }
+
+Clear-DelegatedProtectedGrants -ConfigRoot $taskConfigRoot -DataDirectory $taskData
 
 if (Test-Path -LiteralPath $taskConfig -PathType Leaf) {
     $taskConfigHash = (Get-FileHash -LiteralPath $taskConfig -Algorithm SHA256).Hash

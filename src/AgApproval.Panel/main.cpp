@@ -35,7 +35,7 @@ constexpr int kHeaderHeight = 36;
 constexpr int kCompactHeight = 600;
 constexpr int kContentInset = 10;
 constexpr int kBannerSpace = 44;
-constexpr int kPreferencesSpace = 166;
+constexpr int kPreferencesSpace = 192;
 // Keep DWM's shadow, without a native caption or caption buttons for Windows to
 // repaint during the system move loop. All window actions use our own controls.
 constexpr DWORD kPanelStyle = WS_POPUP | WS_THICKFRAME | WS_CLIPCHILDREN;
@@ -105,6 +105,7 @@ struct RuntimeState {
     std::optional<bool> takeoverEnabled;
     unsigned takeoverRevision = 0;
     bool detailedLogs = false;
+    bool delegateProtectedPaths = true;
 
     bool agFound = false;
     std::wstring agVersion;
@@ -127,6 +128,7 @@ enum class WorkKind {
     DetectEnv,
     ToggleApprovalTakeover,
     ToggleDetailedLogs,
+    ToggleProtectedDelegation,
     CompactLogs,
     CheckAndMaybeUpdate,
     DownloadUpdate,
@@ -158,6 +160,7 @@ struct WorkResult {
     bool triggerImmediateApply = false;
     bool requestExit = false;
     bool targetDetailedLogs = false;
+    bool targetProtectedDelegation = true;
 };
 
 struct App {
@@ -256,6 +259,7 @@ struct App {
     HWND lblLogSize = nullptr;
     HWND btnOpenLogs = nullptr;
     HWND btnCompactLogs = nullptr;
+    HWND chkProtectedDelegation = nullptr;
     HWND chkAutostart = nullptr;
     HWND chkAutoUpdate = nullptr;
     HWND lblVersionInfo = nullptr;
@@ -860,6 +864,7 @@ void QueryCoreSnapshot(const PanelConfig& cfg, RuntimeState& snap, bool runDetec
             JsonValue app;
             if (JsonValue::Parse(appRaw, app)) {
                 snap.detailedLogs = app.GetBool("enableDetailedLogs", false);
+                snap.delegateProtectedPaths = app.GetBool("delegateProtectedPaths", true);
             }
         }
     }
@@ -885,6 +890,7 @@ void QueryCoreSnapshot(const PanelConfig& cfg, RuntimeState& snap, bool runDetec
             snap.serviceRunning = stJson.GetString("status") == "running";
             if (auto v = stJson.GetWide("version"); !v.empty()) snap.serviceVersion = v;
             snap.detailedLogs = stJson.GetBool("detailedLogs", snap.detailedLogs);
+            snap.delegateProtectedPaths = stJson.GetBool("delegateProtectedPaths", snap.delegateProtectedPaths);
             snap.serviceBackend = stJson.GetWide("reviewerBackend", L"NativeGuardian");
             snap.serviceDetail = snap.serviceRunning ? L"审批服务运行中" : L"审批服务未运行";
         } else {
@@ -1007,6 +1013,9 @@ void SyncControlsToUi() {
     EnableWindow(g_app.chkDetailedLogs, s.pluginInstalled);
     InvalidateRect(g_app.chkDetailedLogs, nullptr, FALSE);
     SetWindowTextW(g_app.lblLogBadge, s.detailedLogs ? L"高写入已开启" : L"");
+
+    EnableWindow(g_app.chkProtectedDelegation, s.pluginInstalled);
+    InvalidateRect(g_app.chkProtectedDelegation, nullptr, FALSE);
 
     InvalidateRect(g_app.chkAutostart, nullptr, FALSE);
     InvalidateRect(g_app.chkAutoUpdate, nullptr, FALSE);
@@ -1264,6 +1273,32 @@ void StartDetailedLogsWorker(bool enable) {
         res->ok = cr.started && !cr.timedOut && cr.exitCode == 0;
         if (!res->ok) {
             res->message = L"切换详细日志失败: " + Utf8ToWide(cr.stderrUtf8);
+        }
+        g_app.busyAction = false;
+        PostWorkResult(std::move(res));
+    }).detach();
+}
+
+void StartProtectedDelegationWorker(bool enable) {
+    if (g_app.busyAction.exchange(true)) return;
+    PanelConfig cfgCopy;
+    {
+        std::lock_guard<std::mutex> lk(g_app.cfgMutex);
+        cfgCopy = g_app.cfg;
+    }
+    std::thread([cfgCopy, enable]() {
+        std::wstring dotnet = GetDotnetExe(cfgCopy);
+        std::wstring dll = GetAssemblyDll(cfgCopy);
+        std::wstring appCfg = JoinPath(cfgCopy.pluginDirectory, L"approval.json");
+        std::wstring args = L"\"" + dll + L"\" set-protected-delegation --config \"" + appCfg + L"\" --enabled " + (enable ? L"true" : L"false");
+        CommandResult cr = RunHiddenCommand(dotnet, args, cfgCopy.pluginDirectory, 8000);
+
+        auto res = std::make_unique<WorkResult>();
+        res->kind = WorkKind::ToggleProtectedDelegation;
+        res->targetProtectedDelegation = enable;
+        res->ok = cr.started && !cr.timedOut && cr.exitCode == 0;
+        if (!res->ok) {
+            res->message = L"切换受保护目录审核失败: " + Utf8ToWide(cr.stderrUtf8);
         }
         g_app.busyAction = false;
         PostWorkResult(std::move(res));
@@ -1687,6 +1722,7 @@ void CreateChildControls(HWND hwnd) {
     g_app.lblLogSize = label(L"");
     g_app.btnOpenLogs = button(L"打开日志", ID_BTN_OPEN_LOGS);
     g_app.btnCompactLogs = button(L"压缩清理", ID_BTN_COMPACT_LOGS);
+    g_app.chkProtectedDelegation = button(L"受保护目录交由插件审核", ID_CHK_PROTECTED_DELEGATION);
     g_app.chkAutostart = button(L"开机自启 · 收回托盘", ID_CHK_AUTOSTART);
     g_app.chkAutoUpdate = button(L"启动时自动更新", ID_CHK_AUTO_UPDATE);
     g_app.lblVersionInfo = label(L"");
@@ -1701,7 +1737,7 @@ void CreateChildControls(HWND hwnd) {
     for (HWND control : {g_app.btnHeaderUpdate, g_app.btnGitHub, g_app.btnRefresh, g_app.btnHide,
                          g_app.btnStatsDate, g_app.btnApprovalTakeover, g_app.lblStatus, g_app.lblAgPath,
                          g_app.lblStatsSub, g_app.lblStatsTokenDetail, g_app.lblStatsCacheTitle,
-                         g_app.lblStatsCacheRate, g_app.btnCheckUpdate}) {
+                         g_app.lblStatsCacheRate, g_app.chkProtectedDelegation, g_app.btnCheckUpdate}) {
         wchar_t text[96]{};
         GetWindowTextW(control, text, static_cast<int>(std::size(text)));
         TOOLINFOW tool{sizeof(tool)};
@@ -1713,6 +1749,8 @@ void CreateChildControls(HWND hwnd) {
     }
     SetControlTooltip(g_app.lblStatsCacheTitle, L"缓存命中率 = 缓存 Token ÷ 输入 Token");
     SetControlTooltip(g_app.lblStatsCacheRate, L"缓存命中率 = 缓存 Token ÷ 输入 Token");
+    SetControlTooltip(g_app.chkProtectedDelegation,
+        L"开启后，工作区 .cache 读写与 .git / .vscode 只读会跳过原生无来源弹窗并由 Codex Guardian 逐次审核；暂停接管、停止服务或卸载时自动撤销（不包含 .git 写入和 .env / .ssh）。");
 }
 
 struct PanelLayout {
@@ -1786,10 +1824,11 @@ void PositionControls(const PanelLayout& layout) {
     place(a.lblLogSize, a.fontSmall, 10, prefs + 77, 120, 15, expanded);
     place(a.btnOpenLogs, a.fontSmall, 136, prefs + 73, 60, 24, expanded);
     place(a.btnCompactLogs, a.fontSmall, 202, prefs + 73, 60, 24, expanded);
-    place(a.chkAutostart, a.fontRegular, 10, prefs + 109, 252, 20, expanded);
-    place(a.chkAutoUpdate, a.fontRegular, 10, prefs + 135, 252, 20, expanded);
-    place(a.lblVersionInfo, a.fontSmallLatin, 10, prefs + 178, 180, 15, expanded);
-    place(a.btnCheckUpdate, a.fontSmall, 202, prefs + 173, 60, 24, expanded);
+    place(a.chkProtectedDelegation, a.fontRegular, 10, prefs + 109, 252, 20, expanded);
+    place(a.chkAutostart, a.fontRegular, 10, prefs + 135, 252, 20, expanded);
+    place(a.chkAutoUpdate, a.fontRegular, 10, prefs + 161, 252, 20, expanded);
+    place(a.lblVersionInfo, a.fontSmallLatin, 10, prefs + 204, 180, 15, expanded);
+    place(a.btnCheckUpdate, a.fontSmall, 202, prefs + 199, 60, 24, expanded);
 
     RECT client{};
     GetClientRect(a.hwnd, &client);
@@ -1955,7 +1994,7 @@ void DrawOwnerButton(const DRAWITEMSTRUCT& item) {
     const bool pressed = (item.itemState & ODS_SELECTED) != 0;
     const bool hovered = !disabled && g_app.hoveredControl == item.hwndItem;
     const bool takeover = item.CtlID == ID_BTN_APPROVAL_TAKEOVER;
-    const bool checkbox = item.CtlID == ID_CHK_DETAILED_LOGS || item.CtlID == ID_CHK_AUTOSTART || item.CtlID == ID_CHK_AUTO_UPDATE;
+    const bool checkbox = item.CtlID == ID_CHK_DETAILED_LOGS || item.CtlID == ID_CHK_PROTECTED_DELEGATION || item.CtlID == ID_CHK_AUTOSTART || item.CtlID == ID_CHK_AUTO_UPDATE;
     const bool primary = item.CtlID == ID_BTN_LAUNCH_AG || item.CtlID == ID_UPDATE_PRIMARY;
     const bool disclosure = item.CtlID == ID_BTN_PREFERENCES;
     const bool danger = item.CtlID == ID_BTN_UNINSTALL;
@@ -2008,6 +2047,7 @@ void DrawOwnerButton(const DRAWITEMSTRUCT& item) {
     } else if (checkbox) {
         bool checked = false;
         if (item.CtlID == ID_CHK_DETAILED_LOGS) checked = g_app.state.detailedLogs;
+        else if (item.CtlID == ID_CHK_PROTECTED_DELEGATION) checked = g_app.state.delegateProtectedPaths;
         else {
             std::lock_guard<std::mutex> lk(g_app.cfgMutex);
             checked = item.CtlID == ID_CHK_AUTOSTART ? g_app.cfg.autostart : g_app.cfg.autoUpdate;
@@ -2116,7 +2156,7 @@ void PaintPanelSurface(HWND hwnd, HDC hdc) {
     }
     if (g_app.preferencesOpen) {
         separate(layout.prefs + 102);
-        separate(layout.prefs + 164);
+        separate(layout.prefs + 190);
     }
     SelectObject(hdc, oldPen);
     DeleteObject(divider);
@@ -2651,6 +2691,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 SyncControlsToUi();
                 MessageBoxW(hwnd, res->message.c_str(), L"详细日志设置失败", MB_OK | MB_ICONERROR);
             }
+        } else if (res->kind == WorkKind::ToggleProtectedDelegation) {
+            if (res->ok) {
+                g_app.state.delegateProtectedPaths = res->targetProtectedDelegation;
+                SyncControlsToUi();
+            } else {
+                SyncControlsToUi();
+                MessageBoxW(hwnd, res->message.c_str(), L"受保护目录设置失败", MB_OK | MB_ICONERROR);
+            }
         } else if (res->kind == WorkKind::LaunchAntigravity) {
             if (res->ok) StartRefreshWorker(false, false, true);
             else MessageBoxW(hwnd, L"无法启动 Antigravity.exe，请检查文件路径和权限。", L"启动失败", MB_OK | MB_ICONERROR);
@@ -2793,6 +2841,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case ID_BTN_COMPACT_LOGS:
             StartCompactLogsWorker();
             break;
+        case ID_CHK_PROTECTED_DELEGATION: {
+            bool wantEnable = !g_app.state.delegateProtectedPaths;
+            StartProtectedDelegationWorker(wantEnable);
+            break;
+        }
         case ID_CHK_AUTOSTART: {
             std::lock_guard<std::mutex> lk(g_app.cfgMutex);
             bool next = !g_app.cfg.autostart;

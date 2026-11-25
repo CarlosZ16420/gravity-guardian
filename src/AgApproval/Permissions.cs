@@ -11,7 +11,8 @@ public static class PermissionSnapshot
         var raw = ReadConfig(config);
         var user = raw["userSettings"] as JsonObject ?? throw new InvalidDataException("Unrecognized Antigravity settings schema");
         var global = SelectSettings(user);
-        global["permissionGrants"] = Grants(user["globalPermissionGrants"]);
+        var ownedDelegated = ProtectedPathDelegation.ReadOwnedGrants(settings.DataDirectory);
+        global["permissionGrants"] = Grants(user["globalPermissionGrants"], ownedDelegated);
         var sources = new JsonArray(new JsonObject { ["kind"] = "global_config", ["path"] = config, ["sha256"] = Json.Hash(raw.ToJsonString()) });
         var matches = new JsonArray();
         var projects = Path.Combine(settings.AntigravityConfigDirectory, "projects");
@@ -68,7 +69,7 @@ public static class PermissionSnapshot
         foreach(var key in SettingKeys) if(source[key] != null) result[key]=source[key]!.DeepClone();
         return result;
     }
-    private static JsonObject Grants(JsonNode? source)
+    private static JsonObject Grants(JsonNode? source, HashSet<string>? excludeAllow = null)
     {
         var result = new JsonObject();
         foreach(var key in new[]{"allow","ask","deny"})
@@ -76,7 +77,10 @@ public static class PermissionSnapshot
             if(source?[key] is JsonArray array)
             {
                 if(array.Any(v=>v is not JsonValue || !v.AsValue().TryGetValue<string>(out _))) throw new InvalidDataException("Unrecognized permission rule schema");
-                result[key]=new JsonArray(array.Select(v=>v!.GetValue<string>()).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).Select(v=>(JsonNode?)JsonValue.Create(v)).ToArray());
+                var values = array.Select(v=>v!.GetValue<string>());
+                if(key == "allow" && excludeAllow is { Count: > 0 })
+                    values = values.Where(s => !excludeAllow.Contains(s));
+                result[key]=new JsonArray(values.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).Select(v=>(JsonNode?)JsonValue.Create(v)).ToArray());
             }
             else if(source?[key]!=null)throw new InvalidDataException("Unrecognized permission rule schema");
             else result[key]=new JsonArray();

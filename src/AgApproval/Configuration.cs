@@ -28,6 +28,8 @@ public sealed class Settings
     public bool EnableNativeState { get; set; }
     public bool EnableNativeAskHandoff { get; set; }
     public bool EscalateAuthorizedDenials { get; set; } = true;
+    private volatile bool delegateProtectedPaths = true;
+    public bool DelegateProtectedPaths { get => delegateProtectedPaths; set => delegateProtectedPaths = value; }
     public string NativeStateLogPath { get; set; } = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),"Antigravity","logs","main.log");
     public int NativeStateTimeoutMilliseconds { get; set; } = 4000;
     public int MaxNativeHistoryBytes { get; set; } = 8388608;
@@ -147,5 +149,7 @@ public sealed record GateResponse(string Decision, string Reason, string Status,
         new("deny", "Automatic approval review could not be completed. The action was not executed. This is a review failure, not a determination that the action is unsafe. Do not bypass the approval check. Repair the evidence or review pipeline; do not ask for the same authorization repeatedly. " + reason, "review_failed", id, hash){ReasonCode=code};
     public static GateResponse OversizedForAgentRetry(string id, string hash, string detail) =>
         new("deny", "Automatic approval request exceeds the single-call context budget (" + detail + "). This is a payload size limit, not a policy denial or human approval prompt. Do not stop the task or ask the human for approval on this size limit: split this tool call into smaller incremental requests (for example, smaller targeted edit_file blocks, write_file with an initial section followed by Append=true chunks, or shorter commands) and resend.", "review_failed", id, hash){ReasonCode="request_too_large_retry_smaller"};
+    public static GateResponse HostProtectedRedirect(string id, string hash, string detail) =>
+        new("deny", detail, "redirected", id, hash){ReasonCode="host_protected_redirect"};
     public static GateResponse Repeated(string id,string hash,string reason)=>new("deny",reason,"blocked",id,hash){ReasonCode="duplicate_policy_denial"};
 }

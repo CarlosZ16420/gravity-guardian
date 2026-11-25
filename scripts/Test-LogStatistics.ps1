@@ -29,11 +29,12 @@ $taskNewRecords=@(
     @{event='review_completed';requestId='timeout';status='review_failed';decision='force_ask';reasonCode='review_timeout'},
     @{event='review_completed';requestId='escalated';status='escalated';decision='force_ask';reasonCode='policy_denied_user_authorized';assessmentText='{"outcome":"deny","risk_level":"critical","user_authorization":"high","rationale":"token egress"}'},
     @{event='review_completed';requestId='invalidated';status='approved';decision='auto_approve';reasonCode='policy_allowed'},
+    @{event='review_completed';requestId='redirected';status='redirected';decision='deny';reasonCode='host_protected_redirect'},
     @{event='review_invalidated';requestId='invalidated';decision='deny';reasonCode='evidence_changed'}
 )
 $taskNewRecords|ForEach-Object{$_|ConvertTo-Json -Depth 10 -Compress}|Add-Content -LiteralPath (Join-Path $taskData 'logs/fixture.jsonl') -Encoding utf8
 $taskNewReport=& (Join-Path $PSScriptRoot 'Analyze-Logs.ps1') -DataDirectory $taskData|ConvertFrom-Json
-if($taskNewReport.modelActivity.invocationsWithEvidence -ne 4 -or $taskNewReport.authorizedDenialEscalations -ne 1 -or $taskNewReport.humanHandoffs -ne 4 -or $taskNewReport.timeoutHandoffs -ne 1 -or $taskNewReport.repeatedDenialsBlocked -ne 1 -or $taskNewReport.otherTechnicalFailures -ne 5){throw 'v2 technical failures, escalations, block or process startup were miscounted'}
+if($taskNewReport.modelActivity.invocationsWithEvidence -ne 4 -or $taskNewReport.authorizedDenialEscalations -ne 1 -or $taskNewReport.hostProtectedRedirects -ne 1 -or $taskNewReport.humanHandoffs -ne 4 -or $taskNewReport.timeoutHandoffs -ne 1 -or $taskNewReport.repeatedDenialsBlocked -ne 1 -or $taskNewReport.otherTechnicalFailures -ne 5){throw 'v2 technical failures, escalations, redirects, block or process startup were miscounted'}
 if($taskNewReport.approved -ne 2){throw 'Invalidated approval counted as applied'}
 Write-Host 'PASS v2 reasons, incomplete process evidence and post-audit invalidation'
 $taskRetryRecords=@(

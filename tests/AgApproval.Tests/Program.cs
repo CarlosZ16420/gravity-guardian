@@ -8,7 +8,17 @@ if (args.Length == 2 && args[0] == "--serve-guardian-outage")
     var fixture = Settings.Load(args[1]);
     fixture.GuardianPath = Environment.ProcessPath!;
     fixture.GuardianPrefixArguments = [typeof(TestMarker).Assembly.Location, "--fake-guardian-host", "--failure-code", "upstream_unavailable"];
-    await AgApproval.Program.HostAsync(fixture);
+    await AgApproval.Program.HostAsync(fixture, args[1]);
+    return 0;
+}
+if (args.Length is 2 or 3 && args[0] == "--serve-guardian-fixture")
+{
+    var fixture = Settings.Load(args[1]);
+    fixture.GuardianPath = Environment.ProcessPath!;
+    fixture.GuardianPrefixArguments = args.Length == 3 && args[2] == "--deny"
+        ? [typeof(TestMarker).Assembly.Location, "--fake-guardian-host", "--deny"]
+        : [typeof(TestMarker).Assembly.Location, "--fake-guardian-host"];
+    await AgApproval.Program.HostAsync(fixture, args[1]);
     return 0;
 }
 

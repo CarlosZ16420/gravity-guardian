@@ -1,6 +1,6 @@
 # Gravity Steward v0.6.6
 
-本版本移除「项目长期授权」，并将"Guardian 判 `deny` 但判定用户明确授权（`user_authorization = high`）"的请求转为 Antigravity 原生人工确认（`force_ask`）。
+本版本移除「项目长期授权」，将"Guardian 判 `deny` 但判定用户明确授权（`user_authorization = high`）"的请求转为 Antigravity 原生人工确认（`force_ask`），并新增生命周期绑定的「受保护目录全局审核委派」。
 
 ## 改动摘要
 
@@ -13,3 +13,7 @@
   - 同一绑定请求重复到达时保留相同的 `force_ask` 结果；若证据或用户指令在提交前变化则仍按 `action_invalidated` 拒绝。
   - 其余 `medium` / `low` / `unknown` 授权级别的拒绝仍直接返回 `deny`。
   - 如需恢复 0.6.5 的直接拒绝行为，可在 `approval.json` 中将 `escalateAuthorizedDenials` 设为 `false` 并重启审批服务。
+- **受保护目录全局审核委派（`delegateProtectedPaths`，默认 `true`）**：
+  - 在审批服务运行中且接管开启期间，自动挂载受管裸段规则（`read_file(.git)`、`read_file(.cache)`、`write_file(.cache)`、`read_file(.vscode)`），消除 Antigravity 对工作区 `.cache` 读写及 `.git`/`.vscode` 只读的无来源硬编码弹窗，交由 Native Guardian 逐次审核；永久排除 `.git`/`.vscode` 写入及 `.env*`、`.npmrc`、`.ssh`，且绝不改动用户自建授权规则。
+  - 暂停接管、停止/崩溃、关闭面板「偏好设置 → 受保护目录交由插件审核」开关或卸载时立即回收托管授权；关闭委派时仅对未点名的 `.git` 只读访问提示改用 `git -C` 只读命令（`host_protected_redirect`），不对 `.cache` 半途改道。
+  - 移除旧提示词绕行规则 `plugin/rules/antigravity-scratch.md`。

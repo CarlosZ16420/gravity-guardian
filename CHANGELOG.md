@@ -9,6 +9,11 @@
 - **已授权拒绝转原生人工确认（`escalateAuthorizedDenials`，默认 `true`）**：
   - Guardian 判定 `outcome = deny` 且 `user_authorization = high` 时，改为返回 `force_ask`（`status = escalated`、`reasonCode = policy_denied_user_authorized`），弹出 Antigravity 原生确认并附带风险等级与拒绝理由（不附带禁止绕过的 Agent 提示，不复用 Always Allow，对应 Codex `thread/approveGuardianDeniedAction`）。
   - `DenialGuard` 记录 `escalated` 状态并兼容重复请求与开关回滚；审核提交前若用户撤销或证据变更仍按 `action_invalidated` 拒绝；`UsageStats` 与 `Analyze-Logs.ps1` 将其计入 `Denied` 与 `authorizedDenialEscalations` 而非技术失败。
+- **受保护目录全局审核委派（`delegateProtectedPaths`，默认 `true`）**：
+  - 新增清单 `plugin/host-protected-paths.json` 与 `ProtectedPathDelegation.cs`（配合 `delegated-grants.json` 归属账本与跨进程锁 `delegated-grants.lock`），在审批服务运行中、接管开启且宿主版本满足要求（`>= 2.29.0`）时，向全局 `globalPermissionGrants.allow` 挂载受管裸段规则（`read_file(.git)`、`read_file(.cache)`、`write_file(.cache)`、`read_file(.vscode)`），消除 Antigravity 对 `.cache` 读写与 `.git`/`.vscode` 只读的无来源硬编码弹窗，由 Native Guardian 逐次真审。
+  - 永久排除 `.git` 写入、`.vscode` 写入、`.env*`、`.npmrc` 与 `.ssh`；保留用户既有授权规则，`PermissionSnapshot.Read` 送审前自动过滤插件托管的绕行条目以免 Guardian 误判为用户授权；将 `.vscode` 移出 `ScopedRead.SafeDotSegments`，确保 `.vscode` 读取同样经过 Guardian 审核。
+  - 严格绑定插件生命周期：暂停接管（`takeover --enabled false`）、服务停止/失联故障（`review` fail-closed 兜底）、关闭开关（`set-protected-delegation`）或卸载（`Review-Mode.ps1` `Clear-DelegatedProtectedGrants` / `Uninstall.ps1`）均立即回收托管授权。委派关闭时，仅对用户未点名的 `.git` 元数据读取退回为 `host_protected_redirect`（提示改跑只读 `git -C` 命令，绝不对 `.cache` 半途改道），由 `UsageStats.Redirected` 与 `Analyze-Logs.ps1` `hostProtectedRedirects` 单独统计。
+  - Win32 面板「偏好设置」新增全局复选框「受保护目录交由插件审核」（`ID_CHK_PROTECTED_DELEGATION`），`Doctor.ps1` 增加委派与活跃授权计数巡检，并移除旧提示词规则 `plugin/rules/antigravity-scratch.md`。
 
 ## 0.6.5 · 2026-11-25
 

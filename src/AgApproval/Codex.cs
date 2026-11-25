@@ -18,7 +18,7 @@ public sealed class ReviewGate(Settings settings, Policy policy, IReviewer revie
     {
         string id = Guid.NewGuid().ToString("N"), actionHash = "";
         var watch = Stopwatch.StartNew();
-        GateResponse result;
+        GateResponse result = null!;
         bool acquired = false, queued=false;
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
         deadline.CancelAfter(TimeSpan.FromSeconds(settings.ReviewTimeoutSeconds));
@@ -45,7 +45,15 @@ public sealed class ReviewGate(Settings settings, Policy policy, IReviewer revie
                 contextReadyMs = watch.ElapsedMilliseconds;
                 id = input.Id; actionHash = input.Hash;
                 phase = "routing";
-                route = await ReviewRouting.EvaluateAsync(input,settings,deadline.Token);
+                var redirect = ProtectedPathDelegation.EvaluateFallbackRedirect(input, settings);
+                if (redirect != null)
+                {
+                    result = redirect;
+                }
+                else
+                {
+                    route = await ReviewRouting.EvaluateAsync(input,settings,deadline.Token);
+                }
             }
             catch(InvalidDataException e)when(IsRecoverableTranscriptAnomaly(e.Message))
             {
@@ -55,10 +63,10 @@ public sealed class ReviewGate(Settings settings, Policy policy, IReviewer revie
                 actionHash = fallback.Value.ActionHash;
                 route = fallback.Value.Route;
             }
-            if(settings.DetailedLogsActive || route.Route != "native")
+            if(route != null && (settings.DetailedLogsActive || route.Route != "native"))
                 await Audit.TryAppendAsync(settings,new {at=DateTimeOffset.UtcNow,@event="review_route",requestId=id,
                     conversationId=input?.Conversation??Json.Text(payload,"conversationId"),tool=input?.Tool??Json.Text(payload["toolCall"],"name"),route=route.Route,ruleId=route.RuleId,ruleVersion=ReviewRoute.Version,reason=route.Reason},deadline.Token);
-            if(route.Route!="native")
+            if(route != null && route.Route!="native")
             {
                 phase="queue";
                 queued=true;
@@ -86,8 +94,9 @@ public sealed class ReviewGate(Settings settings, Policy policy, IReviewer revie
             else queueMs=0;
             phase="audit";
             if(input!=null && settings.DetailedLogsActive)
-                await Audit.TryAppendAsync(settings,new { at=DateTimeOffset.UtcNow, @event="review_context",requestId=id,actionHash,model=route.Route=="model"?settings.Model:null,effort=route.Route=="model"?settings.Effort:null,policyHash=policy.NativeHash,adapterInstructionHash=ReviewAdapter.Hash,reviewInput=JsonNode.Parse(input.Prompt),sourceUserRecords=input.SourceUserRecords },deadline.Token);
-            if(route.Route=="native") result=GateResponse.Delegate(id,actionHash,route);
+                await Audit.TryAppendAsync(settings,new { at=DateTimeOffset.UtcNow, @event="review_context",requestId=id,actionHash,model=route?.Route=="model"?settings.Model:null,effort=route?.Route=="model"?settings.Effort:null,policyHash=policy.NativeHash,adapterInstructionHash=ReviewAdapter.Hash,reviewInput=JsonNode.Parse(input.Prompt),sourceUserRecords=input.SourceUserRecords },deadline.Token);
+            if(route == null) { /* result already assigned by ProtectedPathDelegation fallback redirect */ }
+            else if(route.Route=="native") result=GateResponse.Delegate(id,actionHash,route);
             else
             {
                 var modelInput=input??throw new InvalidDataException("Missing review input");
@@ -170,7 +179,7 @@ public sealed class ReviewGate(Settings settings, Policy policy, IReviewer revie
             materialRevision=input?.MaterialRevision,authorizationSources=input?.AuthorizationSources,nativeSegment=input?.NativeSegment,
             inputVersion=ReviewAdapter.InputVersion,adapterVersion=ReviewAdapter.Version,adapterInstructionHash=ReviewAdapter.Hash,transportVersion=ReviewAdapter.TransportVersion,
             reviewerInvoked=modelInvoked,modelCallEvidence=assessmentText!=null,reviewerMs,reviewMs=reviewerMs,guardState,
-            decisionSource=policyResult!=null?"guardian":result.ReasonCode is "duplicate_policy_denial" or "policy_denied_user_authorized"?"recorded_guardian":route?.Route=="native"?"native_delegation":result.Decision=="ask"?"native_ask":"bridge",
+            decisionSource=policyResult!=null?"guardian":result.ReasonCode is "duplicate_policy_denial" or "policy_denied_user_authorized"?"recorded_guardian":result.ReasonCode=="host_protected_redirect"?"host_redirect":route?.Route=="native"?"native_delegation":result.Decision=="ask"?"native_ask":"bridge",
             verdict=policyResult?.Decision=="auto_approve"?"allow":policyResult?.Decision??(result.ReasonCode is "duplicate_policy_denial" or "policy_denied_user_authorized"?"deny":null),
             hookDecision=result.Decision,rawErrorKind=failure?["rawErrorKind"],httpStatus=failure?["httpStatus"],
             retryable=failure?["retryable"],retryAfterMs=failure?["retryAfterMs"],

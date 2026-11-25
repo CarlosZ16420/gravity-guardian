@@ -1,0 +1,58 @@
+{
+  "schemaVersion": "1.0",
+  "minHostVersion": "2.29.0",
+  "verifiedHostVersions": [
+    "2.29.0",
+    "2.31.2",
+    "2.35.1"
+  ],
+  "entries": [
+    {
+      "id": "workspace-git-read",
+      "segment": ".git",
+      "grant": "read_file(.git)",
+      "delegatedTools": [
+        "read_file"
+      ],
+      "description": "Read-only access to workspace .git metadata; reviewed by Codex Native Guardian."
+    },
+    {
+      "id": "workspace-cache-read",
+      "segment": ".cache",
+      "grant": "read_file(.cache)",
+      "delegatedTools": [
+        "read_file"
+      ],
+      "description": "Read access to workspace .cache files; reviewed by Codex Native Guardian."
+    },
+    {
+      "id": "workspace-cache-write",
+      "segment": ".cache",
+      "grant": "write_file(.cache)",
+      "delegatedTools": [
+        "write_file",
+        "edit_file"
+      ],
+      "description": "Write and edit access to workspace .cache files; reviewed by Codex Native Guardian."
+    },
+    {
+      "id": "workspace-vscode-read",
+      "segment": ".vscode",
+      "grant": "read_file(.vscode)",
+      "delegatedTools": [
+        "read_file"
+      ],
+      "description": "Read-only access to workspace .vscode configuration; reviewed by Codex Native Guardian."
+    }
+  ],
+  "neverDelegated": [
+    "write_file(.git)",
+    "write_file(.vscode)",
+    "read_file(.env*)",
+    "write_file(.env*)",
+    "read_file(.npmrc)",
+    "write_file(.npmrc)",
+    "read_file(.ssh)",
+    "write_file(.ssh)"
+  ]
+}

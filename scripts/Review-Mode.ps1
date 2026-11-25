@@ -148,6 +148,7 @@ function Update-ApprovalReviewerConfig {
     $defaults = [ordered]@{
         enableNativeAskHandoff = $false
         escalateAuthorizedDenials = $true
+        delegateProtectedPaths = $true
         maxNativeHistoryBytes = 8388608
         enableDetailedLogs = $false
         maxLogSegmentBytes = 16777216
@@ -251,4 +252,43 @@ function Set-ApprovalHookRuntime([string]$Bundle, [string]$Runtime) {
         $handler.command = 'cmd.exe /D /V:OFF /S /C ""' + $Runtime + '" ' + $arguments + '"'
     }
     $hooks | ConvertTo-Json -Depth 16 | Set-Utf8NoBom -LiteralPath $path
+}
+
+function Clear-DelegatedProtectedGrants([string]$ConfigRoot, [string]$DataDirectory) {
+    if ([string]::IsNullOrWhiteSpace($DataDirectory)) { return }
+    $ledgerPath = Join-Path $DataDirectory 'delegated-grants.json'
+    $lockPath = Join-Path $DataDirectory 'delegated-grants.lock'
+    $owned = @()
+    if (Test-Path -LiteralPath $ledgerPath -PathType Leaf) {
+        if ((Get-Item -LiteralPath $ledgerPath).Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            throw 'Delegated grants ledger is a reparse point'
+        }
+        $ledger = Get-Content -Encoding UTF8 -LiteralPath $ledgerPath -Raw | ConvertFrom-Json
+        if ($ledger.ownedGrants) {
+            $owned = @($ledger.ownedGrants | ForEach-Object { [string]$_ } | Where-Object { ![string]::IsNullOrWhiteSpace($_) })
+        }
+    }
+    if ($owned.Count -gt 0 -and ![string]::IsNullOrWhiteSpace($ConfigRoot)) {
+        $configPath = Join-Path $ConfigRoot 'config.json'
+        if (Test-Path -LiteralPath $configPath -PathType Leaf) {
+            Assert-CodexModePath $ConfigRoot $configPath
+            $configHash = (Get-FileHash -LiteralPath $configPath -Algorithm SHA256).Hash
+            $document = Get-Content -Encoding UTF8 -LiteralPath $configPath -Raw | ConvertFrom-JsonHashtable
+            $allow = $document.userSettings.globalPermissionGrants.allow
+            if ($null -ne $allow) {
+                $filtered = @($allow | Where-Object { $owned -cnotcontains [string]$_ })
+                if ($filtered.Count -ne @($allow).Count) {
+                    $document.userSettings.globalPermissionGrants.allow = @($filtered)
+                    $temp = $configPath + '.codex-delegation.tmp'
+                    $document | ConvertTo-Json -Depth 100 | Set-Utf8NoBom -LiteralPath $temp -Encoding utf8
+                    if ((Get-FileHash -LiteralPath $configPath -Algorithm SHA256).Hash -ne $configHash) {
+                        throw 'Native settings changed during delegated grant cleanup'
+                    }
+                    Move-Item -LiteralPath $temp -Destination $configPath -Force
+                }
+            }
+        }
+    }
+    if (Test-Path -LiteralPath $ledgerPath -PathType Leaf) { Remove-Item -LiteralPath $ledgerPath -Force }
+    if (Test-Path -LiteralPath $lockPath -PathType Leaf) { Remove-Item -LiteralPath $lockPath -Force -ErrorAction SilentlyContinue }
 }

@@ -118,6 +118,7 @@ $taskReport=@{
     humanHandoffs=@($taskCompleted|Where-Object {$_.decision -in 'force_ask','ask'}).Count
     authorizedDenialEscalations=@($taskCompleted|Where-Object reasonCode -eq 'policy_denied_user_authorized').Count
     nativeAskHandoffs=@($taskCompleted|Where-Object decision -eq 'ask').Count
+    hostProtectedRedirects=@($taskCompleted|Where-Object reasonCode -eq 'host_protected_redirect').Count
     duplicateDeniedRequests=@($taskCompleted|Where-Object reasonCode -eq 'duplicate_policy_denial').Count
     byReasonCode=@($taskCompleted|Group-Object reasonCode|ForEach-Object{@{reasonCode=$(if($_.Name){$_.Name}else{'unknown'});requests=$_.Count}})
     byHookDecision=@($taskHookResults|Group-Object hookDecision|ForEach-Object{@{decision=$_.Name;requests=$_.Count}})

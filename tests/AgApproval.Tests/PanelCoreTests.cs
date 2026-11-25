@@ -303,5 +303,206 @@ public static class PanelCoreTests
             Check(!report.PluginInstalled && report.NativeAuth is null, "unexpected uninstalled detect state");
             return Task.CompletedTask;
         });
+
+        await test("ProtectedPathDelegation enforces lifecycle sync, ownership preservation, snapshot filtering, and git fallback redirect", async () =>
+        {
+            var dpRoot = Path.Combine(scratchRoot, "protected-delegation");
+            var dpConfigDir = Path.Combine(dpRoot, "config");
+            var dpDataDir = Path.Combine(dpRoot, "data");
+            var dpWs = Path.Combine(dpRoot, "ws");
+            Directory.CreateDirectory(dpConfigDir);
+            Directory.CreateDirectory(dpDataDir);
+            Directory.CreateDirectory(Path.Combine(dpWs, ".git"));
+            Directory.CreateDirectory(Path.Combine(dpWs, ".cache"));
+            Directory.CreateDirectory(Path.Combine(dpWs, ".vscode"));
+            await File.WriteAllTextAsync(Path.Combine(dpWs, ".git", "config"), "[core]\n");
+            await File.WriteAllTextAsync(Path.Combine(dpWs, ".vscode", "settings.json"), "{}\n");
+
+            var agConfigPath = Path.Combine(dpConfigDir, "config.json");
+            await File.WriteAllTextAsync(agConfigPath, Json.Encode(new
+            {
+                userSettings = new
+                {
+                    permissionPreset = "AGENT_PERMISSION_PRESET_DEFAULT",
+                    enableTerminalSandbox = true,
+                    globalPermissionGrants = new
+                    {
+                        allow = new[] { "command(git status)", "read_file(.vscode)" },
+                        ask = new[] { "read_file(private)" },
+                        deny = new[] { "write_file(.git)" }
+                    }
+                }
+            }));
+
+            var dpTranscriptRoot = Path.Combine(dpRoot, "brain");
+            var dpConv = Guid.NewGuid().ToString();
+            var dpTranscript = Path.Combine(dpTranscriptRoot, dpConv, ".system_generated", "logs", "transcript.jsonl");
+            Directory.CreateDirectory(Path.GetDirectoryName(dpTranscript)!);
+            await File.WriteAllTextAsync(dpTranscript,
+                Json.Encode(new { step_index = 0, source = "USER_EXPLICIT", type = "USER_INPUT", content = "Inspect the repository configuration and cache." }) + "\n");
+
+            var dpSettings = new Settings
+            {
+                GuardianPath = baseSettings.GuardianPath,
+                CodexHome = baseSettings.CodexHome,
+                DataDirectory = dpDataDir,
+                AntigravityConfigDirectory = dpConfigDir,
+                PolicyDirectory = baseSettings.PolicyDirectory,
+                TranscriptRoots = [dpTranscriptRoot],
+                DelegateProtectedPaths = true
+            };
+            var dpPolicy = new Policy(dpSettings.PolicyDirectory);
+
+            // 1. Active host adds only non-existing catalog grants, preserves user-owned read_file(.vscode), never delegates .git writes or .env.
+            var active = ProtectedPathDelegation.Sync(dpSettings, hostActive: true, hostVersionOverride: "2.35.1");
+            Check(active.SequenceEqual(["read_file(.cache)", "read_file(.git)", "write_file(.cache)"]),
+                "unexpected owned grant set: " + string.Join(",", active));
+            var cfgNode = JsonNode.Parse(await File.ReadAllTextAsync(agConfigPath))!;
+            var allowArr = cfgNode["userSettings"]!["globalPermissionGrants"]!["allow"]!.AsArray().Select(n => n!.GetValue<string>()).ToArray();
+            Check(allowArr.Contains("command(git status)") && allowArr.Contains("read_file(.vscode)") &&
+                  allowArr.Contains("read_file(.git)") && allowArr.Contains("read_file(.cache)") && allowArr.Contains("write_file(.cache)") &&
+                  !allowArr.Contains("write_file(.git)") && !allowArr.Contains("read_file(.env*)"),
+                "active config.json allow grants mismatch: " + string.Join(",", allowArr));
+
+            // 2. PermissionSnapshot excludes plugin-owned host-bypass grants while keeping genuine user allow/ask/deny rules.
+            var snap = PermissionSnapshot.Read(dpSettings, new JsonArray(dpWs));
+            var snapAllow = snap["global_settings"]!["permissionGrants"]!["allow"]!.AsArray().Select(n => n!.GetValue<string>()).ToArray();
+            Check(snapAllow.SequenceEqual(["command(git status)", "read_file(.vscode)"]),
+                "PermissionSnapshot leaked plugin-owned host bypass grants: " + string.Join(",", snapAllow));
+
+            // 3. .vscode reads route to model (never native allow), because SafeDotSegments no longer includes .vscode.
+            var vsPayload = new JsonObject
+            {
+                ["conversationId"] = dpConv,
+                ["stepIdx"] = 1,
+                ["transcriptPath"] = dpTranscript,
+                ["workspacePaths"] = new JsonArray(dpWs),
+                ["toolCall"] = new JsonObject { ["name"] = "read_file", ["args"] = new JsonObject { ["Path"] = Path.Combine(dpWs, ".vscode", "settings.json") } }
+            };
+            var vsInput = await ReviewContext.BuildAsync(vsPayload, dpSettings, default);
+            var vsRoute = await ReviewRouting.EvaluateAsync(vsInput, dpSettings, default);
+            Check(vsRoute.Route == "model", ".vscode read bypassed Guardian model review");
+
+            // 4. When delegation is active, reading .git/config is NOT redirected and proceeds to Guardian review.
+            var gitPayload = new JsonObject
+            {
+                ["conversationId"] = dpConv,
+                ["stepIdx"] = 1,
+                ["transcriptPath"] = dpTranscript,
+                ["workspacePaths"] = new JsonArray(dpWs),
+                ["toolCall"] = new JsonObject { ["name"] = "read_file", ["args"] = new JsonObject { ["Path"] = Path.Combine(dpWs, ".git", "config") } }
+            };
+            int modelCalls = 0;
+            var activeGate = new ReviewGate(dpSettings, dpPolicy, new FakeReviewer(_ => { modelCalls++; return Task.FromResult("{\"outcome\":\"allow\",\"risk_level\":\"low\",\"user_authorization\":\"high\",\"rationale\":\"ok\"}"); }));
+            var activeRes = await activeGate.ReviewAsync(gitPayload, default);
+            Check(modelCalls == 1 && activeRes.Decision == "auto_approve", "delegated .git read should be reviewed by Guardian");
+
+            // 5. Minimum host version check skips delegation on older hosts.
+            var skippedOld = ProtectedPathDelegation.Sync(dpSettings, hostActive: true, hostVersionOverride: "2.20.0");
+            Check(skippedOld.Length == 0 && !ProtectedPathDelegation.HasOwnedGrants(dpDataDir), "old host version should not receive delegated grants");
+
+            // 6. Re-enable on 2.35.1, then pause takeover -> owned grants revoked while user-owned grants stay intact!
+            ProtectedPathDelegation.Sync(dpSettings, hostActive: true, hostVersionOverride: "2.35.1");
+            dpSettings.SetTakeoverEnabled(false);
+            ProtectedPathDelegation.Sync(dpSettings, hostActive: true, hostVersionOverride: "2.35.1");
+            cfgNode = JsonNode.Parse(await File.ReadAllTextAsync(agConfigPath))!;
+            allowArr = cfgNode["userSettings"]!["globalPermissionGrants"]!["allow"]!.AsArray().Select(n => n!.GetValue<string>()).ToArray();
+            Check(allowArr.SequenceEqual(["command(git status)", "read_file(.vscode)"]),
+                "revocation removed user-owned grants or left plugin grants: " + string.Join(",", allowArr));
+            dpSettings.SetTakeoverEnabled(true);
+
+            // 7. Re-enable, then disable delegation switch -> fallback .git read redirect activates (not for .cache, not when user explicitly named .git/config).
+            ProtectedPathDelegation.Sync(dpSettings, hostActive: true, hostVersionOverride: "2.35.1");
+            dpSettings.DelegateProtectedPaths = false;
+            ProtectedPathDelegation.Sync(dpSettings, hostActive: true, hostVersionOverride: "2.35.1");
+            Check(!ProtectedPathDelegation.HasOwnedGrants(dpDataDir), "disabling DelegateProtectedPaths did not revoke grants");
+
+            int redirectCalls = 0;
+            var redirectGate = new ReviewGate(dpSettings, dpPolicy, new FakeReviewer(_ => { redirectCalls++; return Task.FromResult("{\"outcome\":\"allow\"}"); }));
+            var redirected = await redirectGate.ReviewAsync(gitPayload, default);
+            Check(redirectCalls == 0 && redirected.Decision == "deny" && redirected.Status == "redirected" &&
+                  redirected.ReasonCode == "host_protected_redirect" && redirected.Reason.Contains("git -C", StringComparison.Ordinal),
+                "disabled delegation did not redirect .git/config read: " + Json.Encode(redirected));
+
+            // User explicitly naming .git/config in USER_EXPLICIT must NOT be redirected.
+            await File.WriteAllTextAsync(dpTranscript,
+                Json.Encode(new { step_index = 0, source = "USER_EXPLICIT", type = "USER_INPUT", content = "Please read .git/config directly." }) + "\n");
+            var explicitGitRes = await redirectGate.ReviewAsync(gitPayload, default);
+            Check(redirectCalls == 1 && explicitGitRes.Decision == "auto_approve", "explicit user .git/config request was wrongly redirected");
+
+            // .cache write is NEVER redirected even when delegation is off.
+            var cachePayload = new JsonObject
+            {
+                ["conversationId"] = dpConv,
+                ["stepIdx"] = 1,
+                ["transcriptPath"] = dpTranscript,
+                ["workspacePaths"] = new JsonArray(dpWs),
+                ["toolCall"] = new JsonObject { ["name"] = "write_file", ["args"] = new JsonObject { ["Path"] = Path.Combine(dpWs, ".cache", "data.json"), ["Content"] = "{}" } }
+            };
+            var cacheRes = await redirectGate.ReviewAsync(cachePayload, default);
+            Check(redirectCalls == 2 && cacheRes.Decision == "auto_approve", ".cache write must never be redirected");
+
+            // UsageStats counts redirected separately from Denied and Failed.
+            var dpStats = UsageStats.Compute(dpDataDir);
+            Check(dpStats.Today.Redirected == 1 && dpStats.Today.Denied == 0 && dpStats.Today.Failed == 0 && dpStats.Today.Approved == 3 && dpStats.Today.TotalRequests == 4 && dpStats.Today.ModelCalls == 3,
+                "UsageStats miscounted redirected request: " + Json.Encode(dpStats.Today));
+
+            // 8. Host shutdown revokes grants, and host-unreachable review revokes lingering grants and fails closed.
+            dpSettings.DelegateProtectedPaths = true;
+            dpSettings.PipeName = "ag-test-dp-" + Guid.NewGuid().ToString("N")[..12];
+            var dpCfgPath = Path.Combine(dpRoot, "approval.json");
+            await File.WriteAllTextAsync(dpCfgPath, Json.Encode(new
+            {
+                dataDirectory = dpDataDir,
+                guardianPath = dpSettings.GuardianPath,
+                codexHome = dpSettings.CodexHome,
+                policyDirectory = dpSettings.PolicyDirectory,
+                antigravityConfigDirectory = dpConfigDir,
+                transcriptRoots = dpSettings.TranscriptRoots,
+                pipeName = dpSettings.PipeName,
+                delegateProtectedPaths = true
+            }));
+            var dpFakeGuardian = Path.Combine(dpRoot, "fake-guardian.exe");
+            File.Copy(Environment.ProcessPath!, dpFakeGuardian, overwrite: true);
+            dpSettings.GuardianPath = dpFakeGuardian;
+            var dpHostTask = AgApproval.Program.HostAsync(dpSettings, dpCfgPath);
+            for (int i = 0; i < 40; i++)
+            {
+                try
+                {
+                    await AgApproval.Program.RequestAsync(dpSettings, new { operation = "status" }, TimeSpan.FromSeconds(1));
+                    break;
+                }
+                catch { await Task.Delay(50); }
+            }
+            Check(ProtectedPathDelegation.HasOwnedGrants(dpDataDir), "HostAsync startup did not mount delegated grants");
+            await AgApproval.Program.RequestAsync(dpSettings, new { operation = "stop" }, TimeSpan.FromSeconds(2));
+            await dpHostTask.WaitAsync(TimeSpan.FromSeconds(5));
+            Check(!ProtectedPathDelegation.HasOwnedGrants(dpDataDir), "HostAsync stop did not revoke delegated grants");
+
+            // Simulate crash leaving owned grants behind -> next review CLI call fails closed AND cleans them up.
+            ProtectedPathDelegation.Sync(dpSettings, hostActive: true, hostVersionOverride: "2.35.1");
+            Check(ProtectedPathDelegation.HasOwnedGrants(dpDataDir), "precondition: simulated crash grant missing");
+            var crashStart = new ProcessStartInfo(Environment.ProcessPath!)
+            {
+                UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true
+            };
+            var asm = typeof(AgApproval.Program).Assembly.Location;
+            if (Path.GetFileNameWithoutExtension(crashStart.FileName).Equals("dotnet", StringComparison.OrdinalIgnoreCase))
+                crashStart.ArgumentList.Add(asm);
+            else
+                crashStart.FileName = Path.Combine(Path.GetDirectoryName(asm)!, "ag-approval.exe");
+            foreach (var a in new[] { "review", "--config", dpCfgPath }) crashStart.ArgumentList.Add(a);
+            using (var crashProc = Process.Start(crashStart)!)
+            {
+                await crashProc.StandardInput.WriteAsync(gitPayload.ToJsonString());
+                crashProc.StandardInput.Close();
+                var outText = await crashProc.StandardOutput.ReadToEndAsync();
+                await crashProc.WaitForExitAsync();
+                var crashReply = JsonNode.Parse(outText)!;
+                Check(Json.Text(crashReply, "decision") == "deny", "host-unreachable review did not fail closed");
+            }
+            Check(!ProtectedPathDelegation.HasOwnedGrants(dpDataDir), "host-unreachable review did not revoke lingering grants");
+        });
     }
 }

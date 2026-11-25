@@ -22,6 +22,13 @@ $taskUserModeFile = Join-Path $taskProjects 'later-user-selection.json'
 $taskInstalled = Get-Content -Encoding UTF8 -LiteralPath (Join-Path $taskConfig 'config.json') -Raw | ConvertFrom-Json
 if (!$taskInstalled.sidecars.other.enabled -or !$taskInstalled.sidecars.'codex-approval/reviewer'.enabled) { throw 'Sidecar merge failed' }
 if ($taskInstalled.userSettings.globalPermissionGrants.deny[0] -ne 'write_file(private)') { throw 'User permission rules changed' }
+if ($taskInstalled.userSettings.globalPermissionGrants.allow -cnotcontains 'command(git status)' -or
+    $taskInstalled.userSettings.globalPermissionGrants.allow -cnotcontains 'read_file(.git)' -or
+    $taskInstalled.userSettings.globalPermissionGrants.allow -cnotcontains 'read_file(.cache)' -or
+    $taskInstalled.userSettings.globalPermissionGrants.allow -cnotcontains 'write_file(.cache)' -or
+    $taskInstalled.userSettings.globalPermissionGrants.allow -cnotcontains 'read_file(.vscode)') {
+    throw 'Active host did not mount delegated protected-path grants'
+}
 if ($taskInstalled.userSettings.permissionPreset -ne 'AGENT_PERMISSION_PRESET_DEFAULT' -or !$taskInstalled.userSettings.enableTerminalSandbox -or $taskInstalled.userSettings.autoExecutionPolicy -ne 'CASCADE_COMMANDS_AUTO_EXECUTION_PROCEED_IN_SANDBOX') { throw 'Native Auto review was not replaced by sandboxed Default mode' }
 $taskProject = Get-Content -Encoding UTF8 -LiteralPath $taskProjectFile -Raw | ConvertFrom-Json
 if ($taskProject.settings.permissionPreset -ne 'AGENT_PERMISSION_PRESET_DEFAULT' -or $taskProject.permissionGrants.permissionGrants.ask[0] -ne 'command(rm)') { throw 'Project Auto migration changed explicit rules' }
@@ -35,9 +42,11 @@ foreach ($expectedAsset in @('pricing.json', 'update-config.json', 'app/CodexApp
     if (!(Test-Path -LiteralPath (Join-Path $taskPlugin $expectedAsset) -PathType Leaf)) { throw ('Missing expected panel/update asset: ' + $expectedAsset) }
 }
 if (Test-Path -LiteralPath (Join-Path $taskPlugin 'rules/project-authorizations.md')) { throw 'Deprecated project-authorizations rule file should not be installed' }
+if (Test-Path -LiteralPath (Join-Path $taskPlugin 'rules/antigravity-scratch.md')) { throw 'Deprecated antigravity-scratch rule file should not be installed' }
+if (!(Test-Path -LiteralPath (Join-Path $taskPlugin 'host-protected-paths.json') -PathType Leaf)) { throw 'Missing host-protected-paths.json catalog' }
 $taskInstalledHooks = Get-Content -Encoding UTF8 -LiteralPath (Join-Path $taskPlugin 'hooks.json') -Raw | ConvertFrom-Json
 if ($null -ne $taskInstalledHooks.'codex-approval'.PreInvocation) { throw 'Installed hooks.json should not register PreInvocation' }
-if ($taskReview.escalateAuthorizedDenials -ne $true) { throw 'Default escalateAuthorizedDenials must be true' }
+if ($taskReview.escalateAuthorizedDenials -ne $true -or $taskReview.delegateProtectedPaths -ne $true) { throw 'Default escalateAuthorizedDenials and delegateProtectedPaths must be true' }
 if ($taskReview.reviewTimeoutSeconds -ne 90 -or $taskReview.hookTimeoutSeconds -ne 100 -or $taskInstalledHooks.'codex-approval'.PreToolUse[0].hooks[0].timeout -ne 120) { throw 'Nested review, client, and native hook deadlines are not coordinated' }
 
 & (Join-Path $PSScriptRoot 'Test-Hooks.ps1') -PluginDirectory $taskPlugin
@@ -100,6 +109,12 @@ New-Item -ItemType Directory -Path $taskGrantDirectory -Force | Out-Null
 
 $taskPaused = & $taskRuntime $taskAssembly takeover --config $taskReviewPath --enabled false | ConvertFrom-Json
 if ($LASTEXITCODE -ne 0 -or $taskPaused.takeoverEnabled -ne $false) { throw 'Could not pause approval takeover before repair' }
+$taskPausedConfig = Get-Content -Encoding UTF8 -LiteralPath (Join-Path $taskConfig 'config.json') -Raw | ConvertFrom-Json
+if ($taskPausedConfig.userSettings.globalPermissionGrants.allow -cnotcontains 'command(git status)' -or
+    $taskPausedConfig.userSettings.globalPermissionGrants.allow -ccontains 'read_file(.git)' -or
+    $taskPausedConfig.userSettings.globalPermissionGrants.allow -ccontains 'write_file(.cache)') {
+    throw 'Pausing takeover did not revoke delegated protected-path grants cleanly'
+}
 
 & (Join-Path $PSScriptRoot 'Install.ps1') -GeminiRoot $taskGemini -DataDirectory $taskData @taskExecutables -ReviewRouting ModelOnly -UseVerifiedCopyCommit
 $taskUpgradeManifest = Get-Content -Encoding UTF8 -LiteralPath (Join-Path $taskData 'installation.json') -Raw | ConvertFrom-Json
@@ -120,6 +135,11 @@ $taskAfterRepair = & $taskRuntime $taskAssembly takeover --config $taskReviewPat
 if ($LASTEXITCODE -ne 0 -or $taskAfterRepair.takeoverEnabled -ne $false) { throw 'Repair resumed paused approval takeover' }
 $taskResumed = & $taskRuntime $taskAssembly takeover --config $taskReviewPath --enabled true | ConvertFrom-Json
 if ($LASTEXITCODE -ne 0 -or $taskResumed.takeoverEnabled -ne $true) { throw 'Could not resume approval takeover after repair' }
+$taskResumedConfig = Get-Content -Encoding UTF8 -LiteralPath (Join-Path $taskConfig 'config.json') -Raw | ConvertFrom-Json
+if ($taskResumedConfig.userSettings.globalPermissionGrants.allow -cnotcontains 'read_file(.git)' -or
+    $taskResumedConfig.userSettings.globalPermissionGrants.allow -cnotcontains 'write_file(.cache)') {
+    throw 'Resuming takeover did not restore delegated protected-path grants'
+}
 
 & (Join-Path $PSScriptRoot 'Test-Hooks.ps1') -PluginDirectory $taskPlugin
 
@@ -193,6 +213,7 @@ if ([IO.File]::ReadAllText($taskLegacyLauncher) -ne 'ORIGINAL_LAUNCHER') { throw
 $taskRestored = Get-Content -Encoding UTF8 -LiteralPath (Join-Path $taskConfig 'config.json') -Raw | ConvertFrom-Json
 if (!$taskRestored.sidecars.other.enabled -or $null -ne $taskRestored.sidecars.'codex-approval/reviewer') { throw 'Uninstall affected another sidecar' }
 if ($taskRestored.userSettings.permissionPreset -ne 'AGENT_PERMISSION_PRESET_AUTO' -or $null -ne $taskRestored.userSettings.enableTerminalSandbox -or $null -ne $taskRestored.userSettings.autoExecutionPolicy) { throw 'Uninstall lost original native mode or absent fields' }
+if (@($taskRestored.userSettings.globalPermissionGrants.allow) -cne @('command(git status)')) { throw 'Uninstall left delegated protected-path grants or removed user allow rule' }
 $taskRestoredProject = Get-Content -Encoding UTF8 -LiteralPath $taskProjectFile -Raw | ConvertFrom-Json
 if ($taskRestoredProject.settings.permissionPreset -ne 'AGENT_PERMISSION_PRESET_AUTO' -or $null -ne $taskRestoredProject.settings.enableTerminalSandbox) { throw 'Project native mode was not restored' }
 if ((Get-Content -Encoding UTF8 -LiteralPath $taskUserModeFile -Raw | ConvertFrom-Json).settings.permissionPreset -ne 'AGENT_PERMISSION_PRESET_REQUEST_REVIEW') { throw 'Uninstall overwrote later user mode selection' }
