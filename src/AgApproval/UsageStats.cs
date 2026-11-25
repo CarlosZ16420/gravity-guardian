@@ -249,7 +249,7 @@ public static partial class UsageStats
                 w.TotalRequests++;
                 if (hasModel) w.ModelCalls++;
                 if (status == "approved") w.Approved++;
-                else if (status == "denied" || (status == "blocked" && decision == "deny")) w.Denied++;
+                else if (status == "denied" || status == "escalated" || (status == "blocked" && decision == "deny")) w.Denied++;
                 else if (status == "delegated") w.Delegated++;
                 else w.Failed++;
             }

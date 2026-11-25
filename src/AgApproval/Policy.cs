@@ -8,7 +8,7 @@ public sealed class Policy
     public string Rejection { get; }
     public string Hash { get; }
     public JsonNode Schema { get; }
-    public string NativeHash => Json.Hash(Hash+GuardianFacts.Protocol+GuardianFacts.UpstreamCommit+GuardianFacts.BridgePolicy+ProjectAuthorizations.Guidance);
+    public string NativeHash => Json.Hash(Hash+GuardianFacts.Protocol+GuardianFacts.UpstreamCommit+GuardianFacts.BridgePolicy);
     public Policy(string directory)
     {
         var manifest = JsonNode.Parse(File.ReadAllText(Path.Combine(directory, "SOURCE.json")))!;
@@ -51,6 +51,12 @@ public sealed class Policy
             ? "Auto-review returned a low-risk allow decision." : "Auto-review returned a deny decision without a rationale.";
         var reason = $"Automatic approval review {outcome} (risk: {risk}, authorization: {auth}): {rationale}";
         if (outcome == "deny") reason += "\n" + Rejection;
-        return new(outcome == "allow" ? "auto_approve" : "deny", reason, outcome == "allow" ? "approved" : "denied", requestId, actionHash){ReasonCode=outcome=="allow"?"policy_allowed":"policy_denied"};
+        return new(outcome == "allow" ? "auto_approve" : "deny", reason, outcome == "allow" ? "approved" : "denied", requestId, actionHash)
+        {
+            ReasonCode = outcome == "allow" ? "policy_allowed" : "policy_denied",
+            Risk = risk,
+            UserAuthorization = auth,
+            Rationale = rationale
+        };
     }
 }

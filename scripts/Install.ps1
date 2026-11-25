@@ -168,6 +168,7 @@ $taskApproval = @{
     enableNativeRouting = ($ReviewRouting -eq 'Conservative')
     enableNativeState = $true; nativeStateLogPath = (Join-Path $env:APPDATA 'Antigravity/logs/main.log'); nativeStateTimeoutMilliseconds = 4000; maxNativeHistoryBytes = 8388608
     enableNativeAskHandoff = $false
+    escalateAuthorizedDenials = $true
     enableDetailedLogs = [bool]$EnableDetailedLogs; maxLogSegmentBytes = 16777216
 }
 

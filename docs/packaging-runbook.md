@@ -45,7 +45,7 @@ $previous = 'C:\release-inputs\gravity-steward-0.6.3-windows-x64.zip'
 
 `Package.ps1` 会重新读取两个 ZIP 并逐文件校验，检查无 PDB、ZIP 不超过 120 MiB、解压不超过 310 MiB，以及两包的 Guardian 哈希一致。下载后可用 `Get-FileHash -Algorithm SHA256` 再核对。保留包清单、校验值和对应的验收日志。
 
-在隔离测试目录确认 Standalone 可以启动，Lite 有系统 .NET 时可以安装，缺少时在变更安装前给出提示。使用新版更新器验证两种资产、同类型更新、双向切换和四类 Hook。坏 SHA-256 和失效的 Guardian 必须在停止旧服务前被拒绝。新服务健康检查失败时，应恢复旧服务、配置和 Hook，并保留审批日志和项目授权。
+在隔离测试目录确认 Standalone 可以启动，Lite 有系统 .NET 时可以安装，缺少时在变更安装前给出提示。使用新版更新器验证两种资产、同类型更新、双向切换和三类 Hook。坏 SHA-256 和失效的 Guardian 必须在停止旧服务前被拒绝。新服务健康检查失败时，应恢复旧服务、配置和 Hook，并保留审批日志。
 
 Guardian 上游、Rust 编译参数或审核链路变化时，追加离线零工具及大动作测试，并用测试账号运行真实审核。用同一个请求 ID 核对 `native_guardian`、推理次数和最终 Hook 决策。涉及认证的变更还需验证退出登录与换号。账号或环境缺失时，在该版本的验收记录里列明未覆盖项。以下命令的输出路径在每次运行时应使用新目录。
 
@@ -58,7 +58,7 @@ node .\scripts\Test-NativePrompt.mjs .local\prompt-release
 
 在 GitHub Releases 为已验收提交准备对应的 `v<版本>` 草稿，附上两个 ZIP、`checksums.sha256` 和 `release-manifest.json`，使用该版本的发布说明。核对远端附件名称、大小和 SHA-256 与本地验收产物一致后再公开。GitHub Actions 会归档产物，发布草稿单独处理。
 
-遇到升级故障，先备份升级后新增的日志和项目授权。使用上一次更新备份恢复插件、配置及安装元数据，确认旧服务运行并复验 PreToolUse。
+遇到升级故障，先备份升级后新增的日志。使用上一次更新备份恢复插件、配置及安装元数据，确认旧服务运行并复验 PreToolUse。
 
 ## 5. 常见问题
 

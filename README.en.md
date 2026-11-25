@@ -2,7 +2,7 @@
 
 **Tool approvals for Antigravity on Windows via the bundled Native Guardian.**
 
-Gravity Steward ships Native Guardian, which calls the `codex-auto-review` model for Antigravity tool requests. Antigravity executes approved actions and enforces your explicit permission rules. The tray panel shows review outcomes, token usage, and configurable cost estimates. A separate Codex CLI installation is unnecessary.
+Gravity Steward ships Native Guardian, which calls the `codex-auto-review` model for Antigravity tool requests. Antigravity executes approved actions and enforces your explicit permission rules. When Guardian denies an action despite `user_authorization = high`, the hook escalates to Antigravity's native confirmation prompt (`force_ask`, configurable via `escalateAuthorizedDenials`). The tray panel shows review outcomes, token usage, and configurable cost estimates. A separate Codex CLI installation is unnecessary.
 
 [Download for Windows](https://github.com/CarlosZ16420/gravity-steward/releases/latest) · [中文](README.md) · [Report an issue](https://github.com/CarlosZ16420/gravity-steward/issues)
 
@@ -16,11 +16,9 @@ Run `GravitySteward.exe` to install or repair the plugin (「安装 / 修复插�
 
 Standalone keeps the original ZIP name and bundles the x64 .NET 10 runtime. Lite has `-lite-` in its ZIP name and uses the installed x64 .NET 10 runtime. You can install it with `winget install Microsoft.DotNet.Runtime.10 --architecture x64`. To switch editions, extract the desired ZIP and run Install / Repair from that folder. The panel UI is in Simplified Chinese. Detailed logging is off by default. When enabled, local logs may include paths, conversation content, and tool arguments. Model reviews send the context required for review to Codex.
 
-Manage standing project authorizations in Antigravity chat. Confirmed scopes carry over to new chats and restarts for the same project. [Chat commands](plugin/README.md)
-
 Use the tray panel's takeover switch to pause Gravity Steward for new requests and let Antigravity apply its native permission rules. Repairs and updates preserve the switch setting.
 
-To uninstall, fully exit Antigravity and choose 「完整卸载」 in the panel. This removes the installed plugin and its startup entry and permanently deletes local logs, statistics, settings, project authorizations, caches, and backups. You can also run `scripts/Uninstall.ps1 -PurgeData` from the package. You can delete the downloaded ZIP and extracted folder separately.
+To uninstall, fully exit Antigravity and choose 「完整卸载」 in the panel. This removes the installed plugin and its startup entry and permanently deletes local logs, statistics, settings, caches, and backups. You can also run `scripts/Uninstall.ps1 -PurgeData` from the package. You can delete the downloaded ZIP and extracted folder separately.
 
 ## Build from source
 

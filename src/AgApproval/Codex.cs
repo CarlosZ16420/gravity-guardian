@@ -95,6 +95,10 @@ public sealed class ReviewGate(Settings settings, Policy policy, IReviewer revie
                 guard=await DenialGuard.AcquireAsync(settings,modelInput,policy.NativeHash,deadline.Token);
                 guardState=guard.Snapshot();
                 if(guard.IsBlocked(modelInput))result=GateResponse.Repeated(id,actionHash,guard.RecordedReason(modelInput)??"Recorded policy denial");
+                else if(guard.IsEscalated(modelInput))
+                    result=settings.EscalateAuthorizedDenials
+                        ?GateResponse.AuthorizedDenial(id,actionHash,guard.RecordedEscalationRisk??"high",guard.RecordedEscalationRationale??"Recorded authorized denial")
+                        :GateResponse.Repeated(id,actionHash,guard.RecordedEscalationDenialReason??guard.RecordedEscalationRationale??"Recorded policy denial");
                 else
                 {
                     await guard.BeginAsync(modelInput,deadline.Token);
@@ -104,11 +108,13 @@ public sealed class ReviewGate(Settings settings, Policy policy, IReviewer revie
                     assessmentReadyMs = watch.ElapsedMilliseconds;reviewerMs=assessmentReadyMs-reviewerStartedMs;
                     phase = "assessment";
                     result = policy.Apply(assessmentText, id, actionHash);policyResult=result;
+                    if(result.Decision=="deny"&&settings.EscalateAuthorizedDenials&&result.UserAuthorization=="high")
+                        result=GateResponse.AuthorizedDenial(id,actionHash,result.Risk??"high",result.Rationale??result.Reason);
                     phase="denial_guard";
                     try
                     {
                         using var persistCt=new CancellationTokenSource(TimeSpan.FromMilliseconds(500));
-                        await guard.RecordAsync(modelInput,result.Decision=="auto_approve",result.Reason,persistCt.Token);
+                        await guard.RecordAsync(modelInput,result,policyResult,persistCt.Token);
                     }
                     catch(Exception e)when(e is IOException or UnauthorizedAccessException or OperationCanceledException)
                     {Console.Error.WriteLine("Could not persist duplicate verdict record");}
@@ -164,8 +170,8 @@ public sealed class ReviewGate(Settings settings, Policy policy, IReviewer revie
             materialRevision=input?.MaterialRevision,authorizationSources=input?.AuthorizationSources,nativeSegment=input?.NativeSegment,
             inputVersion=ReviewAdapter.InputVersion,adapterVersion=ReviewAdapter.Version,adapterInstructionHash=ReviewAdapter.Hash,transportVersion=ReviewAdapter.TransportVersion,
             reviewerInvoked=modelInvoked,modelCallEvidence=assessmentText!=null,reviewerMs,reviewMs=reviewerMs,guardState,
-            decisionSource=policyResult!=null?"guardian":result.ReasonCode=="duplicate_policy_denial"?"recorded_guardian":route?.Route=="native"?"native_delegation":result.Decision=="ask"?"native_ask":"bridge",
-            verdict=policyResult?.Decision=="auto_approve"?"allow":policyResult?.Decision??(result.ReasonCode=="duplicate_policy_denial"?"deny":null),
+            decisionSource=policyResult!=null?"guardian":result.ReasonCode is "duplicate_policy_denial" or "policy_denied_user_authorized"?"recorded_guardian":route?.Route=="native"?"native_delegation":result.Decision=="ask"?"native_ask":"bridge",
+            verdict=policyResult?.Decision=="auto_approve"?"allow":policyResult?.Decision??(result.ReasonCode is "duplicate_policy_denial" or "policy_denied_user_authorized"?"deny":null),
             hookDecision=result.Decision,rawErrorKind=failure?["rawErrorKind"],httpStatus=failure?["httpStatus"],
             retryable=failure?["retryable"],retryAfterMs=failure?["retryAfterMs"],
             model = route?.Route=="native"?null:settings.Model, effort = route?.Route=="native"?null:settings.Effort,
@@ -173,7 +179,7 @@ public sealed class ReviewGate(Settings settings, Policy policy, IReviewer revie
             reviewTimeoutSeconds = settings.ReviewTimeoutSeconds, elapsedMs = watch.ElapsedMilliseconds };
         using(var completedAuditDeadline=new CancellationTokenSource(TimeSpan.FromMilliseconds(500)))
             await Audit.TryAppendAsync(settings, record, completedAuditDeadline.Token);
-        if(result.Decision is "allow" or "auto_approve" or "ask"||result.Decision=="force_ask"&&modelInvoked)
+        if(result.Decision is "allow" or "auto_approve" or "ask"||result.Decision=="force_ask"&&(modelInvoked||result.ReasonCode=="policy_denied_user_authorized"))
         {
             // The audit write is itself a wait; revocations arriving during it also invalidate approval.
             try

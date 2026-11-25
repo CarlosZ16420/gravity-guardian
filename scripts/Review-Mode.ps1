@@ -147,6 +147,7 @@ function Update-ApprovalReviewerConfig {
     }
     $defaults = [ordered]@{
         enableNativeAskHandoff = $false
+        escalateAuthorizedDenials = $true
         maxNativeHistoryBytes = 8388608
         enableDetailedLogs = $false
         maxLogSegmentBytes = 16777216

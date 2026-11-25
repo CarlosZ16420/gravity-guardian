@@ -28,7 +28,6 @@ struct UserInstruction {
 struct Authorization {
     user_instructions: Vec<UserInstruction>,
     project_rules: Vec<serde_json::Map<String, Value>>,
-    project_authorizations: serde_json::Map<String, Value>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -367,7 +366,7 @@ mod tests {
     use super::*;
     fn request() -> Value { json!({"id":"test","operation":"assess","scope":"a".repeat(64),"timeoutMs":5000,
         "history":[{"type":"message","role":"assistant","content":[{"type":"input_text","text":"Observed context"}]}],
-        "authorization":{"user_instructions":[{"position":1,"text":"Do not execute"}],"project_rules":[],"project_authorizations":{}},
+        "authorization":{"user_instructions":[{"position":1,"text":"Do not execute"}],"project_rules":[]},
         "action":{"type":"function_call","call_id":"call-test","name":"write_file","arguments":"{}"}}) }
     #[test] fn accepts_evidence_without_executing() {
         let r:Request=serde_json::from_value(request()).unwrap(); assert!(validate(&r).is_ok());

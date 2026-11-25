@@ -58,10 +58,14 @@ public sealed class DenialGuard : IAsyncDisposable
 
     public bool IsBlocked(ReviewInput input)=>state.DenialReason!=null;
     public string? RecordedReason(ReviewInput input)=>state.DenialReason;
+    public bool IsEscalated(ReviewInput input)=>state.EscalationRationale!=null;
+    public string? RecordedEscalationRisk=>state.EscalationRisk;
+    public string? RecordedEscalationRationale=>state.EscalationRationale;
+    public string? RecordedEscalationDenialReason=>state.EscalationDenialReason;
     public bool HasPending=>state.PendingRequest!=null;
     public async Task BeginAsync(ReviewInput input,CancellationToken ct){state.PendingRequest=input.Id;await SaveAsync(ct);}
     public async Task CancelPendingAsync(CancellationToken ct){state.PendingRequest=null;state.LastOutcome="aborted";await SaveAsync(ct);}
-    public object Snapshot()=>new{version=Version,scope="bound_request",state.LastOutcome,state.InterruptedRequest,denied=state.DenialReason!=null};
+    public object Snapshot()=>new{version=Version,scope="bound_request",state.LastOutcome,state.InterruptedRequest,denied=state.DenialReason!=null,escalated=state.EscalationRationale!=null};
     public static object Diagnostics(Settings settings)
     {
         var dir=DirectoryFor(settings);
@@ -80,6 +84,29 @@ public sealed class DenialGuard : IAsyncDisposable
     {
         if(!allowed)state.DenialReason=reason;
         state.LastOutcome=allowed?"allow":"deny";
+        state.PendingRequest=null;
+        await SaveAsync(ct);
+    }
+
+    public async Task RecordAsync(ReviewInput input,GateResponse finalResult,GateResponse policyResult,CancellationToken ct)
+    {
+        if(finalResult.ReasonCode=="policy_denied_user_authorized")
+        {
+            state.DenialReason=null;
+            state.EscalationRisk=policyResult.Risk??finalResult.Risk??"high";
+            state.EscalationRationale=policyResult.Rationale??finalResult.Rationale??finalResult.Reason;
+            state.EscalationDenialReason=policyResult.Reason;
+            state.LastOutcome="escalated";
+        }
+        else if(finalResult.Decision!="auto_approve")
+        {
+            state.DenialReason=finalResult.Reason;
+            state.LastOutcome="deny";
+        }
+        else
+        {
+            state.LastOutcome="allow";
+        }
         state.PendingRequest=null;
         await SaveAsync(ct);
     }
@@ -106,5 +133,8 @@ public sealed class DenialGuard : IAsyncDisposable
         public string? InterruptedRequest{get;set;}
         public string? LastOutcome{get;set;}
         public string? DenialReason{get;set;}
+        public string? EscalationRisk{get;set;}
+        public string? EscalationRationale{get;set;}
+        public string? EscalationDenialReason{get;set;}
     }
 }

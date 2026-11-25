@@ -31,10 +31,13 @@ $taskReview = Get-Content -Encoding UTF8 -LiteralPath (Join-Path $taskPlugin 'ap
 if ($taskReview.model -ne 'codex-auto-review' -or !$taskReview.enableNativeRouting -or !(Test-Path -LiteralPath $taskReview.policyDirectory)) { throw 'Installed runtime configuration invalid' }
 if ($taskReview.reviewerBackend -ne 'NativeGuardian' -or !$taskReview.enableNativeState -or !(Test-Path -LiteralPath $taskReview.guardianPath)) { throw 'Native Guardian was not installed as the selected backend' }
 if (![string]::IsNullOrEmpty($taskReview.proxy)) { throw 'Default open-source proxy must be empty' }
-foreach ($expectedAsset in @('pricing.json', 'update-config.json', 'app/CodexApprovalPanel.exe', 'scripts/Apply-Update.ps1', 'rules/project-authorizations.md')) {
+foreach ($expectedAsset in @('pricing.json', 'update-config.json', 'app/CodexApprovalPanel.exe', 'scripts/Apply-Update.ps1')) {
     if (!(Test-Path -LiteralPath (Join-Path $taskPlugin $expectedAsset) -PathType Leaf)) { throw ('Missing expected panel/update asset: ' + $expectedAsset) }
 }
+if (Test-Path -LiteralPath (Join-Path $taskPlugin 'rules/project-authorizations.md')) { throw 'Deprecated project-authorizations rule file should not be installed' }
 $taskInstalledHooks = Get-Content -Encoding UTF8 -LiteralPath (Join-Path $taskPlugin 'hooks.json') -Raw | ConvertFrom-Json
+if ($null -ne $taskInstalledHooks.'codex-approval'.PreInvocation) { throw 'Installed hooks.json should not register PreInvocation' }
+if ($taskReview.escalateAuthorizedDenials -ne $true) { throw 'Default escalateAuthorizedDenials must be true' }
 if ($taskReview.reviewTimeoutSeconds -ne 90 -or $taskReview.hookTimeoutSeconds -ne 100 -or $taskInstalledHooks.'codex-approval'.PreToolUse[0].hooks[0].timeout -ne 120) { throw 'Nested review, client, and native hook deadlines are not coordinated' }
 
 & (Join-Path $PSScriptRoot 'Test-Hooks.ps1') -PluginDirectory $taskPlugin

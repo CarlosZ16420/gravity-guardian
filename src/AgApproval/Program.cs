@@ -98,10 +98,9 @@ public static class Program
             }
             if (command == "chat")
             {
-                using var ct = new CancellationTokenSource(TimeSpan.FromSeconds(8));
-                var payload = JsonNode.Parse(await Json.ReadBoundedAsync(Console.In, settings.MaxInputBytes, ct.Token))
-                    ?? throw new InvalidDataException("Missing chat event");
-                Console.WriteLine(ProjectAuthorizations.Handle(settings, payload).ToJsonString(Json.PromptOptions));
+                using var input = Console.OpenStandardInput();
+                await input.CopyToAsync(Stream.Null);
+                Console.WriteLine("{}");
                 return 0;
             }
             if (command == "host") { await HostAsync(settings); return 0; }
@@ -162,17 +161,11 @@ public static class Program
                 await Audit.AppendAsync(settings, completedEvent, ct.Token);
                 Console.WriteLine("{}"); return 0;
             }
-            Console.Error.WriteLine("Usage: ag-approval <host|ensure|review|status|stop|session|post|chat|detect|stats|set-logging|compact-logs|takeover> --config <absolute-file>");
+            Console.Error.WriteLine("Usage: ag-approval <host|ensure|review|status|stop|session|post|detect|stats|set-logging|compact-logs|takeover> --config <absolute-file>");
             return 2;
         }
         catch (Exception e)
         {
-            if (command == "chat")
-            {
-                Console.Error.WriteLine(e.GetType().Name);
-                Console.WriteLine(Json.Encode(new { injectSteps = new[] { new { ephemeralMessage = "审批插件未能处理本次项目授权，请告知用户并保留原授权状态。" } } }));
-                return 0;
-            }
             if (command == "review")
             {
                 var failure = e is InvalidDataException && e.Message == "Input too large" && failureSettings != null
@@ -191,7 +184,7 @@ public static class Program
                 Console.WriteLine(Json.Encode(failure.HookOutput));
                 Console.Error.WriteLine(e.GetType().Name + ": " + e.Message); return 0;
             }
-            if (command is "session" or "post") { Console.WriteLine("{}"); Console.Error.WriteLine(e.GetType().Name); return 0; }
+            if (command is "session" or "post" or "chat") { Console.WriteLine("{}"); Console.Error.WriteLine(e.GetType().Name); return 0; }
             Console.Error.WriteLine(e.GetType().Name + ": " + e.Message); return 1;
         }
     }
@@ -370,7 +363,7 @@ public static class Program
         policyHash,
         guardVersion=DenialGuard.Version,guardScope="bound_request",guardStateDirectory=Path.Combine(settings.DataDirectory,"denial-guard"),guardState=DenialGuard.Diagnostics(settings),
         nativeTurnIdAvailable=false,nativeInterruptionAvailable=false,runtimeEffectiveScopeComplete=false,model=settings.Model,effort=settings.Effort,
-        reviewerBackend="NativeGuardian",nativeState=settings.EnableNativeState,guardianProtocol=GuardianFacts.Protocol,
+        reviewerBackend="NativeGuardian",nativeState=settings.EnableNativeState,escalateAuthorizedDenials=settings.EscalateAuthorizedDenials,guardianProtocol=GuardianFacts.Protocol,
         nativeBridgePolicyHash=Json.Hash(GuardianFacts.BridgePolicy),
         inferenceDispatchCap=(int?)null,maxAttempts=GuardianFacts.MaxReviewAttempts,
         detailedLogs=settings.DetailedLogsActive,maxLogSegmentBytes=settings.MaxLogSegmentBytes,

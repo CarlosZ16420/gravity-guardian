@@ -72,6 +72,7 @@ $taskModelActivity=@{
     approved=@($taskModelCompleted|Where-Object status -eq 'approved').Count
     denied=@($taskModelCompleted|Where-Object status -eq 'denied').Count
     humanHandoffs=@($taskModelCompleted|Where-Object {$_.decision -in 'force_ask','ask'}).Count
+    authorizedDenialEscalations=@($taskModelCompleted|Where-Object reasonCode -eq 'policy_denied_user_authorized').Count
     completedWithoutModelEvidence=@($taskCompleted|Where-Object{!$_.requestId -or !$taskModelIdSet.Contains([string]$_.requestId)}).Count
     nativeDelegations=@($taskCompleted|Where-Object status -eq 'delegated').Count
     timeoutHandoffs=@($taskCompleted|Where-Object reasonCode -eq 'review_timeout').Count
@@ -115,6 +116,7 @@ $taskReport=@{
     denied=@($taskCompleted|Where-Object status -eq 'denied').Count
     reviewFailed=@($taskCompleted|Where-Object status -eq 'review_failed').Count
     humanHandoffs=@($taskCompleted|Where-Object {$_.decision -in 'force_ask','ask'}).Count
+    authorizedDenialEscalations=@($taskCompleted|Where-Object reasonCode -eq 'policy_denied_user_authorized').Count
     nativeAskHandoffs=@($taskCompleted|Where-Object decision -eq 'ask').Count
     duplicateDeniedRequests=@($taskCompleted|Where-Object reasonCode -eq 'duplicate_policy_denial').Count
     byReasonCode=@($taskCompleted|Group-Object reasonCode|ForEach-Object{@{reasonCode=$(if($_.Name){$_.Name}else{'unknown'});requests=$_.Count}})
@@ -132,7 +134,7 @@ $taskReport=@{
     tokenUsage=$taskTokenReport
     modelActivity=$taskModelActivity
     byReviewerTransport=@($taskUsage|Group-Object {if($_.backend -eq 'native_guardian'){'native_guardian'}elseif($_.process.transportMode){$_.process.transportMode}else{'legacy_unknown'}}|ForEach-Object{@{mode=$_.Name;invocations=$_.Count;tokens=(Get-TokenTotals @($_.Group|Where-Object {!$taskLegacySet.Contains($_)}))}})
-    byTool=@($taskCompleted|Group-Object tool|ForEach-Object{@{tool=$_.Name;requests=$_.Count;approved=@($_.Group|Where-Object status -eq 'approved').Count;denied=@($_.Group|Where-Object status -eq 'denied').Count;failed=@($_.Group|Where-Object status -eq 'review_failed').Count;delegated=@($_.Group|Where-Object status -eq 'delegated').Count}})
+    byTool=@($taskCompleted|Group-Object tool|ForEach-Object{@{tool=$_.Name;requests=$_.Count;approved=@($_.Group|Where-Object status -eq 'approved').Count;denied=@($_.Group|Where-Object status -eq 'denied').Count;escalated=@($_.Group|Where-Object status -eq 'escalated').Count;failed=@($_.Group|Where-Object status -eq 'review_failed').Count;delegated=@($_.Group|Where-Object status -eq 'delegated').Count}})
     repeatedActions=@($taskCompleted|Where-Object {$_.actionFingerprint}|Group-Object { $_.conversationId+'|'+$_.actionFingerprint }|Where-Object Count -gt 1|Sort-Object Count -Descending|Select-Object -First 10|ForEach-Object{@{conversationId=$_.Group[0].conversationId;actionFingerprint=$_.Group[0].actionFingerprint;count=$_.Count}})
     legacyRepeatedActions=@($taskCompleted|Where-Object {!$_.actionFingerprint -and $_.actionHash}|Group-Object actionHash|Where-Object Count -gt 1|Select-Object -First 10|ForEach-Object{@{actionHash=$_.Name;count=$_.Count;identity='legacy_request_hash_not_effect_identity'}})
     note='Only requests that reached this plugin are counted. Native prompts outside the hook cannot be inferred from these logs alone.'

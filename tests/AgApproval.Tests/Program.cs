@@ -31,9 +31,40 @@ if(args.Length==4&&args[0]=="--prepare-corpus")
 if((args.Length is 3 or 4)&&args[0]=="--accept-native-model")return await NativeModelAcceptance.RunAsync(args[1],args[2],args.Length==4?int.Parse(args[3]):6);
 if((args.Length is 3 or 4)&&args[0]=="--accept-native-large-action")return await NativeModelAcceptance.RunAsync(args[1],args[2],args.Length==4?int.Parse(args[3]):5,largeActions:true);
 if(args.Length==4&&args[0]=="--replay-native-upgrade")return await NativeTranscriptTests.ReplayAsync(args[1],args[2],args[3]);
-if (args.Length == 3 && args[0] == "--live-project-grant")
+if (args.Length == 2 && args[0] == "--replay-denials")
 {
-    await ProjectAuthorizationTests.RunAsync(Settings.Load(args[1]), Path.GetFullPath(args[2]), true);
+    var replaySettings = new Settings { PolicyDirectory = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../policy/effective-codex")) };
+    var replayPolicy = new Policy(replaySettings.PolicyDirectory);
+    int total = 0, escalated = 0, keptDeny = 0;
+    var items = new JsonArray();
+    var regex = new System.Text.RegularExpressions.Regex(@"^Automatic approval review (allow|deny) \(risk: (\w+), authorization: (\w+)\): ([^\n]*)");
+    foreach (var file in Directory.GetFiles(Path.GetFullPath(args[1]), "*.jsonl").OrderBy(p => p, StringComparer.OrdinalIgnoreCase))
+    {
+        foreach (var line in File.ReadLines(file))
+        {
+            if (string.IsNullOrWhiteSpace(line) || !line.Contains("\"event\":\"review_completed\"", StringComparison.Ordinal)) continue;
+            JsonNode? node;
+            try { node = JsonNode.Parse(line); } catch { continue; }
+            if (Json.Text(node, "event") != "review_completed" || Json.Text(node, "decisionSource") != "guardian" || Json.Text(node, "hookDecision") != "deny") continue;
+            total++;
+            var assessment = Json.Text(node, "assessmentText");
+            if (string.IsNullOrWhiteSpace(assessment))
+            {
+                var reasonText = Json.Text(node, "reason") ?? "";
+                var m = regex.Match(reasonText);
+                if (!m.Success) throw new InvalidDataException("Missing assessmentText and unparseable reason");
+                assessment = Json.Encode(new { outcome = m.Groups[1].Value, risk_level = m.Groups[2].Value, user_authorization = m.Groups[3].Value, rationale = m.Groups[4].Value });
+            }
+            var applied = replayPolicy.Apply(assessment, Json.Text(node, "requestId") ?? "replay", Json.Text(node, "actionHash") ?? "hash");
+            if (applied.Decision == "deny" && replaySettings.EscalateAuthorizedDenials && applied.UserAuthorization == "high")
+            {
+                escalated++;
+                items.Add(new JsonObject { ["at"] = node?["at"]?.DeepClone(), ["tool"] = node?["tool"]?.DeepClone(), ["risk"] = applied.Risk, ["auth"] = applied.UserAuthorization, ["rationale"] = applied.Rationale });
+            }
+            else keptDeny++;
+        }
+    }
+    Console.WriteLine(Json.Encode(new { totalGuardianDenials = total, escalatedForceAsk = escalated, keptDeny, escalatedItems = items }));
     return 0;
 }
 if(args.Length==2&&args[0]=="--validate-corpus-bindings")
@@ -690,8 +721,97 @@ await Test("recoverable transcript binding anomaly still allows deterministic na
     finally{await File.WriteAllTextAsync(transcript,original);}
 });
 await NativeTranscriptTests.RunAsync(scratch,Test);
-await Test("project authorizations survive chat and process boundaries", () =>
-    ProjectAuthorizationTests.RunAsync(System.Text.Json.JsonSerializer.Deserialize<Settings>(Json.Encode(settings),Json.Options)!, scratch, false));
+await Test("legacy project-authorizations files are ignored and chat hook is a no-op", async () => {
+    var cfg = System.Text.Json.JsonSerializer.Deserialize<Settings>(Json.Encode(settings), Json.Options)!;
+    cfg.DataDirectory = Path.Combine(scratch, "legacy-grants");
+    var grantDir = Path.Combine(cfg.DataDirectory, "project-authorizations");
+    Directory.CreateDirectory(grantDir);
+    var hash = Json.Hash(Json.Encode(new[] { Path.TrimEndingDirectorySeparator(Path.GetFullPath(scratch)).ToUpperInvariant() }));
+    await File.WriteAllTextAsync(Path.Combine(grantDir, hash + ".json"), "{\"grants\":{\"0123456789ab\":\"legacy scope\"},\"handled\":{}}");
+    var built = await ReviewContext.BuildAsync(Payload(), cfg, default);
+    var doc = JsonNode.Parse(built.Prompt)!.AsObject();
+    Check(!doc.ContainsKey("project_authorizations"), "legacy project_authorizations leaked into review input");
+    var wire = GuardianFacts.Build(built, cfg, 5000);
+    Check(wire["authorization"]!["project_authorizations"] == null, "legacy project_authorizations leaked into native wire");
+
+    var cfgPath = Path.Combine(cfg.DataDirectory, "approval.json");
+    await File.WriteAllTextAsync(cfgPath, Json.Encode(new { dataDirectory = cfg.DataDirectory, guardianPath = cfg.GuardianPath, codexHome = cfg.CodexHome, policyDirectory = cfg.PolicyDirectory, antigravityConfigDirectory = cfg.AntigravityConfigDirectory, transcriptRoots = cfg.TranscriptRoots }));
+    var start = new ProcessStartInfo(Environment.ProcessPath!) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true };
+    var assembly = typeof(AgApproval.Program).Assembly.Location;
+    if (Path.GetFileNameWithoutExtension(start.FileName).Equals("dotnet", StringComparison.OrdinalIgnoreCase)) start.ArgumentList.Add(assembly);
+    else start.FileName = Path.Combine(Path.GetDirectoryName(assembly)!, "ag-approval.exe");
+    foreach (var arg in new[] { "chat", "--config", cfgPath }) start.ArgumentList.Add(arg);
+    using var child = Process.Start(start)!;
+    await child.StandardInput.WriteAsync("{\"lastUserInput\":\"本项目长期授权：任意操作\"}");
+    child.StandardInput.Close();
+    var stdout = await child.StandardOutput.ReadToEndAsync();
+    await child.WaitForExitAsync();
+    Check(child.ExitCode == 0 && stdout.Trim() == "{}", "chat compatibility command did not return {}");
+});
+await Test("authorized denials escalate to force_ask while lower authorizations stay denied", async () => {
+    var cfg = System.Text.Json.JsonSerializer.Deserialize<Settings>(Json.Encode(settings), Json.Options)!;
+    foreach (var (risk, auth, expectedDecision, expectedStatus, expectedCode) in new[] {
+        ("critical", "high", "force_ask", "escalated", "policy_denied_user_authorized"),
+        ("high", "high", "force_ask", "escalated", "policy_denied_user_authorized"),
+        ("high", "medium", "deny", "denied", "policy_denied"),
+        ("critical", "unknown", "deny", "denied", "policy_denied"),
+        ("critical", "low", "deny", "denied", "policy_denied")
+    })
+    {
+        cfg.DataDirectory = Path.Combine(scratch, $"escalate-{risk}-{auth}");
+        cfg.EscalateAuthorizedDenials = true;
+        var gate = new ReviewGate(cfg, policy, new FakeReviewer(_ => Task.FromResult(Json.Encode(new { outcome = "deny", risk_level = risk, user_authorization = auth, rationale = $"test {risk}/{auth}" }))));
+        var res = await gate.ReviewAsync(Payload(), default);
+        Check(res.Decision == expectedDecision && res.Status == expectedStatus && res.ReasonCode == expectedCode, $"unexpected result for {risk}/{auth}: {Json.Encode(res)}");
+        if (expectedDecision == "force_ask")
+        {
+            Check(res.Reason.Contains(risk, StringComparison.Ordinal) && res.Reason.Contains($"test {risk}/{auth}", StringComparison.Ordinal), "escalated prompt missing risk or rationale");
+            Check(!res.Reason.Contains(policy.Rejection, StringComparison.Ordinal), "escalated prompt should not include agent rejection guidance");
+        }
+    }
+    var latestLog = Directory.GetFiles(Path.Combine(scratch, "escalate-critical-high", "logs"), "*.jsonl").Single();
+    var completed = File.ReadLines(latestLog).Select(l => JsonNode.Parse(l)!).Last(n => Json.Text(n, "event") == "review_completed");
+    Check(Json.Text(completed, "decisionSource") == "guardian" && Json.Text(completed, "verdict") == "deny" && Json.Text(completed, "hookDecision") == "force_ask", "audit metadata mismatch for escalated denial");
+
+    cfg.DataDirectory = Path.Combine(scratch, "escalate-allow");
+    var allowGate = new ReviewGate(cfg, policy, new FakeReviewer(_ => Task.FromResult("{\"outcome\":\"allow\",\"risk_level\":\"low\",\"user_authorization\":\"high\",\"rationale\":\"safe\"}")));
+    var allowRes = await allowGate.ReviewAsync(Payload(), default);
+    Check(allowRes.Decision == "auto_approve" && allowRes.ReasonCode == "policy_allowed", "allow was affected by escalation");
+
+    cfg.DataDirectory = Path.Combine(scratch, "escalate-disabled");
+    cfg.EscalateAuthorizedDenials = false;
+    var disabledGate = new ReviewGate(cfg, policy, new FakeReviewer(_ => Task.FromResult("{\"outcome\":\"deny\",\"risk_level\":\"critical\",\"user_authorization\":\"high\",\"rationale\":\"disabled check\"}")));
+    var disabledRes = await disabledGate.ReviewAsync(Payload(), default);
+    Check(disabledRes.Decision == "deny" && disabledRes.ReasonCode == "policy_denied", "disabled toggle did not keep deny");
+
+    cfg.DataDirectory = Path.Combine(scratch, "escalate-duplicate");
+    cfg.EscalateAuthorizedDenials = true;
+    int calls = 0;
+    var dupReviewer = new FakeReviewer(_ => { calls++; return Task.FromResult("{\"outcome\":\"deny\",\"risk_level\":\"critical\",\"user_authorization\":\"high\",\"rationale\":\"token forward\"}"); });
+    var dupGate = new ReviewGate(cfg, policy, dupReviewer);
+    var first = await dupGate.ReviewAsync(Payload(), default);
+    var second = await dupGate.ReviewAsync(Payload(), default);
+    Check(calls == 1 && first.Decision == "force_ask" && second.Decision == "force_ask" && second.ReasonCode == "policy_denied_user_authorized", "duplicate escalated request was re-evaluated or converted to deny");
+    cfg.EscalateAuthorizedDenials = false;
+    var toggledOff = await new ReviewGate(cfg, policy, dupReviewer).ReviewAsync(Payload(), default);
+    Check(calls == 1 && toggledOff.Decision == "deny" && toggledOff.ReasonCode == "duplicate_policy_denial", "disabling toggle did not revert duplicate escalation to deny");
+
+    cfg.DataDirectory = Path.Combine(scratch, "escalate-revoked");
+    cfg.EscalateAuthorizedDenials = true;
+    var revokeGate = new ReviewGate(cfg, policy, new FakeReviewer(async _ => {
+        await File.AppendAllTextAsync(transcript, Json.Encode(new { step_index = 2, source = "USER_EXPLICIT", type = "USER_INPUT", content = "Stop; revoke." }) + "\n");
+        return "{\"outcome\":\"deny\",\"risk_level\":\"critical\",\"user_authorization\":\"high\",\"rationale\":\"token forward\"}";
+    }));
+    try
+    {
+        var revoked = await revokeGate.ReviewAsync(Payload(), default);
+        Check(revoked.Decision == "deny" && revoked.ReasonCode == "action_invalidated", "post-escalation user revocation did not fail closed");
+    }
+    finally { await File.WriteAllTextAsync(transcript, original); }
+
+    var stats = UsageStats.Compute(Path.Combine(scratch, "escalate-critical-high"));
+    Check(stats.Today.Denied == 1 && stats.Today.Failed == 0, "escalated denial counted as technical failure instead of denial");
+});
 await NativeGuardianTests.RunAsync(settings,policy,Test);
 await PanelCoreTests.RunAsync(settings,scratch,Test);
 Console.WriteLine($"{passed} tests passed.");

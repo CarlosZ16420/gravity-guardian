@@ -27,6 +27,7 @@ public sealed class Settings
     public string[] GuardianPrefixArguments { get; set; } = [];
     public bool EnableNativeState { get; set; }
     public bool EnableNativeAskHandoff { get; set; }
+    public bool EscalateAuthorizedDenials { get; set; } = true;
     public string NativeStateLogPath { get; set; } = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),"Antigravity","logs","main.log");
     public int NativeStateTimeoutMilliseconds { get; set; } = 4000;
     public int MaxNativeHistoryBytes { get; set; } = 8388608;
@@ -129,11 +130,17 @@ public static class Json
 public sealed record GateResponse(string Decision, string Reason, string Status, string RequestId, string ActionHash)
 {
     public string ReasonCode { get; init; } = "unknown";
+    public string? Risk { get; init; }
+    public string? UserAuthorization { get; init; }
+    public string? Rationale { get; init; }
     public object HookOutput => new { decision = Decision, reason = Reason };
     public static GateResponse Delegate(string id,string hash,ReviewRoute route) =>
         new("allow", $"Native permission rules decide this operation ({ReviewRoute.Version}/{route.RuleId}). No additional permissions were granted by this hook.", "delegated",id,hash){ReasonCode="native_delegation"};
     public static GateResponse NeedsHuman(string id, string hash, string reason,string code="reviewer_unavailable") =>
         new("force_ask", "Codex automatic review could not reach a valid decision. Human approval is required before execution. This is not a model denial. " + reason, "review_failed", id, hash){ReasonCode=code};
+    public static GateResponse AuthorizedDenial(string id, string hash, string risk, string rationale) =>
+        new("force_ask", $"Codex 自动审核拒绝了此操作（风险 {risk}），但判定你已明确授权。只有你在此确认后才会执行。理由：{rationale}",
+            "escalated", id, hash){ReasonCode="policy_denied_user_authorized",Risk=risk,UserAuthorization="high",Rationale=rationale};
     public static GateResponse NativeAsk(string id,string hash,string reason,string code) =>
         new("ask","Codex review encountered a technical failure. Antigravity applies its existing permissions and asks when required. "+reason,"review_failed",id,hash){ReasonCode=code};
     public static GateResponse Failure(string id, string hash, string reason,string code="request_invalid") =>

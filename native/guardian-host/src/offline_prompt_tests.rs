@@ -96,7 +96,6 @@ async fn run_final_native_prompt_roundtrip() -> anyhow::Result<()> {
     let mut small_auth = authorization;
     small_auth["user_instructions"] = json!([{"position": 1, "text": "Only authorize small writes."}]);
     small_auth["project_rules"] = json!([]);
-    small_auth["project_authorizations"] = json!({});
     let mut oversized_action = request.action;
     oversized_action["arguments"] = json!(json!({"Content": "oversized action payload ".repeat(60_000)}).to_string());
     let NewThread { thread_id, thread, .. } = manager.start_thread(StartThreadOptions::new(config)).await?;

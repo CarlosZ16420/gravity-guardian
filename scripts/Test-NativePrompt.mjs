@@ -72,12 +72,11 @@ const instructions = [approval, ...Array.from({length: 9}, (_, index) => 'Contex
     'Long user restriction 中文 with a quoted value "example". '.repeat(240), revocation]
     .map((text, index) => ({position: index * 5 + 1, text}));
 const projectRules = [{path:'fixture/AGENTS.md',scope:'fixture',content:'Write only under the fixture root.'}];
-const projectAuthorizations = {fixture:'Previously confirmed permission to prepare local drafts.'};
 const content = '# Local synthetic fixture 中文 "quoted" C:\\fixture\n'.repeat(4000) + "Write-Output 'END_OF_ACTION'\n";
 const fixture = {
     id:'offline-test', operation:'assess', scope:'a'.repeat(64),
     history: [{type:'message',role:'assistant',content:[{type:'input_text',text:'Observed fixture context.'}]}],
-    authorization: {user_instructions:instructions, project_rules:projectRules, project_authorizations:projectAuthorizations},
+    authorization: {user_instructions:instructions, project_rules:projectRules},
     action: {type: 'function_call', name: 'write_file', call_id: 'proposed-offline-fixture',
         arguments: JSON.stringify({Path: join(output, 'never-executed.ps1'), Content: content})},
 };

@@ -4,8 +4,8 @@ $ErrorActionPreference='Stop'
 . (Join-Path $PSScriptRoot 'Review-Mode.ps1')
 $taskPlugin=[IO.Path]::GetFullPath($PluginDirectory)
 $taskHooks=Get-Content -Encoding UTF8 -LiteralPath (Join-Path $taskPlugin 'hooks.json') -Raw|ConvertFrom-Json
+if($null -ne $taskHooks.'codex-approval'.PreInvocation){throw 'hooks.json must not register PreInvocation'}
 $taskCases=@(
-    @{event='PreInvocation';handler=$taskHooks.'codex-approval'.PreInvocation[0];input='{"lastUserInput":"normal chat message"}'},
     @{event='PreToolUse';handler=$taskHooks.'codex-approval'.PreToolUse[0].hooks[0];input='invalid-json';decision='deny'},
     @{event='PostToolUse';handler=$taskHooks.'codex-approval'.PostToolUse[0].hooks[0];input='{"conversationId":"hook-launch-test","stepIdx":0,"toolCall":{"name":"hook-launch-test","args":{}}}'},
     @{event='SessionStart';handler=$taskHooks.'codex-approval'.SessionStart[0];input='{"conversationId":"hook-launch-test"}'}

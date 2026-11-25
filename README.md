@@ -27,13 +27,12 @@ Gravity Steward 自带 Native Guardian，由它调用 `codex-auto-review` 模型
 
 **Standalone** 沿用原安装包文件名，自带 x64 .NET 10。**Lite** 的文件名带 `-lite-`，需要系统已安装 x64 .NET 10，可运行 `winget install Microsoft.DotNet.Runtime.10 --architecture x64` 安装。切换类型时，完整解压目标 ZIP，再从该目录运行「安装 / 修复插件」。下载后可对照同页的 `checksums.sha256` 核对 ZIP。升级或卸载前先完全退出 Antigravity。
 
-在面板点击「完整卸载」，确认后会关闭面板，移除已安装的插件和开机启动项，并永久删除本地审批日志、统计、设置、项目长期授权、缓存和备份。也可运行包内的 `scripts/Uninstall.ps1 -PurgeData`。手动下载的 ZIP 和解压目录可自行删除。
+在面板点击「完整卸载」，确认后会关闭面板，移除已安装的插件和开机启动项，并永久删除本地审批日志、统计、设置、缓存和备份。也可运行包内的 `scripts/Uninstall.ps1 -PurgeData`。手动下载的 ZIP 和解压目录可自行删除。
 
 ## 功能介绍
 
-- **工具审批**。把模型审核的拒绝原因反馈给 Antigravity。经过校验的部分只读请求交由 Antigravity 原生规则处理。
+- **工具审批**。把模型审核的拒绝原因反馈给 Antigravity；当 Guardian 判拒绝但确认用户已明确授权（`user_authorization = high`）时，转为 Antigravity 原生确认弹窗（可通过 `escalateAuthorizedDenials` 关闭）。经过校验的部分只读请求交由 Antigravity 原生规则处理。
 - **插件接管开关**。可在托盘面板即时切换。关闭后，新请求由 Antigravity 原生权限规则处理。修复和更新会保留开关设置。
-- **项目长期授权**。在 Antigravity 聊天中保存、查看和撤销授权。同一项目的新聊天和重启后可继续使用已确认的范围。[聊天命令](plugin/README.md)
 - **托盘与统计**。接管审批时显示彩色盾牌，未接管、服务未运行或状态未知时显示灰色盾牌。从面板查看今日及近 7 日的审批、用量和可配置的成本估算。
 - **日志与更新**。详细日志默认关闭。启用后，日志保存在本机，可能包含路径、对话或工具参数。模型审核会向 Codex 服务发送审核所需的上下文。面板可检查 GitHub Releases 并校验更新包。
 

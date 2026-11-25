@@ -1426,7 +1426,7 @@ void StartUninstallAndExit(HWND hwnd) {
     }
     g_app.uninstallPromptOpen = true;
     const int answer = MessageBoxW(hwnd,
-        L"面板将退出。卸载会移除已安装的插件，并永久删除本地审批日志、统计、设置、项目长期授权和备份。\n\n确认完整卸载吗？",
+        L"面板将退出。卸载会移除已安装的插件，并永久删除本地审批日志、统计、设置和备份。\n\n确认完整卸载吗？",
         L"完整卸载 Gravity Steward", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
     g_app.uninstallPromptOpen = false;
     if (answer != IDYES) return;

@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param([string]$OutputDirectory, [string]$PreviousPackage)
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'Review-Mode.ps1')
@@ -197,10 +197,10 @@ try {
 
     $checks = @((Join-Path $standalone.plugin 'approval.json'), (Join-Path $standalone.data 'installation.json'),
         (Join-Path $standalone.plugin 'sidecars/reviewer/sidecar.json'))
-    $projectData = Join-Path $standalone.data 'project-authorizations'
+    $guardData = Join-Path $standalone.data 'denial-guard'
     $logs = Join-Path $standalone.data 'logs'
-    New-Item -ItemType Directory -Path $projectData, $logs -Force | Out-Null
-    $dataFiles = @((Join-Path $projectData 'rollback-sentinel.json'), (Join-Path $logs 'rollback-sentinel.txt'))
+    New-Item -ItemType Directory -Path $guardData, $logs -Force | Out-Null
+    $dataFiles = @((Join-Path $guardData 'rollback-sentinel.json'), (Join-Path $logs 'rollback-sentinel.txt'))
     foreach ($file in $dataFiles) { Set-Utf8NoBom -LiteralPath $file -Content 'rollback fixture' }
     $checks += $dataFiles
     $hashes = @(Get-FileHash -LiteralPath $checks | ForEach-Object Hash)
@@ -227,7 +227,7 @@ try {
     if (Test-Path -LiteralPath (Join-Path $standalone.data 'uninstalled')) { throw 'Rollback left the stop marker behind' }
     if (Compare-Object $hashes @(Get-FileHash -LiteralPath $checks | ForEach-Object Hash)) { throw 'Rollback changed the previous installation metadata or configuration' }
     Test-Installed $standalone 'standalone'
-    Write-Host 'PASS failed post-update health check restored prior config, service and hooks and preserved logs and project authorizations'
+    Write-Host 'PASS failed post-update health check restored prior config, service and hooks and preserved logs and guard state'
 
     if ($PreviousPackage) {
         $previous = New-TestProfile 'previous-version'

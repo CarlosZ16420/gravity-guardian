@@ -1,5 +1,15 @@
 # 变更记录
 
+## 0.6.6 · 2026-11-25
+
+- **移除项目长期授权**：
+  - 7 天 6795 次真实审批日志显示长期授权目录启用次数为 0，且该机制只能把授权抬升到 `high`，无法覆盖 `risk_level = critical` 的强制拒绝。
+  - 删除 `ProjectAuthorizations.cs`、`ProjectAuthorizationTests.cs`、`plugin/rules/project-authorizations.md`、`hooks.json` 中的 `PreInvocation` 钩子、Schema 与原生宿主 `Authorization.project_authorizations` 字段，以及策略与适配提示中的附加说明，使送审结构恢复与上游 Codex 对齐。
+  - `ag-approval chat` 保留一个版本作为空返回（`{}`）兼容入口；`Uninstall.ps1 -PurgeData` 保留对遗留 `project-authorizations` 目录的清理。
+- **已授权拒绝转原生人工确认（`escalateAuthorizedDenials`，默认 `true`）**：
+  - Guardian 判定 `outcome = deny` 且 `user_authorization = high` 时，改为返回 `force_ask`（`status = escalated`、`reasonCode = policy_denied_user_authorized`），弹出 Antigravity 原生确认并附带风险等级与拒绝理由（不附带禁止绕过的 Agent 提示，不复用 Always Allow，对应 Codex `thread/approveGuardianDeniedAction`）。
+  - `DenialGuard` 记录 `escalated` 状态并兼容重复请求与开关回滚；审核提交前若用户撤销或证据变更仍按 `action_invalidated` 拒绝；`UsageStats` 与 `Analyze-Logs.ps1` 将其计入 `Denied` 与 `authorizedDenialEscalations` 而非技术失败。
+
 ## 0.6.5 · 2026-11-25
 
 本次发布在 Codex `0.172.0` 原生 Guardian 架构（保留完整上游内核与 `rusty_v8`，不裁剪内核 crate）的基础上，完成 `0.6.5` 长会话授权修复、端到端隐性缺陷治理、全仓版本统一与发布包构建。GitHub 公开发布需待下列人工实机复验确认后执行。
