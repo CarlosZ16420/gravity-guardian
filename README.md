@@ -1,76 +1,96 @@
 <div align="center">
+<img src="src/AgApproval.Panel/assets/icon.svg" alt="Gravity Guardian 图标" width="88">
 
 # Gravity Guardian
 
-**通过随包提供的 Native Guardian 审核 Antigravity 的工具请求。**
+### 审批有依据，工作少打断。
 
-Tool approvals for Antigravity on Windows via Native Guardian.
+Windows 上的 Antigravity 工具审批助手。<br>
+内置 Codex Native Guardian，审核请求、反馈原因、统计用量。
 
-![Windows x64](https://img.shields.io/badge/Windows-x64-2558a8?style=flat-square)
+![Source version](https://img.shields.io/badge/source-0.6.6-0071e3?style=flat-square)
+![Windows x64](https://img.shields.io/badge/Windows-x64-172a47?style=flat-square)
 ![Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-26735d?style=flat-square)
 
 **[下载 Windows 版](https://github.com/CarlosZ16420/gravity-guardian/releases/latest)** · [English](README.en.md) · [反馈问题](https://github.com/CarlosZ16420/gravity-guardian/issues)
 
-[快速开始](#快速开始) · [功能介绍](#功能介绍) · [开发与开源](#开发与开源) · [友链](#友链)
+[快速开始](#快速开始) · [功能介绍](#功能介绍) · [常见问题](#常见问题) · [开发与开源](#开发与开源)
 
 </div>
 
-Gravity Guardian 内置 Codex 原生审核宿主（Native Guardian），由它调用 `codex-auto-review` 模型审核 Antigravity 的工具请求。Antigravity 负责执行，并保留你设置的显式允许、询问和拒绝规则。运行插件无需安装 Codex CLI。
+Antigravity 发起工具请求，Guardian 结合用户指令与项目规则进行审核，再由 Antigravity 执行并保留原生权限约束。**插件运行无需额外安装 Codex CLI。**
+
+[![审批总览与偏好设置：接管开关、用量、缓存命中率和估算费用，数据为演示值](assets/readme/panel-showcase.zh-CN.png)](assets/readme/panel-showcase.zh-CN.png)
+
+> 本文与截图对应 **0.6.6 源码**，截图使用虚构统计与状态。可下载版本以 [Releases](https://github.com/CarlosZ16420/gravity-guardian/releases/latest) 为准；旧版请按对应发行说明安装。
 
 ## 快速开始
 
-1. 在 Windows x64 上至少打开一次 Antigravity。准备有权使用 `codex-auto-review` 的 Codex 账号，并在同一 Windows 用户下登录 Codex。
-2. 从 [Releases](https://github.com/CarlosZ16420/gravity-guardian/releases/latest) 下载 `gravity-guardian-*-windows-x64.zip`，完整解压到可写目录。
-3. 完全退出 Antigravity，在解压目录的 PowerShell 中运行 `.\scripts\Install.ps1`，然后重新打开 Antigravity。
+1. 在 Windows x64 上至少打开一次 Antigravity，并在同一 Windows 用户下完成 Codex 登录；账号需有权使用 `codex-auto-review`。
+2. 下载发行 ZIP，**完整解压到可写文件夹**。退出 Antigravity，打开 `GravityGuardian.exe`。
+3. Portable 点击 **「连接 / 修复连接」**；Standalone / Lite 点击 **「安装 / 修复插件」**。完成后重新打开 Antigravity。
 
-运行 `GravityGuardian.exe` 可以打开面板「安装 / 修复插件」、查看审批结果，并在「Guardian 登录」检测本机凭据。升级时，旧 CLI 审核设置会自动迁移到 Guardian，自定义凭据目录和历史审批统计会保留。支持的验证范围见[验收记录](docs/guardian-0.172.0-validation.md)。
+0.6.6 提供三种包型，使用相同的审核内核：
 
-**Standalone** 沿用原安装包文件名，自带 x64 .NET 10。**Lite** 的文件名带 `-lite-`，需要系统已安装 x64 .NET 10，可运行 `winget install Microsoft.DotNet.Runtime.10 --architecture x64` 安装。切换类型时，完整解压目标 ZIP，再从该目录运行「安装 / 修复插件」。下载后可对照同页的 `checksums.sha256` 核对 ZIP。升级或卸载前先完全退出 Antigravity。
+| 包型 | 如何选择 |
+| --- | --- |
+| **Portable 免安装版** · 文件名带 `-portable-` | 自带运行时；程序、配置和审批数据集中在解压目录，方便备份。 |
+| **Standalone** · 文件名无额外包型后缀 | 自带运行时；将插件和数据安装到当前用户目录。 |
+| **Lite** · 文件名带 `-lite-` | 使用系统已安装的 x64 .NET 10，其余与 Standalone 相同。 |
 
-**Portable 免安装版** 的文件名带 `-portable-`，同样自带运行时。解压后打开面板，退出 Antigravity 并点击「连接 / 修复连接」；程序、插件配置和审批日志均保存在解压文件夹内。详见[免安装版说明](docs/portable.md)。
+下载后可用同页的 `checksums.sha256` 校验 ZIP。Lite 缺少运行时时，可执行 `winget install Microsoft.DotNet.Runtime.10 --architecture x64`。连接、切换包型或升级前先完全退出 Antigravity。[免安装版说明](docs/portable.md)
 
-在面板点击「完整卸载」，确认后会关闭面板，移除已安装的插件和开机启动项，并永久删除本地审批日志、统计、设置、缓存和备份。也可运行包内的 `scripts/Uninstall.ps1 -PurgeData`。手动下载的 ZIP 和解压目录可自行删除。
+<details>
+<summary>查看免安装版界面</summary>
+
+[![免安装版：连接与断开入口，数据为演示值](assets/readme/portable-showcase.zh-CN.png)](assets/readme/portable-showcase.zh-CN.png)
+
+</details>
 
 ## 功能介绍
 
-- **工具审批**。把模型审核的拒绝原因反馈给 Antigravity；当 Guardian 判拒绝但确认用户已明确授权（`user_authorization = high`）时，转为 Antigravity 原生确认弹窗（可通过 `escalateAuthorizedDenials` 关闭）。经过校验的部分只读请求交由 Antigravity 原生规则处理。
-- **插件接管开关**。可在托盘面板即时切换。关闭后，新请求由 Antigravity 原生权限规则处理。修复和更新会保留开关设置。
-- **托盘与统计**。接管审批时显示彩色盾牌，未接管、服务未运行或状态未知时显示灰色盾牌。从面板查看今日及近 7 日的审批、用量和可配置的成本估算。
-- **日志与更新**。详细日志默认关闭。启用后，日志保存在本机，可能包含路径、对话或工具参数。模型审核会向 Codex 服务发送审核所需的上下文。面板可检查 GitHub Releases 并校验更新包。
+| 你需要什么 | Guardian 如何帮助你 |
+| --- | --- |
+| **按上下文审核** | 调用 `codex-auto-review` 审核工具请求，向 Antigravity 返回结果与拒绝原因。 |
+| **明确授权后仍被拒绝** | 默认转为 Antigravity 原生人工确认，由你决定是否执行。 |
+| **随时暂停接管** | 托盘面板一键切换，新请求恢复由 Antigravity 原生权限规则处理。 |
+| **看清审批消耗** | 查看今日、近 7 日及自定义日期的审批统计、输入与输出 Token、缓存命中率和估算费用。 |
+| **集中管理** | 安装修复、凭据检测、日志开关与清理、受保护目录审核委派、校验更新包。 |
+
+模型审核会向 Codex 服务发送所需上下文。详细日志默认关闭，启用后保存在本机，可能包含路径、对话和工具参数。费用为可配置估算。
+
+## 常见问题
+
+<details>
+<summary>有 Codex 登录就一定能用吗？</summary>
+
+还需要账号有权访问 `codex-auto-review`。面板「审批账号 → 检测」可检查本机凭据；检测到凭据不代表模型一定可用。支持的登录配置见[验收记录](docs/guardian-0.172.0-validation.md)。
+
+</details>
+
+<details>
+<summary>如何更新或卸载？</summary>
+
+面板可检查并下载校验后的更新包。升级保留设置与历史审批统计；手动切换包型时，完整解压目标 ZIP，再从新目录安装或连接。
+
+Portable 点击「断开连接」会移除 Antigravity 登记并保留本文件夹数据，退出相关程序后可自行删除文件夹。Standalone / Lite 点击「完整卸载」会移除插件、开机启动项，并永久删除本地审批日志、统计、设置、缓存和备份。操作前先完全退出 Antigravity。
+
+</details>
 
 ## 开发与开源
 
-构建需要 Windows x64、PowerShell 7、.NET 10 SDK、Node.js 22+、Rust stable 和 MSVC C++ 构建工具。所有构建产物与临时目录均保留在工作目录 `.local/` 下。
-
-日常本地修改（无需打包 ZIP，按需增量构建并直接更新本机）：
+构建需要 Windows x64、PowerShell 7、.NET 10 SDK、Node.js 22+、Rust stable 和 MSVC C++ 构建工具。
 
 ```powershell
-.\scripts\Update-Local.ps1                       # 自动检测改动组件（复用已验证的 Guardian）并更新本机
-.\scripts\Update-Local.ps1 -Components Service   # 仅构建 C# 服务并更新本机
-.\scripts\Update-Local.ps1 -Components Panel     # 仅构建 C++ 面板并更新本机
-.\scripts\Update-Local.ps1 -Components Guardian  # 使用 Rust Dev 配置快速增量构建 Guardian 并更新本机
-.\scripts\Update-Local.ps1 -BuildOnly            # 仅构建到 artifacts/gravity-guardian，不安装
-node .\scripts\Test-NativePrompt.mjs .local\prompt-dev --dev
+.\scripts\Update-Local.ps1 -BuildOnly   # 增量构建，不安装到本机
 ```
 
-正式发布构建、双包打包与验收步骤见 [Windows 打包与验收手册](docs/packaging-runbook.md)。
+[构建与发行验收](docs/packaging-runbook.md) · [变更记录](CHANGELOG.md) · [Apache-2.0](LICENSE) · [第三方声明](NOTICE)
 
-版本变化和 0.6.5 本地修订的验证及构建耗时见[变更记录](CHANGELOG.md)。
-
-```powershell
-.\scripts\Build.ps1
-.\scripts\Package.ps1
-.\scripts\Test-Distributions.ps1
-node .\scripts\Test-NativePrompt.mjs .local\prompt-test
-.\scripts\Test-NoCli.ps1 -OutputDirectory .local\no-cli-test
-```
-
-用 `Measure-GuardianBuild.ps1 -Tuning` 测量 Rust 发布配置。可选 `Baseline`、`Symbols`、`Thin`、`ThinSingleUnit` 和 `ThinSize`。依次运行，记录冷构建耗时、编译进程内存、包体占用和本机模拟审核延迟。
-
-项目采用 [Apache-2.0](LICENSE)，上游与分发声明见 [NOTICE](NOTICE)。Gravity Guardian 是独立的开源项目。
-
-反馈问题时请附插件版本和复现步骤，并隐去私人路径、凭据及原始对话。[提交问题](https://github.com/CarlosZ16420/gravity-guardian/issues)
+Gravity Guardian 是独立的开源项目。反馈请附版本、复现步骤和错误信息，并隐去私人路径、凭据及原始对话。
 
 ## 友链
 
 - [LINUX DO — 新的理想型社区](https://linux.do/)
+- [仓鼠症大结局 Hamster Archiver](https://github.com/CarlosZ16420/hamster-archiver)
+- [流量账本 Data Traffic Ledger](https://github.com/CarlosZ16420/DataTrafficLedger)
