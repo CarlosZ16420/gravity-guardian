@@ -54,6 +54,7 @@ if (!(Test-Path -LiteralPath $taskDotnet)) { $taskDotnet = (Get-Command dotnet).
 Push-Location $taskRoot
 try {
     & (Join-Path $PSScriptRoot 'Check-PublicHygiene.ps1')
+    if (!$SkipTests) { & (Join-Path $PSScriptRoot 'Test-ReleasePrivacy.ps1') }
     $taskRuntime = Get-LockedDotnetRuntime
     & node (Join-Path $PSScriptRoot 'Prepare-Policy.mjs')
     if ($LASTEXITCODE -ne 0) { throw 'Policy preparation failed' }

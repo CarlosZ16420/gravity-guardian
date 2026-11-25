@@ -12,6 +12,7 @@ $ErrorActionPreference='Stop'
 . (Join-Path $PSScriptRoot 'Review-Mode.ps1')
 if ($Profile -eq 'Dev') { $Profile = 'Debug' }
 $root = Split-Path $PSScriptRoot -Parent
+. (Join-Path $PSScriptRoot 'Release-Paths.ps1')
 $parent = Split-Path $root -Parent
 $origin = Get-Content -LiteralPath (Join-Path $root 'native/SOURCE.json') -Raw | ConvertFrom-Json
 $policyPath = 'policy/upstream-codex/SOURCE.json'
@@ -103,7 +104,7 @@ $options = if ($Profile -eq 'Release') {
 $cargoProfile = if ($Profile -eq 'Release') { 'RELEASE' } else { 'DEV' }
 $incremental = if ($Profile -eq 'Release') { '0' } else { '1' }
 $savedEnv = [ordered]@{}
-foreach ($envName in @('TMP','TEMP','CARGO_TARGET_DIR','CARGO_INCREMENTAL')) {
+foreach ($envName in @('TMP','TEMP','CARGO_TARGET_DIR','CARGO_INCREMENTAL','CARGO_ENCODED_RUSTFLAGS','CFLAGS','CXXFLAGS','CC_SHELL_ESCAPED_FLAGS')) {
     $savedEnv[$envName] = [Environment]::GetEnvironmentVariable($envName, 'Process')
 }
 foreach ($entry in $options.GetEnumerator()) {
@@ -115,6 +116,12 @@ try {
 New-Item -ItemType Directory -Path $local,$buildTemp -Force | Out-Null
 $env:TMP = $buildTemp
 $env:TEMP = $buildTemp
+if ($Profile -eq 'Release') {
+    $pathSettings = Get-ReleasePathSettings $root
+    foreach ($entry in $pathSettings.environment.GetEnumerator()) {
+        [Environment]::SetEnvironmentVariable($entry.Key,$entry.Value,'Process')
+    }
+}
 if (!(Test-Path -LiteralPath (Join-Path $source '.git'))) {
     $peer = Join-Path (Join-Path $parent '.local') (Split-Path $source -Leaf)
     if (Test-Path -LiteralPath (Join-Path $peer '.git')) {
@@ -202,13 +209,13 @@ foreach ($entry in $options.GetEnumerator()) {
 }
 
 $settings = [ordered]@{}
-$settingsPattern = "^(CARGO_(PROFILE_${cargoProfile}_.*|BUILD_(RUST.*|TARGET)|TARGET_(?!DIR$).+|ENCODED_RUSTFLAGS|INCREMENTAL)|RUST(C|C_WRAPPER|C_WORKSPACE_WRAPPER|FLAGS)|RUSTY_V8_(ARCHIVE|MIRROR)|V8_FROM_SOURCE)$"
+$settingsPattern = "^(CARGO_(PROFILE_${cargoProfile}_.*|BUILD_(RUST.*|TARGET)|TARGET_(?!DIR$).+|ENCODED_RUSTFLAGS|INCREMENTAL)|RUST(C|C_WRAPPER|C_WORKSPACE_WRAPPER|FLAGS)|RUSTY_V8_(ARCHIVE|MIRROR)|V8_FROM_SOURCE|CFLAGS.*|CXXFLAGS.*|CC.*|CXX.*)$"
 Get-ChildItem Env: | Where-Object Name -Match $settingsPattern |
     Sort-Object Name | ForEach-Object { $settings[$_.Name] = Hash-Text $_.Value }
 $hashes = [ordered]@{}
 foreach ($file in @('native/SOURCE.json','native/patches/guardian-entry.patch','native/guardian-host/Cargo.toml',
         'native/guardian-host/src/main.rs','native/guardian-host/src/bootstrap.rs',
-        'scripts/Build-Guardian.ps1',$policyPath)) {
+        'scripts/Build-Guardian.ps1','scripts/Release-Paths.ps1',$policyPath)) {
     $hashes[$file] = Hash-File (Join-Path $root $file)
 }
 $testHashes = [ordered]@{
@@ -317,7 +324,7 @@ $manifest = [ordered]@{ version=$identity.version; protocol=$origin.protocol; up
     profile=$Profile; toolchain=$Toolchain; compiler=$compiler; cargoVersion=$cargoVersion; target=$target;
     sourceSha256=$hashes; testSourceSha256=$testHashes; resolvedCargoLockSha256=$lockHash; v8Commit=$origin.v8Commit; v8ArchiveSha256=$origin.v8ArchiveSha256;
     binarySha256=(Hash-File $built); buildKey=$buildKey; builtAt=[DateTime]::UtcNow.ToString('O');
-    cargoIncremental=$incremental; cargoTargetDir=$resolvedTargetDir; buildOptions=$options; releaseOptions=$options }
+    cargoIncremental=$incremental; cargoTargetDir=$resolvedTargetDir; buildPathRemapping=$(if ($Profile -eq 'Release') { 1 } else { 0 }); buildOptions=$options; releaseOptions=$options }
 foreach ($file in @('LICENSE','NOTICE')) {
     Copy-Item -LiteralPath (Join-Path $source $file) -Destination (Join-Path $output "UPSTREAM-$file") -Force
 }

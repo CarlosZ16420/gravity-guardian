@@ -23,6 +23,7 @@ $taskBundleGuardian = Get-Content -Encoding UTF8 -LiteralPath $taskGuardianManif
 if ($taskBundleGuardian.profile -cne 'Release') {
     throw "Refusing to package a non-Release Guardian build ($($taskBundleGuardian.profile)). Run .\scripts\Build.ps1 first."
 }
+if ($taskBundleGuardian.buildPathRemapping -ne 1) { throw 'Guardian cache predates release path remapping. Rebuild with Build.ps1 first.' }
 $taskVersion = (Get-Content -Encoding UTF8 -LiteralPath (Join-Path $taskBundle 'plugin.json') -Raw | ConvertFrom-Json).version
 $taskStage = Join-Path $taskRoot ('artifacts/releases/stage-' + [Guid]::NewGuid().ToString('N'))
 
@@ -41,6 +42,10 @@ foreach ($item in (Get-ChildItem -LiteralPath $taskBundle -Force)) {
 @{ type = $(if ($taskPortable) { 'standalone' } else { $Distribution }) } | ConvertTo-Json -Compress |
     Set-Utf8NoBom -LiteralPath (Join-Path $taskPackageBundle 'distribution.json')
 Copy-Item -LiteralPath (Join-Path $taskBundle 'app/GravityGuardian.exe') -Destination (Join-Path $taskRelease 'GravityGuardian.exe') -Force
+# Keep the full build location only in the local cache, never in distributed provenance.
+$taskPublicNative = Get-Content -LiteralPath (Join-Path $taskPackageBundle 'native/SOURCE.json') -Raw | ConvertFrom-Json
+$taskPublicNative.cargoTargetDir = 'build/native-target'
+$taskPublicNative | ConvertTo-Json -Depth 8 | Set-Utf8NoBom -LiteralPath (Join-Path $taskPackageBundle 'native/SOURCE.json')
 
 if (!$taskPortable) {
 New-Item -ItemType Directory -Path (Join-Path $taskRelease 'scripts') -Force | Out-Null
@@ -52,7 +57,7 @@ foreach ($taskName in @('Install.ps1','Uninstall.ps1','Review-Mode.ps1','Resolve
 $taskDocs = if ($taskPortable) { Join-Path $taskPackageBundle 'docs' } else { Join-Path $taskRelease 'docs' }
 New-Item -ItemType Directory -Path $taskDocs -Force | Out-Null
 Copy-Item -LiteralPath (Join-Path $taskRoot "docs/release-$taskVersion.md") -Destination $taskDocs
-foreach ($taskNote in @('guardian-0.172.0-validation.md', 'release-native-guardian.md', 'portable.md')) {
+foreach ($taskNote in @('guardian-0.172.0-validation.md', 'release-native-guardian.md', 'portable.md', 'packaging-runbook.md')) {
     Copy-Item -LiteralPath (Join-Path $taskRoot "docs/$taskNote") -Destination $taskDocs
 }
 
@@ -65,10 +70,19 @@ if ($taskPortable) {
 } else {
 foreach ($taskReadme in @('README.md', 'README.en.md')) {
     Copy-Item -LiteralPath (Join-Path $taskRoot $taskReadme) -Destination $taskRelease
+    $taskReadmePath = Join-Path $taskRelease $taskReadme
+    $taskReadmeText = [IO.File]::ReadAllText($taskReadmePath).Replace('src/AgApproval.Panel/assets/icon.svg','assets/readme/icon.svg')
+    [IO.File]::WriteAllText($taskReadmePath,$taskReadmeText,[Text.UTF8Encoding]::new($false))
 }
+Copy-Item -LiteralPath (Join-Path $taskRoot 'CHANGELOG.md') -Destination $taskRelease
+$taskReadmeAssets = Join-Path $taskRelease 'assets/readme'
+New-Item -ItemType Directory -Path $taskReadmeAssets -Force | Out-Null
+Copy-Item -Path (Join-Path $taskRoot 'assets/readme/*.png') -Destination $taskReadmeAssets
+Copy-Item -LiteralPath (Join-Path $taskRoot 'src/AgApproval.Panel/assets/icon.svg') -Destination (Join-Path $taskReadmeAssets 'icon.svg')
 Copy-Item -LiteralPath (Join-Path $taskRoot 'schemas') -Destination $taskRelease -Recurse
 }
 
+& (Join-Path $PSScriptRoot 'Check-ReleasePrivacy.ps1') -Directory $taskRelease -BuildRoot $taskRoot
 $taskReleaseFiles = @(Get-ChildItem -LiteralPath $taskRelease -Recurse -File -Force | Sort-Object FullName)
 $taskFiles = @($taskReleaseFiles | ForEach-Object {
     @{

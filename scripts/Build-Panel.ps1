@@ -3,6 +3,8 @@ param([switch]$SkipSelfTest)
 $ErrorActionPreference = 'Stop'
 
 $taskRoot = Split-Path $PSScriptRoot -Parent
+. (Join-Path $PSScriptRoot 'Release-Paths.ps1')
+$taskPathFlags = ((Get-ReleasePathSettings $taskRoot).msvcArguments | ForEach-Object { '"'+$_+'"' }) -join ' '
 $taskPanelSrc = Join-Path $taskRoot 'src/AgApproval.Panel'
 $taskOutDir = Join-Path $taskRoot '.local/panel-build'
 $taskBuildTemp = Join-Path $taskRoot '.local/build-temp'
@@ -46,7 +48,7 @@ call "$taskVcvars" >nul
 if errorlevel 1 exit /b 1
 rc /nologo /fo "$taskRes" "$taskRc"
 if errorlevel 1 exit /b 1
-cl /nologo /std:c++20 /O2 /MT /W4 /WX /EHsc /utf-8 /DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN /DNOMINMAX /Fo"$taskOutDir\\" /Fe"$taskExe" "$($taskSources[0])" "$($taskSources[1])" "$($taskSources[2])" "$taskRes" /link /Brepro /SUBSYSTEM:WINDOWS /MANIFEST:NO user32.lib gdi32.lib gdiplus.lib comctl32.lib shell32.lib advapi32.lib ole32.lib comdlg32.lib winhttp.lib bcrypt.lib dwmapi.lib
+cl /nologo /std:c++20 /O2 /MT /W4 /WX /EHsc /utf-8 $taskPathFlags /DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN /DNOMINMAX /Fo"$taskOutDir\\" /Fe"$taskExe" "$($taskSources[0])" "$($taskSources[1])" "$($taskSources[2])" "$taskRes" /link /Brepro /SUBSYSTEM:WINDOWS /MANIFEST:NO user32.lib gdi32.lib gdiplus.lib comctl32.lib shell32.lib advapi32.lib ole32.lib comdlg32.lib winhttp.lib bcrypt.lib dwmapi.lib
 if errorlevel 1 exit /b 1
 dumpbin /nologo /dependents "$taskExe"
 "@

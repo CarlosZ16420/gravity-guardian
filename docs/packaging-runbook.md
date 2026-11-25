@@ -59,6 +59,14 @@ node .\scripts\Test-NativePrompt.mjs .local\prompt-release
 
 ## 4. 发布与回退
 
+### 本地构建与云端构建
+
+两种方式使用相同的 `Build.ps1`、`Package.ps1` 和验收脚本，均可生成正式附件。云端可在 Actions 中手动运行 `Windows build`，或执行 `gh workflow run release.yml --ref main`，成功后下载 `gravity-guardian-windows-x64` 产物；本地执行上文完整构建与验收步骤后使用 `artifacts/` 内的产物。
+
+正式构建会统一映射 Rust、C/C++ 与 C# 的编译路径；发布包的 `native/SOURCE.json` 只保留中性的构建目录。`Package.ps1` 会扫描实际分发文件中的本机工作区、用户目录和 Cargo 目录（含二进制、UTF-16 和 JSON 转义形式），通过后才生成 ZIP 与校验清单。源码卫生检查和产物检查是两道独立门禁。旧 Guardian 缓存若未启用路径映射，需重新执行正式构建，不能直接打包。
+
+本地完整构建位置仅保留在 `.local/` 的构建缓存与日志中。禁止通过修改已编译二进制或跳过产物扫描来发布。两种方式均使用下面的 Release 草稿、附件校验与公开流程。
+
 在 GitHub Releases 为已验收提交准备对应的 `v<版本>` 草稿，附上三个 ZIP、`checksums.sha256` 和 `release-manifest.json`，使用该版本的发布说明。核对远端附件名称、大小和 SHA-256 与本地验收产物一致后再公开。GitHub Actions 会归档产物，发布草稿单独处理。
 
 遇到升级故障，先备份升级后新增的日志。使用上一次更新备份恢复插件、配置及安装元数据，确认旧服务运行并复验 PreToolUse。

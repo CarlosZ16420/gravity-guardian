@@ -1,5 +1,5 @@
 import { createServer } from 'node:http';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import { createInterface } from 'node:readline';
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -136,6 +136,11 @@ try {
         CARGO_INCREMENTAL: isDev ? '1' : '0',
     };
     const cargoProfilePrefix = isDev ? 'CARGO_PROFILE_DEV_' : 'CARGO_PROFILE_RELEASE_';
+    if (!isDev) {
+        const settings = spawnSync('pwsh', ['-NoProfile', '-File', join(root, 'scripts/Release-Paths.ps1'), '-PrintEnvironment', '-BuildRoot', root], {encoding:'utf8'});
+        assert.equal(settings.status, 0, 'release path settings failed: ' + settings.stderr);
+        Object.assign(env, JSON.parse(settings.stdout));
+    }
     for (const [key, value] of Object.entries(profile)) env[cargoProfilePrefix + key] = value;
     for (const name of ['OPENAI_API_KEY','CODEX_API_KEY','CODEX_ACCESS_TOKEN','CODEX_AUTH_TOKEN','HTTP_PROXY','HTTPS_PROXY','ALL_PROXY']) delete env[name];
     const cargoArgs = ['+stable', 'test', '--offline', '--locked'];
