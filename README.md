@@ -39,9 +39,22 @@ Gravity Steward 自带 Native Guardian，由它调用 `codex-auto-review` 模型
 
 ## 开发与开源
 
-构建需要 Windows x64、PowerShell 7、.NET 10 SDK、Node.js 22+、Rust stable 和 MSVC C++ 构建工具。
+构建需要 Windows x64、PowerShell 7、.NET 10 SDK、Node.js 22+、Rust stable 和 MSVC C++ 构建工具。所有构建产物与临时目录均保留在工作目录 `.local/` 下。
 
-版本准备、双包验收和发布步骤见 [Windows 打包与验收手册](docs/packaging-runbook.md)。
+日常本地修改（无需打包 ZIP，按需增量构建并直接更新本机）：
+
+```powershell
+.\scripts\Update-Local.ps1                       # 自动检测改动组件（复用已验证的 Guardian）并更新本机
+.\scripts\Update-Local.ps1 -Components Service   # 仅构建 C# 服务并更新本机
+.\scripts\Update-Local.ps1 -Components Panel     # 仅构建 C++ 面板并更新本机
+.\scripts\Update-Local.ps1 -Components Guardian  # 使用 Rust Dev 配置快速增量构建 Guardian 并更新本机
+.\scripts\Update-Local.ps1 -BuildOnly            # 仅构建到 artifacts/codex-approval，不安装
+node .\scripts\Test-NativePrompt.mjs .local\prompt-dev --dev
+```
+
+正式发布构建、双包打包与验收步骤见 [Windows 打包与验收手册](docs/packaging-runbook.md)。
+
+版本变化和 0.6.5 本地修订的验证及构建耗时见[变更记录](CHANGELOG.md)。
 
 ```powershell
 .\scripts\Build.ps1

@@ -5,7 +5,8 @@ $ErrorActionPreference = 'Stop'
 $taskRoot = Split-Path $PSScriptRoot -Parent
 $taskPanelSrc = Join-Path $taskRoot 'src/AgApproval.Panel'
 $taskOutDir = Join-Path $taskRoot '.local/panel-build'
-New-Item -ItemType Directory -Path $taskOutDir -Force | Out-Null
+$taskBuildTemp = Join-Path $taskRoot '.local/build-temp'
+New-Item -ItemType Directory -Path $taskOutDir, $taskBuildTemp -Force | Out-Null
 
 # Locate MSVC BuildTools vcvars64.bat
 $taskVcvarsCandidates = @(
@@ -39,6 +40,8 @@ $taskSources = @(
 $taskCmdContent = @"
 @echo off
 setlocal
+set "TMP=$taskBuildTemp"
+set "TEMP=$taskBuildTemp"
 call "$taskVcvars" >nul
 if errorlevel 1 exit /b 1
 rc /nologo /fo "$taskRes" "$taskRc"

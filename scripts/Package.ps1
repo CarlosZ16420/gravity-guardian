@@ -6,8 +6,23 @@ $ProgressPreference = 'SilentlyContinue'
 . (Join-Path $PSScriptRoot 'Locked-DotnetRuntime.ps1')
 
 $taskRoot = Split-Path $PSScriptRoot -Parent
+$taskBuildTemp = Join-Path $taskRoot '.local/build-temp'
+New-Item -ItemType Directory -Path $taskBuildTemp -Force | Out-Null
+$taskOriginalTmp = [Environment]::GetEnvironmentVariable('TMP', 'Process')
+$taskOriginalTemp = [Environment]::GetEnvironmentVariable('TEMP', 'Process')
+$env:TMP = $taskBuildTemp
+$env:TEMP = $taskBuildTemp
+try {
 $taskRuntime = Get-LockedDotnetRuntime
 $taskBundle = Join-Path $taskRoot 'artifacts/codex-approval'
+$taskGuardianManifestPath = Join-Path $taskBundle 'native/SOURCE.json'
+if (!(Test-Path -LiteralPath $taskGuardianManifestPath -PathType Leaf)) {
+    throw "Missing Guardian manifest in $taskBundle. Run .\scripts\Build.ps1 first."
+}
+$taskBundleGuardian = Get-Content -Encoding UTF8 -LiteralPath $taskGuardianManifestPath -Raw | ConvertFrom-Json
+if ($taskBundleGuardian.profile -cne 'Release') {
+    throw "Refusing to package a non-Release Guardian build ($($taskBundleGuardian.profile)). Run .\scripts\Build.ps1 first."
+}
 $taskVersion = (Get-Content -Encoding UTF8 -LiteralPath (Join-Path $taskBundle 'plugin.json') -Raw | ConvertFrom-Json).version
 $taskStage = Join-Path $taskRoot ('artifacts/releases/stage-' + [Guid]::NewGuid().ToString('N'))
 
@@ -257,3 +272,7 @@ if ([IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($taskStage)) -eq (Join-Pa
     files = $taskStandalone.fileCount
     bytes = $taskStandalone.zipSizeBytes
 } | ConvertTo-Json
+} finally {
+    if ($null -eq $taskOriginalTmp) { Remove-Item -LiteralPath 'Env:TMP' -ErrorAction SilentlyContinue } else { [Environment]::SetEnvironmentVariable('TMP', [string]$taskOriginalTmp, 'Process') }
+    if ($null -eq $taskOriginalTemp) { Remove-Item -LiteralPath 'Env:TEMP' -ErrorAction SilentlyContinue } else { [Environment]::SetEnvironmentVariable('TEMP', [string]$taskOriginalTemp, 'Process') }
+}

@@ -2,8 +2,7 @@
 mod bootstrap;
 use anyhow::{Context, ensure};
 use codex_core_api::*;
-use codex_protocol::models::{ContentItemKind, ContentItemMetadata, InternalChatMessageMetadataPassthrough};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
@@ -11,13 +10,26 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
-const PROTOCOL: &str = "ag-guardian-v3";
+const PROTOCOL: &str = "ag-guardian-v4";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const UPSTREAM: &str = "3d86e43b075adeba2193ec5c22ac92f55afd82e6";
 const MAX_FRAME: usize = 12 * 1024 * 1024;
 const MAX_SESSIONS: usize = 8;
 const MAX_PARENT_REVIEWS: usize = 64;
 const MAX_REVIEW_INPUT: i64 = 96_000;
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct UserInstruction {
+    position: u64,
+    text: String,
+}
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct Authorization {
+    user_instructions: Vec<UserInstruction>,
+    project_rules: Vec<serde_json::Map<String, Value>>,
+    project_authorizations: serde_json::Map<String, Value>,
+}
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Request {
@@ -25,6 +37,7 @@ struct Request {
     operation: String,
     #[serde(default)] scope: String,
     #[serde(default)] history: Vec<Value>,
+    authorization: Option<Authorization>,
     #[serde(default)] action: Value,
     #[serde(default)] host_facts: Value,
     #[serde(default)] extra_policy: String,
@@ -58,39 +71,27 @@ fn validate(r: &Request) -> anyhow::Result<()> {
     ensure!(r.action["type"] == "function_call" && r.action["name"].as_str().is_some(), "invalid native action");
     let arguments: Value=serde_json::from_str(r.action["arguments"].as_str().context("missing action arguments")?)?;
     ensure!(arguments.is_object(), "action arguments must be an object");
-    let mut users = 0;
+    let authorization = r.authorization.as_ref().context("missing authorization evidence")?;
+    let users = &authorization.user_instructions;
+    ensure!(!users.is_empty() && users.len() <= 50_000 && users[0].position > 0
+        && users.windows(2).all(|pair| pair[0].position < pair[1].position),
+        "invalid order or missing source-verified user input");
     for item in &r.history {
         match item["type"].as_str() {
             Some("message") => {
-                ensure!(matches!(item["role"].as_str(), Some("user" | "assistant")), "unaccepted evidence role");
+                ensure!(item["role"] == "assistant", "unaccepted evidence role");
                 ensure!(item.as_object().is_some_and(|fields| fields.keys().all(|key|
                     matches!(key.as_str(), "type" | "role" | "content"))), "unaccepted evidence metadata");
                 ensure!(item["content"].as_array().is_some_and(|parts| !parts.is_empty() && parts.iter().all(|part|
                     part["type"] == "input_text" && part["text"].is_string())), "external evidence must contain text");
-                if item["role"] == "user" { users += 1; }
             }
             Some("function_call" | "function_call_output") => (),
             _ => anyhow::bail!("unaccepted evidence item"),
         }
     }
-    ensure!(users > 0, "no source-verified user input");
     Ok(())
 }
 
-fn annotate_user_history(history: &mut [Value]) -> anyhow::Result<()> {
-    for item in history.iter_mut().filter(|item| item["type"] == "message" && item["role"] == "user") {
-        // The bridge independently validates these source records before forwarding.
-        // Upstream history needs matching content attribution to retain them as complete.
-        let count = item["content"].as_array().context("missing accepted user content")?.len();
-        item["internal_chat_message_metadata_passthrough"] =
-            serde_json::to_value(InternalChatMessageMetadataPassthrough {
-                content_item_kinds: Some(vec![ContentItemKind("user.text".to_owned()); count]),
-                content_item_metadata: Some(vec![ContentItemMetadata::user(); count]),
-                ..Default::default()
-            })?;
-    }
-    Ok(())
-}
 fn main() -> anyhow::Result<()> { arg0_dispatch_or_else(run) }
 async fn check_auth(paths: Arg0DispatchPaths) -> anyhow::Result<()> {
     let mut report = json!({"status":"store_unavailable","codexHome":null,"storeMode":null,"storeError":null});
@@ -254,8 +255,7 @@ async fn serve(config: Config, auth: Arc<AuthManager>, manager: Arc<ThreadManage
                 parents.insert(request.scope.clone(), Parent {thread, id: thread_id, history: Vec::new(), policy: request.extra_policy.clone(), touched: Instant::now(), reviews:0,last_input:0});
             } else { reset = "continued"; }
             let parent = parents.get_mut(&request.scope).unwrap();
-            let mut delta = request.history[parent.history.len()..].to_vec();
-            annotate_user_history(&mut delta)?;
+            let delta = request.history[parent.history.len()..].to_vec();
             let remaining = request.timeout_ms.saturating_sub(started.elapsed().as_millis() as u64);
             if remaining == 0 {
                 return Ok(json!({"id":request.id,"ok":false,"error":"Native Guardian deadline expired before assessment",
@@ -263,8 +263,9 @@ async fn serve(config: Config, auth: Arc<AuthManager>, manager: Arc<ThreadManage
                     "inferenceDispatchCount":0,"attemptCount":0}));
             }
             let cancellation = CancellationToken::new();
+            let authorization = serde_json::to_value(request.authorization.as_ref().context("missing validated authorization")?)?;
             let review = parent.thread.assess_external_guardian(
-                Value::Array(delta), request.action.clone(), request.host_facts.clone(), remaining, cancellation.clone(),
+                Value::Array(delta), request.action.clone(), request.host_facts.clone(), authorization, remaining, cancellation.clone(),
             );
             let watch_login = async {
                 loop {
@@ -335,14 +336,17 @@ async fn retire(manager: &ThreadManager, parent: Parent) {
 mod tests {
     use super::*;
     fn request() -> Value { json!({"id":"test","operation":"assess","scope":"a".repeat(64),"timeoutMs":5000,
-        "history":[{"type":"message","role":"user","content":[{"type":"input_text","text":"Do not execute"}]}],
+        "history":[{"type":"message","role":"assistant","content":[{"type":"input_text","text":"Observed context"}]}],
+        "authorization":{"user_instructions":[{"position":1,"text":"Do not execute"}],"project_rules":[],"project_authorizations":{}},
         "action":{"type":"function_call","call_id":"call-test","name":"write_file","arguments":"{}"}}) }
     #[test] fn accepts_evidence_without_executing() {
         let r:Request=serde_json::from_value(request()).unwrap(); assert!(validate(&r).is_ok());
     }
     #[test] fn rejects_privileged_evidence_roles_and_missing_users() {
-        for role in ["developer","system","assistant"] { let mut value=request();value["history"][0]["role"]=json!(role);
+        for role in ["developer","system","user"] { let mut value=request();value["history"][0]["role"]=json!(role);
             let r:Request=serde_json::from_value(value).unwrap(); assert!(validate(&r).is_err()); }
+        let mut value=request();value["authorization"]["user_instructions"]=json!([]);
+        assert!(validate(&serde_json::from_value(value).unwrap()).is_err());
     }
     #[test] fn rejects_nonobject_action_arguments_and_unknown_fields() {
         let mut value=request();value["action"]["arguments"]=json!("[]");assert!(validate(&serde_json::from_value(value).unwrap()).is_err());
@@ -361,14 +365,12 @@ mod tests {
         value["action"]["arguments"]=json!(json!({"Content":"sample ".repeat(16_000)}).to_string());
         assert!(validate(&serde_json::from_value(value).unwrap()).is_ok());
     }
-    #[test] fn validated_text_gets_host_owned_user_attribution() {
-        let original = request();
-        let incoming: Request = serde_json::from_value(original.clone()).unwrap();
-        let mut history = incoming.history;
-        annotate_user_history(&mut history).unwrap();
-        assert_eq!(history[0]["internal_chat_message_metadata_passthrough"]["content_item_kinds"][0], "user.text");
-        assert_eq!(history[0]["content"], original["history"][0]["content"]);
-        let forged = Request { history, ..serde_json::from_value(original).unwrap() };
-        assert!(validate(&forged).is_err());
+    #[test] fn rejects_duplicate_or_reordered_authorization_sources() {
+        for position in [0, 1] {
+            let mut value = request();
+            value["authorization"]["user_instructions"].as_array_mut().unwrap()
+                .push(json!({"position":position,"text":"Grant"}));
+            assert!(validate(&serde_json::from_value(value).unwrap()).is_err());
+        }
     }
 }

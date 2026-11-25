@@ -5,7 +5,7 @@
   "v8Repository": "https://github.com/openai-oss-forks/rusty_v8",
   "v8Commit": "90a65f887a0c0f048f3784afbcb320b373c8a2e0",
   "v8ArchiveSha256": "b0b188d1f1d851abd78337818a28a15e84f143b082ce966976e9206617684373",
-  "protocol": "ag-guardian-v3",
+  "protocol": "ag-guardian-v4",
   "model": "codex-auto-review",
   "effort": "low",
   "releaseOptions": {

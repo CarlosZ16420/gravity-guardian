@@ -62,7 +62,8 @@ for (const [requestId, records] of requests) {
     if (!fallback && !manual) continue;
     const visibleEvidence = {
         authenticatedUserRecordIds: completed?.authorizationSources ?? [],
-        completeUserRecordsCaptured: Boolean(context?.user_instructions?.length || host?.history?.some(row => row.role === 'user')),
+        completeUserRecordsCaptured: Boolean(context?.user_instructions?.length ||
+            host?.authorization?.user_instructions?.length || host?.history?.some(row => row.role === 'user')),
         nativeWireCaptured: Boolean(host),
         actionBodyCaptured: Boolean(received?.payload?.toolCall?.args || context?.planned_action?.toolCall?.args || host?.action?.arguments),
         permissionSnapshotCaptured: Boolean(context?.permission_context || host?.hostFacts?.permission_context),

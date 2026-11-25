@@ -18,8 +18,9 @@ async fn final_native_prompt_roundtrip() -> anyhow::Result<()> {
     let (auth, manager) = start_host(&config).await?;
     ensure!(auth.auth_cached().is_some(), "test credential was not loaded");
 
-    let mut history = fixture["history"].as_array().context("missing history")?.clone();
-    annotate_user_history(&mut history)?;
+    let request: Request = serde_json::from_value(fixture)?;
+    validate(&request)?;
+    let authorization = serde_json::to_value(request.authorization.as_ref().context("missing fixture authorization")?)?;
     let repetitions = std::env::var("AG_TEST_PROMPT_REPETITIONS")
         .ok().and_then(|value| value.parse::<usize>().ok()).unwrap_or(1);
     ensure!((1..=50).contains(&repetitions), "invalid fixture repetition count");
@@ -27,7 +28,7 @@ async fn final_native_prompt_roundtrip() -> anyhow::Result<()> {
         let NewThread { thread_id, thread, .. } = manager.start_thread(StartThreadOptions::new(config.clone())).await?;
         let started = Instant::now();
         let result = thread.assess_external_guardian(
-            json!(history), fixture["action"].clone(), json!({"fixture": true}), 15_000,
+            json!(request.history), request.action.clone(), json!({"fixture": true}), authorization.clone(), 15_000,
             CancellationToken::new(),
         ).await;
         println!("native_review_ms={:.3}", started.elapsed().as_secs_f64() * 1000.0);
@@ -38,5 +39,17 @@ async fn final_native_prompt_roundtrip() -> anyhow::Result<()> {
         ensure!(result["inferenceDispatchCount"] == 1, "expected exactly one inference");
         ensure!(result["actionExecuted"] == false && result["approvalPublished"] == false, "unexpected side effect");
     }
+    let mut oversized = authorization;
+    oversized["user_instructions"][0]["text"] = json!("complete authorization evidence ".repeat(55_000));
+    let NewThread { thread_id, thread, .. } = manager.start_thread(StartThreadOptions::new(config)).await?;
+    let failure = thread.assess_external_guardian(
+        json!(request.history), request.action, json!({"fixture": true}), oversized, 15_000,
+        CancellationToken::new(),
+    ).await;
+    retire(&manager, Parent { thread, id: thread_id, history: Vec::new(), policy: String::new(),
+        touched: Instant::now(), reviews: 0, last_input: 0 }).await;
+    let failure = failure?;
+    ensure!(failure["failure"]["reasonCode"] == "review_authorization_budget_exceeded"
+        && failure["inferenceDispatchCount"] == 0, "oversized authorization reached inference: {failure}");
     Ok(())
 }

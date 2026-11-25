@@ -1,26 +1,33 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('Release','Debug')][string]$Profile='Release',
+    [ValidateSet('Release','Debug','Dev')][string]$Profile='Release',
     [string]$Toolchain='stable',
     [ValidateSet('Default','Baseline','Symbols','Thin','ThinSingleUnit','ThinSize')][string]$ReleaseTuning='Default',
     [switch]$Offline,
-    [switch]$ForceBuild
+    [switch]$ForceBuild,
+    [switch]$PrintCacheKey,
+    [switch]$SyncWorkspaceOnly
 )
 $ErrorActionPreference='Stop'
 . (Join-Path $PSScriptRoot 'Review-Mode.ps1')
+if ($Profile -eq 'Dev') { $Profile = 'Debug' }
 $root = Split-Path $PSScriptRoot -Parent
 $parent = Split-Path $root -Parent
 $origin = Get-Content -LiteralPath (Join-Path $root 'native/SOURCE.json') -Raw | ConvertFrom-Json
 $policyPath = 'policy/upstream-codex/SOURCE.json'
 $policy = Get-Content -LiteralPath (Join-Path $root $policyPath) -Raw | ConvertFrom-Json
 $local = Join-Path $root '.local'
+$buildTemp = Join-Path $local 'build-temp'
 $source = Join-Path $local ('guardian-host-upstream-' + $origin.commit)
-$output = if ($ReleaseTuning -eq 'Default') {
+$output = if ($Profile -eq 'Debug') {
+    if ($ReleaseTuning -ne 'Default') { throw 'Release tuning requires the Release profile' }
+    Join-Path $local 'guardian-host-dev'
+} elseif ($ReleaseTuning -eq 'Default') {
     Join-Path $local 'guardian-host-build'
 } else {
-    if ($Profile -ne 'Release') { throw 'Release tuning requires the Release profile' }
     Join-Path $local "guardian-profiles/$ReleaseTuning"
 }
+$defaultTargetDir = Join-Path $local $(if ($Profile -eq 'Release') { 'native-release-target' } else { 'native-build-target' })
 $patch = Join-Path $root 'native/patches/guardian-entry.patch'
 $target = 'x86_64-pc-windows-msvc'
 $name = 'ag-guardian-host'
@@ -31,10 +38,24 @@ function Hash-File($path) { (Get-FileHash -LiteralPath $path -Algorithm SHA256).
 function Hash-Text([string]$value) {
     [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($utf8.GetBytes($value))).ToLowerInvariant()
 }
+function Normalize-DirectoryPath([string]$path) {
+    $full = [IO.Path]::GetFullPath($path)
+    $volumeRoot = [IO.Path]::GetPathRoot($full)
+    if ($full.Length -gt $volumeRoot.Length) { return $full.TrimEnd('\', '/') }
+    return $full
+}
 function Write-BuildInput($path, $value) {
     if (!(Test-Path -LiteralPath $path) -or [IO.File]::ReadAllText($path) -cne $value) {
         [IO.File]::WriteAllText($path, $value, $utf8)
     }
+}
+function Sync-FileIfChanged([string]$sourcePath, [string]$destinationPath) {
+    $destDir = Split-Path $destinationPath -Parent
+    if (!(Test-Path -LiteralPath $destDir)) { New-Item -ItemType Directory -Path $destDir -Force | Out-Null }
+    if ((Test-Path -LiteralPath $destinationPath -PathType Leaf) -and ((Hash-File $sourcePath) -ceq (Hash-File $destinationPath))) {
+        return
+    }
+    Copy-Item -LiteralPath $sourcePath -Destination $destinationPath -Force
 }
 function Invoke-SourceGit {
     & git -C $source -c core.longpaths=true -c core.autocrlf=false -c "safe.directory=$source" @args
@@ -55,7 +76,7 @@ function Test-HostCache($dir) {
     }
     try {
         $saved = Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json
-        if ($saved.buildKey -cne $buildKey -or $saved.resolvedCargoLockSha256 -cne $lockHash -or $saved.binarySha256 -cne (Hash-File $binary)) { return $false }
+        if ($saved.profile -cne $Profile -or $saved.buildKey -cne $buildKey -or $saved.resolvedCargoLockSha256 -cne $lockHash -or $saved.binarySha256 -cne (Hash-File $binary)) { return $false }
         $identity = Read-HostIdentity $binary
         return $identity.version -ceq $saved.version -and $saved.hostCommit -ceq $origin.commit -and $saved.policySourceCommit -ceq $policy.commit
     } catch {
@@ -64,7 +85,36 @@ function Test-HostCache($dir) {
     }
 }
 
-New-Item -ItemType Directory -Path $local,$output -Force | Out-Null
+$options = if ($Profile -eq 'Release') {
+    $release = [ordered]@{ OPT_LEVEL='2'; LTO='false'; CODEGEN_UNITS='16'; DEBUG='0'; STRIP='none'; PANIC='unwind' }
+    switch ($ReleaseTuning) {
+        'Default' {
+            foreach ($property in $origin.releaseOptions.PSObject.Properties) { $release[$property.Name] = [string]$property.Value }
+        }
+        'Symbols' { $release.STRIP = 'symbols' }
+        'Thin' { $release.LTO = 'thin'; $release.STRIP = 'symbols' }
+        'ThinSingleUnit' { $release.LTO = 'thin'; $release.STRIP = 'symbols'; $release.CODEGEN_UNITS = '1' }
+        'ThinSize' { $release.LTO = 'thin'; $release.STRIP = 'symbols'; $release.OPT_LEVEL = 's' }
+    }
+    $release
+} else {
+    [ordered]@{ OPT_LEVEL='0'; LTO='off'; CODEGEN_UNITS='256'; DEBUG='0'; STRIP='none'; PANIC='unwind' }
+}
+$cargoProfile = if ($Profile -eq 'Release') { 'RELEASE' } else { 'DEV' }
+$incremental = if ($Profile -eq 'Release') { '0' } else { '1' }
+$savedEnv = [ordered]@{}
+foreach ($envName in @('TMP','TEMP','CARGO_TARGET_DIR','CARGO_INCREMENTAL')) {
+    $savedEnv[$envName] = [Environment]::GetEnvironmentVariable($envName, 'Process')
+}
+foreach ($entry in $options.GetEnumerator()) {
+    $profileVar = 'CARGO_PROFILE_' + $cargoProfile + '_' + $entry.Key
+    $savedEnv[$profileVar] = [Environment]::GetEnvironmentVariable($profileVar, 'Process')
+}
+
+try {
+New-Item -ItemType Directory -Path $local,$buildTemp -Force | Out-Null
+$env:TMP = $buildTemp
+$env:TEMP = $buildTemp
 if (!(Test-Path -LiteralPath (Join-Path $source '.git'))) {
     $peer = Join-Path (Join-Path $parent '.local') (Split-Path $source -Leaf)
     if (Test-Path -LiteralPath (Join-Path $peer '.git')) {
@@ -143,41 +193,53 @@ $compiler = (& rustc "+$Toolchain" --version --verbose) -join $lf
 if ($LASTEXITCODE -ne 0 -or !$compiler) { throw 'Cannot resolve the actual Rust toolchain' }
 $cargoVersion = & cargo "+$Toolchain" --version
 if ($LASTEXITCODE -ne 0) { throw 'Cannot resolve the actual Cargo version' }
-$options = if ($Profile -eq 'Release') {
-    $release = [ordered]@{ OPT_LEVEL='2'; LTO='false'; CODEGEN_UNITS='16'; DEBUG='0'; STRIP='none'; PANIC='unwind' }
-    switch ($ReleaseTuning) {
-        'Default' {
-            foreach ($property in $origin.releaseOptions.PSObject.Properties) { $release[$property.Name] = [string]$property.Value }
-        }
-        'Symbols' { $release.STRIP = 'symbols' }
-        'Thin' { $release.LTO = 'thin'; $release.STRIP = 'symbols' }
-        'ThinSingleUnit' { $release.LTO = 'thin'; $release.STRIP = 'symbols'; $release.CODEGEN_UNITS = '1' }
-        'ThinSize' { $release.LTO = 'thin'; $release.STRIP = 'symbols'; $release.OPT_LEVEL = 's' }
-    }
-    $release
-} else { [ordered]@{ DEBUG='0' } }
-$cargoProfile = if ($Profile -eq 'Release') { 'RELEASE' } else { 'DEV' }
+
+$resolvedTargetDir = Normalize-DirectoryPath $(if ([string]::IsNullOrWhiteSpace($env:CARGO_TARGET_DIR)) { $defaultTargetDir } else { $env:CARGO_TARGET_DIR })
+$env:CARGO_TARGET_DIR = $resolvedTargetDir
+$env:CARGO_INCREMENTAL = $incremental
 foreach ($entry in $options.GetEnumerator()) {
     [Environment]::SetEnvironmentVariable(('CARGO_PROFILE_' + $cargoProfile + '_' + $entry.Key),$entry.Value,'Process')
 }
-$env:CARGO_INCREMENTAL='0'
+
 $settings = [ordered]@{}
-Get-ChildItem Env: | Where-Object Name -Match '^(CARGO_(PROFILE_.*|BUILD_(RUST.*|TARGET)|TARGET_.*|ENCODED_RUSTFLAGS|INCREMENTAL)|RUST(C|C_WRAPPER|C_WORKSPACE_WRAPPER|FLAGS)|RUSTY_V8_(ARCHIVE|MIRROR)|V8_FROM_SOURCE)$' |
+$settingsPattern = "^(CARGO_(PROFILE_${cargoProfile}_.*|BUILD_(RUST.*|TARGET)|TARGET_(?!DIR$).+|ENCODED_RUSTFLAGS|INCREMENTAL)|RUST(C|C_WRAPPER|C_WORKSPACE_WRAPPER|FLAGS)|RUSTY_V8_(ARCHIVE|MIRROR)|V8_FROM_SOURCE)$"
+Get-ChildItem Env: | Where-Object Name -Match $settingsPattern |
     Sort-Object Name | ForEach-Object { $settings[$_.Name] = Hash-Text $_.Value }
 $hashes = [ordered]@{}
 foreach ($file in @('native/SOURCE.json','native/patches/guardian-entry.patch','native/guardian-host/Cargo.toml',
-        'native/guardian-host/src/main.rs','native/guardian-host/src/bootstrap.rs','native/guardian-host/src/offline_prompt_tests.rs',
+        'native/guardian-host/src/main.rs','native/guardian-host/src/bootstrap.rs',
         'scripts/Build-Guardian.ps1',$policyPath)) {
     $hashes[$file] = Hash-File (Join-Path $root $file)
 }
+$testHashes = [ordered]@{
+    'native/guardian-host/src/offline_prompt_tests.rs' = Hash-File (Join-Path $root 'native/guardian-host/src/offline_prompt_tests.rs')
+}
 $buildKey = Hash-Text ([ordered]@{ profile=$Profile; compiler=$compiler; cargoVersion=$cargoVersion; target=$target;
     sourceSha256=$hashes; resolvedCargoLockSha256=$lockHash; options=$options; settings=$settings } | ConvertTo-Json -Depth 8 -Compress)
-if (!$ForceBuild -and (Test-HostCache $output)) {
+if ($PrintCacheKey) {
+    [ordered]@{
+        profile = $Profile
+        releaseTuning = $ReleaseTuning
+        outputDirectory = $output
+        cargoTargetDir = $resolvedTargetDir
+        cargoIncremental = $incremental
+        options = $options
+        settings = $settings
+        sourceSha256 = $hashes
+        testSourceSha256 = $testHashes
+        buildKey = $buildKey
+        cacheHit = (Test-HostCache $output)
+    } | ConvertTo-Json -Depth 8
+    return
+}
+if (!$SyncWorkspaceOnly -and !$ForceBuild -and (Test-HostCache $output)) {
     Write-Host "Verified native build: $(Join-Path $output $exe)"
     return
 }
-$parentOutput = Join-Path $parent '.local/guardian-host-build'
-if (!$ForceBuild -and (Test-HostCache $parentOutput)) {
+$parentOutputDirName = if ($Profile -eq 'Release') { 'guardian-host-build' } else { 'guardian-host-dev' }
+$parentOutput = Join-Path $parent ".local/$parentOutputDirName"
+if (!$SyncWorkspaceOnly -and !$ForceBuild -and $ReleaseTuning -eq 'Default' -and (Test-HostCache $parentOutput)) {
+    New-Item -ItemType Directory -Path $output -Force | Out-Null
     foreach ($file in @($exe,'UPSTREAM-LICENSE','UPSTREAM-NOTICE','SOURCE.json')) {
         Copy-Item -LiteralPath (Join-Path $parentOutput $file) -Destination $output -Force
     }
@@ -185,39 +247,57 @@ if (!$ForceBuild -and (Test-HostCache $parentOutput)) {
     return
 }
 
-$archiveName = 'rusty-v8-' + $origin.v8Commit + '.tar.gz'
-$archive = Join-Path $local $archiveName
-if (!(Test-Path -LiteralPath $archive)) {
-    $parentArchive = Join-Path $parent ".local/$archiveName"
-    if (Test-Path -LiteralPath $parentArchive -PathType Leaf) {
-        $archive = $parentArchive
-    } else {
-        if ($Offline) { throw 'Pinned V8 archive is not cached' }
-        $repoPath = ([Uri]$origin.v8Repository).AbsolutePath.Trim('/')
-        $download = $archive + '.' + [Guid]::NewGuid().ToString('N') + '.tmp'
-        Invoke-WebRequest -Uri "https://codeload.github.com/$repoPath/tar.gz/$($origin.v8Commit)" -OutFile $download
-        if ((Hash-File $download) -cne $origin.v8ArchiveSha256) { throw 'V8 download SHA-256 mismatch' }
-        Move-Item -LiteralPath $download -Destination $archive
+$v8Root = Join-Path $local 'guardian-v8-source'
+$v8Stable = Join-Path $v8Root ('rusty_v8-' + $origin.v8Commit)
+$v8Marker = Join-Path $v8Stable '.archive-sha256'
+$v8Ready = (Test-Path -LiteralPath (Join-Path $v8Stable 'Cargo.toml') -PathType Leaf) -and
+    (Test-Path -LiteralPath $v8Marker -PathType Leaf) -and
+    ([IO.File]::ReadAllText($v8Marker).Trim() -ceq $origin.v8ArchiveSha256)
+if (!$v8Ready) {
+    $archiveName = 'rusty-v8-' + $origin.v8Commit + '.tar.gz'
+    $archive = Join-Path $local $archiveName
+    if (!(Test-Path -LiteralPath $archive)) {
+        $parentArchive = Join-Path $parent ".local/$archiveName"
+        if (Test-Path -LiteralPath $parentArchive -PathType Leaf) {
+            $archive = $parentArchive
+        } else {
+            if ($Offline) { throw 'Pinned V8 archive is not cached' }
+            $repoPath = ([Uri]$origin.v8Repository).AbsolutePath.Trim('/')
+            $download = $archive + '.' + [Guid]::NewGuid().ToString('N') + '.tmp'
+            Invoke-WebRequest -Uri "https://codeload.github.com/$repoPath/tar.gz/$($origin.v8Commit)" -OutFile $download
+            if ((Hash-File $download) -cne $origin.v8ArchiveSha256) { throw 'V8 download SHA-256 mismatch' }
+            Move-Item -LiteralPath $download -Destination $archive
+        }
+    }
+    if ((Hash-File $archive) -cne $origin.v8ArchiveSha256) { throw 'V8 archive SHA-256 mismatch' }
+    $v8Stage = Join-Path $v8Root ('.stage-' + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $v8Stage -Force | Out-Null
+    try {
+        & tar -xf $archive -C $v8Stage
+        if ($LASTEXITCODE -ne 0) { throw 'V8 source extraction failed' }
+        $v8Extracted = Join-Path $v8Stage ('rusty_v8-' + $origin.v8Commit)
+        if (!(Test-Path -LiteralPath (Join-Path $v8Extracted 'Cargo.toml') -PathType Leaf)) { throw 'Unexpected V8 archive layout' }
+        if (Test-Path -LiteralPath $v8Stable) { Remove-Item -LiteralPath $v8Stable -Recurse -Force }
+        [IO.File]::WriteAllText((Join-Path $v8Extracted '.archive-sha256'), $origin.v8ArchiveSha256, $utf8)
+        Move-Item -LiteralPath $v8Extracted -Destination $v8Stable
+    } finally {
+        if (Test-Path -LiteralPath $v8Stage) { Remove-Item -LiteralPath $v8Stage -Recurse -Force -ErrorAction SilentlyContinue }
     }
 }
-if ((Hash-File $archive) -cne $origin.v8ArchiveSha256) { throw 'V8 archive SHA-256 mismatch' }
-$stage = Join-Path $local ('guardian-v8-source/' + [Guid]::NewGuid().ToString('N'))
-New-Item -ItemType Directory -Path $stage -Force | Out-Null
-& tar -xf $archive -C $stage
-if ($LASTEXITCODE -ne 0) { throw 'V8 source extraction failed' }
-$v8 = (Join-Path $stage ('rusty_v8-' + $origin.v8Commit)).Replace('\','/')
-if (!(Test-Path -LiteralPath (Join-Path $v8 'Cargo.toml') -PathType Leaf)) { throw 'Unexpected V8 archive layout' }
+$v8 = $v8Stable.Replace('\','/')
 $cargo = $cargo.Replace($v8Pin,('v8 = { path = "' + $v8 + '" }')).Replace($sample,($sample + $lf + '    "ag-guardian-host",'))
 Write-BuildInput (Join-Path $workspace 'Cargo.toml') $cargo
 $hostDirectory = Join-Path $workspace $name
 New-Item -ItemType Directory -Path (Join-Path $hostDirectory 'src') -Force | Out-Null
 foreach ($file in @('Cargo.toml','src/main.rs','src/bootstrap.rs','src/offline_prompt_tests.rs')) {
-    Copy-Item -LiteralPath (Join-Path $hostSource $file) -Destination (Join-Path $hostDirectory $file) -Force
+    Sync-FileIfChanged (Join-Path $hostSource $file) (Join-Path $hostDirectory $file)
 }
-if (!$env:CARGO_TARGET_DIR) {
-    $env:CARGO_TARGET_DIR = Join-Path $local $(if ($Profile -eq 'Release') {'native-release-target'} else {'native-build-target'})
+if ($SyncWorkspaceOnly) {
+    Write-Host "Synced Guardian workspace: $workspace"
+    return
 }
-$env:CARGO_TARGET_DIR = [IO.Path]::GetFullPath($env:CARGO_TARGET_DIR)
+
+New-Item -ItemType Directory -Path $output -Force | Out-Null
 Push-Location $workspace
 try {
     $arguments = @("+$Toolchain",'build','--locked','--target',$target,'-p',$name)
@@ -226,7 +306,7 @@ try {
     & cargo @arguments
     if ($LASTEXITCODE -ne 0) { throw 'Native Guardian build failed' }
 } finally { Pop-Location }
-$built = Join-Path $env:CARGO_TARGET_DIR "$target/$($Profile.ToLowerInvariant())/$exe"
+$built = Join-Path $resolvedTargetDir "$target/$($Profile.ToLowerInvariant())/$exe"
 $identity = Read-HostIdentity $built
 if ((Hash-File $lockPath) -cne $lockHash) { throw 'Cargo modified the pinned lockfile' }
 foreach ($file in $hashes.Keys) {
@@ -235,11 +315,21 @@ foreach ($file in $hashes.Keys) {
 $manifest = [ordered]@{ version=$identity.version; protocol=$origin.protocol; upstreamCommit=$origin.commit;
     hostCommit=$origin.commit; policySourceCommit=$policy.commit; nativePolicySourceCommit=$origin.commit; repository=$origin.repository;
     profile=$Profile; toolchain=$Toolchain; compiler=$compiler; cargoVersion=$cargoVersion; target=$target;
-    sourceSha256=$hashes; resolvedCargoLockSha256=$lockHash; v8Commit=$origin.v8Commit; v8ArchiveSha256=$origin.v8ArchiveSha256;
-    binarySha256=(Hash-File $built); buildKey=$buildKey; builtAt=[DateTime]::UtcNow.ToString('O'); releaseOptions=$options }
+    sourceSha256=$hashes; testSourceSha256=$testHashes; resolvedCargoLockSha256=$lockHash; v8Commit=$origin.v8Commit; v8ArchiveSha256=$origin.v8ArchiveSha256;
+    binarySha256=(Hash-File $built); buildKey=$buildKey; builtAt=[DateTime]::UtcNow.ToString('O');
+    cargoIncremental=$incremental; cargoTargetDir=$resolvedTargetDir; buildOptions=$options; releaseOptions=$options }
 foreach ($file in @('LICENSE','NOTICE')) {
     Copy-Item -LiteralPath (Join-Path $source $file) -Destination (Join-Path $output "UPSTREAM-$file") -Force
 }
 Copy-Item -LiteralPath $built -Destination (Join-Path $output $exe) -Force
 $manifest | ConvertTo-Json -Depth 8 | Set-Utf8NoBom -LiteralPath (Join-Path $output 'SOURCE.json') -Encoding utf8
 Write-Host "Ready native Guardian: $(Join-Path $output $exe)"
+} finally {
+    foreach ($entry in $savedEnv.GetEnumerator()) {
+        if ($null -eq $entry.Value) {
+            Remove-Item -LiteralPath ("Env:" + $entry.Key) -ErrorAction SilentlyContinue
+        } else {
+            [Environment]::SetEnvironmentVariable($entry.Key, [string]$entry.Value, 'Process')
+        }
+    }
+}

@@ -53,7 +53,10 @@ public sealed class NativeGuardianReviewer(Settings settings,Policy policy) : IR
                     failure["rawErrorKind"]=raw["errorKind"]?.DeepClone();
                     failure["httpStatus"]??=raw["httpStatus"]?.DeepClone();
                 }
-                throw new NativeReviewFailure(Json.Text(reply,"error")??"Native Guardian failed",failure);
+                var message = Json.Text(reply,"error")??"Native Guardian failed";
+                if (Json.Text(failure,"reasonCode")=="review_authorization_budget_exceeded")
+                    message="The required authorization evidence and proposed action could not fit in the Guardian review input.";
+                throw new NativeReviewFailure(message,failure);
             }
             result=reply["result"]?.AsObject()??throw new InvalidDataException("Native Guardian result missing");
             if(result["actionExecuted"]?.GetValue<bool>()!=false||result["approvalPublished"]?.GetValue<bool>()!=false||

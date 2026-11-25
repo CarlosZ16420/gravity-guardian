@@ -63,7 +63,7 @@ internal static class ProjectAuthorizationTests
             ["toolCall"]=new JsonObject {["name"]="write_file",["args"]=new JsonObject {["Path"]=marker,["Content"]="fixture"}} };
         var before = await ReviewContext.BuildAsync(payload, settings, default);
         var wire = GuardianFacts.Build(before, settings, 5000);
-        Expect(wire["history"]!.AsArray().Any(row => Json.Text(row?["content"]?[0],"text")?.Contains("fixture。") == true), "Missing grant in native review input");
+        Expect(wire["authorization"]!["project_authorizations"]!.ToJsonString(Json.PromptOptions).Contains("fixture。"), "Missing grant in native review input");
         Expect(ProjectAuthorizations.Active(settings, new JsonArray(root)).Count == 0, "Grant applied to another project");
         var policy = new Policy(settings.PolicyDirectory);
         async Task Assess(ReviewInput input, string expected)

@@ -2,6 +2,8 @@
 
 从 `gravity-steward` 仓库根目录执行。每次发布用同一提交生成 Standalone 和 Lite，核对两个 ZIP 后再准备发布草稿。常规版本沿用已验收的 Rust 参数和锁定的 .NET 运行时。
 
+> 日常本地开发与验证无需打包 ZIP，请使用 `.\scripts\Update-Local.ps1`（自动复用 Guardian 并按改动组件构建后直接更新本机；涉及 Rust 调试可使用 `-Components Guardian -GuardianProfile Dev` 与 `node .\scripts\Test-NativePrompt.mjs .local\prompt-dev --dev`）。`Package.ps1` 会校验 `artifacts/codex-approval/native/SOURCE.json` 必须为 `Release` 构建，防止误将 Dev 产物打包发布。
+
 ## 1. 准备版本与构建环境
 
 1. 在 Windows x64 上准备 PowerShell 7、Git、Node.js 22+、.NET 10 SDK、Rust stable 和带 x64 C++ 工具的 Visual Studio 2022 Build Tools。首次构建需要访问已锁定的上游源码、依赖与运行时下载站。

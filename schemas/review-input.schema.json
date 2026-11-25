@@ -82,7 +82,7 @@
           "pattern": "^[a-f0-9]{64}$"
         },
         "transport_version": {
-          "enum": ["ag-guardian-v3", "cli-four-fields-v1"]
+          "enum": ["ag-guardian-v4", "ag-guardian-v3", "cli-four-fields-v1"]
         },
         "source": {
           "const": "plugin_fixed_adapter_not_user"

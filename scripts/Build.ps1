@@ -27,11 +27,21 @@ $taskToolsDir = if (Test-Path -LiteralPath (Join-Path $taskRoot '.tools/dotnet/d
     Join-Path $taskRoot '.tools'
 }
 
+$taskBuildTemp = Join-Path $taskRoot '.local/build-temp'
+$taskNugetScratch = Join-Path $taskBuildTemp 'NuGetScratch'
+New-Item -ItemType Directory -Path $taskBuildTemp, $taskNugetScratch -Force | Out-Null
+
+$taskOriginalTmp = [Environment]::GetEnvironmentVariable('TMP', 'Process')
+$taskOriginalTemp = [Environment]::GetEnvironmentVariable('TEMP', 'Process')
+$taskOriginalNugetScratch = [Environment]::GetEnvironmentVariable('NUGET_SCRATCH', 'Process')
+$taskOriginalAppData = [Environment]::GetEnvironmentVariable('APPDATA', 'Process')
+$env:TMP = $taskBuildTemp
+$env:TEMP = $taskBuildTemp
+$env:NUGET_SCRATCH = $taskNugetScratch
 $env:DOTNET_CLI_HOME = Join-Path $taskToolsDir 'dotnet-home'
 $env:DOTNET_CLI_TELEMETRY_OPTOUT = '1'
 $env:DOTNET_SKIP_FIRST_TIME_EXPERIENCE = '1'
 $env:DOTNET_GENERATE_ASPNET_CERTIFICATE = 'false'
-$taskOriginalAppData = $env:APPDATA
 $env:APPDATA = Join-Path $taskToolsDir 'build-profile'
 
 $taskDotnet = Join-Path $taskToolsDir 'dotnet/dotnet.exe'
@@ -43,7 +53,7 @@ try {
     $taskRuntime = Get-LockedDotnetRuntime
     & node (Join-Path $PSScriptRoot 'Prepare-Policy.mjs')
     if ($LASTEXITCODE -ne 0) { throw 'Policy preparation failed' }
-    & (Join-Path $PSScriptRoot 'Build-Guardian.ps1') -ReleaseTuning $GuardianTuning
+    & (Join-Path $PSScriptRoot 'Build-Guardian.ps1') -Profile Release -ReleaseTuning $GuardianTuning
     & $taskDotnet restore 'tests/AgApproval.Tests/AgApproval.Tests.csproj' --configfile (Join-Path $taskRoot 'NuGet.Config') --nologo
     if ($LASTEXITCODE -ne 0) { throw 'Offline dependency restore failed' }
     & $taskDotnet build 'src/AgApproval/AgApproval.csproj' -c Release --no-restore --nologo
@@ -119,8 +129,20 @@ try {
     New-Item -ItemType Directory -Path (Split-Path $taskPublishedBundle) -Force | Out-Null
     if (Test-Path -LiteralPath $taskPublishedBundle) { New-Item -ItemType Directory -Path (Split-Path $taskOldBundle) -Force | Out-Null; Move-Item -LiteralPath $taskPublishedBundle -Destination $taskOldBundle }
     Move-Item -LiteralPath $taskBundle -Destination $taskPublishedBundle
+    $taskBundleStageRoot = Split-Path $taskBundle -Parent
+    if ((Test-Path -LiteralPath $taskBundleStageRoot) -and @(Get-ChildItem -LiteralPath $taskBundleStageRoot -Force).Count -eq 0) {
+        Remove-Item -LiteralPath $taskBundleStageRoot -Force
+    }
     Write-Host "Ready: $taskPublishedBundle"
 } finally {
-    $env:APPDATA = $taskOriginalAppData
+    foreach ($restorePair in @(
+        @{ k='TMP'; v=$taskOriginalTmp },
+        @{ k='TEMP'; v=$taskOriginalTemp },
+        @{ k='NUGET_SCRATCH'; v=$taskOriginalNugetScratch },
+        @{ k='APPDATA'; v=$taskOriginalAppData }
+    )) {
+        if ($null -eq $restorePair.v) { Remove-Item -LiteralPath ("Env:" + $restorePair.k) -ErrorAction SilentlyContinue }
+        else { [Environment]::SetEnvironmentVariable($restorePair.k, [string]$restorePair.v, 'Process') }
+    }
     Pop-Location
 }

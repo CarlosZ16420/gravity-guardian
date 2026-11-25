@@ -95,8 +95,9 @@ public static class NativeGuardianTests
         await test("native facts preserve full local history, user prohibitions and role provenance",async()=>{
             var input=await Input();var wire=GuardianFacts.Build(input,settings,5000);var history=wire["history"]!.AsArray();
             Check(history.Count==81,"legacy evidence selector was applied to native history");
-            Check(history.Count(x=>Json.Text(x,"role")=="user")==1,"assistant evidence promoted to user");
-            Check(history[0]!.ToJsonString().Contains("Do not execute"),"explicit prohibition lost");
+            Check(history.All(x=>Json.Text(x,"role")!="user"),"authorization leaked into optional history");
+            var users=wire["authorization"]!["user_instructions"]!.AsArray();
+            Check(users.Count==1&&Json.Text(users[0],"text")!.Contains("Do not execute"),"explicit prohibition lost or assistant evidence promoted");
             Check(Json.Text(wire["action"],"name")=="write_file"&&JsonNode.Parse(Json.Text(wire["action"],"arguments")! )?["Content"]?.GetValue<string>()=="evidence only","action changed");
             Check(!File.Exists(Path.Combine(settings.DataDirectory,"never-executed.txt")),"proposed action executed");
         });
@@ -133,7 +134,8 @@ public static class NativeGuardianTests
                 &&state!["unresolved_dependencies"]!.GetValue<bool>(),"literal dependency or dynamic uncertainty was lost");
             await File.AppendAllTextAsync(helper,"\nWrite-Output 'Changed publish destination'");
             Check((await ReviewContext.BuildAsync(action,settings,default)).MaterialRevision!=input.MaterialRevision,"helper change did not invalidate the approval binding");
-            Check(wire["history"]![0]!["content"]![0]!["text"]!.GetValue<string>().Contains("Run the workspace probe"),"verified AGENTS.md missing from native history");
+            Check(Json.Text(wire["authorization"]!["project_rules"]![0],"content")!.Contains("Run the workspace probe"),"verified AGENTS.md missing from project rules");
+            Check(wire["authorization"]!["user_instructions"]!.AsArray().Count==1,"project rules counted as a human message");
             Check(!Json.Text(wire,"extraPolicy")!.Contains("Run the workspace probe"),"workspace document was added as system policy");
         });
         await test("native read-only delegation does not depend on the optional state RPC",async()=>{
@@ -226,7 +228,7 @@ public static class NativeGuardianTests
                 var request=await Input();
                 var wire=GuardianFacts.Build(request,cfg,5000);
                 Check(wire["history"]!.AsArray().Any(r=>Json.Text(r,"name")=="status"&&Json.Text(r,"arguments")=="{}"),"normalized args were not sent");
-                Check(wire["history"]![0]!["content"]![0]!["text"]!.GetValue<string>()==user,"Chinese user instruction was changed");
+                Check(Json.Text(wire["authorization"]!["user_instructions"]![0],"text")==user,"Chinese user instruction was changed");
                 await using var reviewer=new NativeGuardianReviewer(cfg,policy);
                 var result=await new ReviewGate(cfg,policy,reviewer).ReviewAsync(payload,default);
                 Check(result.Decision=="auto_approve","large verified context or multiple dispatches rejected");
@@ -335,6 +337,8 @@ public static class NativeGuardianTests
                 };
                 var bigOutput=new string('B',45000);
                 int stepIdx=1;
+                for(int k=0;k<8;k++)
+                    longLines.Add(Json.Encode(new{step_index=stepIdx++,source="USER_EXPLICIT",type="USER_INPUT",content="User update "+k}));
                 for(int k=0;k<80;k++)
                 {
                     var call=new JsonObject{["name"]="run_command",["args"]=new JsonObject{["CommandLine"]="echo check-"+k,["Cwd"]=settings.DataDirectory}};
@@ -349,7 +353,10 @@ public static class NativeGuardianTests
                 var wire=GuardianFacts.Build(built,cfg,5000);
                 var serialized=wire.ToJsonString(AgApproval.Json.PromptOptions);
                 Check(System.Text.Encoding.UTF8.GetByteCount(serialized)<=cfg.MaxNativeHistoryBytes,"bounded marathon history exceeded MaxNativeHistoryBytes");
-                Check(serialized.Contains("NEVER_DELETE_PRODUCTION_DB")&&serialized.Contains("PROCEED_WITH_LOCAL_CHECK"),"user instruction lost during marathon history windowing");
+                var instructions=wire["authorization"]!["user_instructions"]!.AsArray().Select(row=>Json.Text(row,"text"));
+                Check(instructions.SequenceEqual(new[]{"NEVER_DELETE_PRODUCTION_DB"}
+                    .Concat(Enumerable.Range(0,8).Select(k=>"User update "+k)).Append("PROCEED_WITH_LOCAL_CHECK")),
+                    "user instruction lost or reordered during marathon history windowing");
             }
             finally{await File.WriteAllTextAsync(transcript,snapshot);}
         });
@@ -392,8 +399,8 @@ public static class NativeGuardianTests
                     var wire=JsonNode.Parse(await File.ReadAllTextAsync(capturePath))!;
                     var arguments=JsonNode.Parse(Json.Text(wire["action"],"arguments")!)!;
                     Check(Json.Text(arguments,"Content")==content,"Full large action was not delivered to the native host");
-                    var users=wire["history"]!.AsArray().Where(item=>Json.Text(item,"role")=="user")
-                        .Select(item=>Json.Text(item!["content"]![0],"text")).ToArray();
+                    var users=wire["authorization"]!["user_instructions"]!.AsArray()
+                        .Select(item=>Json.Text(item,"text")).ToArray();
                     Check(users[^2]==authorization&&users[^1]==revocation,"Ordered authorization or revocation was lost");
                 }
             }
