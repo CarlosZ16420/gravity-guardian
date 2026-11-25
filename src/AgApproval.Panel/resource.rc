@@ -6,6 +6,7 @@
 
 1 RT_MANIFEST "panel.manifest"
 IDI_APP_ICON ICON "assets\\icon.ico"
+IDI_TRAY_ICON ICON "assets\\icon-tray.ico"
 
 IDD_STATS_DATE_RANGE DIALOGEX 0, 0, 204, 96
 STYLE DS_SETFONT | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU

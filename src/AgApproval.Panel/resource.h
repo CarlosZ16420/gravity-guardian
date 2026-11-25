@@ -2,6 +2,7 @@
 
 #define IDI_APP_ICON 101
 #define IDD_STATS_DATE_RANGE 102
+#define IDI_TRAY_ICON 103
 #define WM_APP_TRAY (WM_APP + 1)
 #define WM_APP_SHOW_EXISTING (WM_APP + 2)
 #define WM_APP_WORK_DONE (WM_APP + 3)

@@ -14,6 +14,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdio>
+#include <initializer_list>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -28,23 +29,30 @@ namespace {
 constexpr wchar_t kWindowClass[] = L"AntigravityCodexApprovalPanelWnd";
 constexpr UINT kDwmWindowCornerPreference = 33;
 constexpr DWORD kDwmRound = 2;
-constexpr int kPanelWidth = 414;
-constexpr int kHeaderHeight = 60;
-constexpr int kCompactHeight = 730;
-constexpr int kBannerSpace = 56;
-constexpr int kPreferencesSpace = 204;
+// Approximately two thirds of the 406 x 902 reference, in logical pixels.
+constexpr int kPanelWidth = 272;
+constexpr int kHeaderHeight = 36;
+constexpr int kCompactHeight = 600;
+constexpr int kContentInset = 10;
+constexpr int kBannerSpace = 44;
+constexpr int kPreferencesSpace = 166;
 // Keep DWM's shadow, without a native caption or caption buttons for Windows to
 // repaint during the system move loop. All window actions use our own controls.
 constexpr DWORD kPanelStyle = WS_POPUP | WS_THICKFRAME | WS_CLIPCHILDREN;
 constexpr DWORD kPanelExStyle = WS_EX_APPWINDOW;
 
-constexpr COLORREF kText = RGB(15, 23, 42);
-constexpr COLORREF kSecondary = RGB(100, 116, 139);
-constexpr COLORREF kBlue = RGB(30, 64, 175);
-constexpr COLORREF kGreen = RGB(5, 130, 85);
-constexpr COLORREF kRed = RGB(185, 50, 62);
-constexpr COLORREF kBackground = RGB(248, 250, 252);
-constexpr COLORREF kBorder = RGB(229, 231, 235);
+constexpr COLORREF kText = RGB(28, 28, 30);
+constexpr COLORREF kSecondary = RGB(110, 110, 115);
+constexpr COLORREF kTertiary = RGB(142, 142, 147);
+constexpr COLORREF kBlue = RGB(0, 113, 227);
+constexpr COLORREF kBlueHover = RGB(0, 102, 204);
+constexpr COLORREF kBluePressed = RGB(0, 88, 179);
+constexpr COLORREF kGreen = RGB(34, 154, 102);
+constexpr COLORREF kRed = RGB(215, 48, 56);
+constexpr COLORREF kBackground = RGB(255, 255, 255);
+constexpr COLORREF kSubtleFill = RGB(245, 246, 248);
+constexpr COLORREF kBorder = RGB(232, 234, 239);
+constexpr COLORREF kDivider = RGB(232, 232, 235);
 
 struct PanelConfig {
     std::wstring geminiRoot;
@@ -163,18 +171,20 @@ struct App {
     HFONT fontBold = nullptr;
     HFONT fontRegular = nullptr;
     HFONT fontSmall = nullptr;
+    HFONT fontSmallLatin = nullptr;
     HFONT fontMetric = nullptr;
+    HFONT fontSubMetric = nullptr;
     HFONT fontDialogTitle = nullptr;
     HBRUSH brushBg = nullptr;
     HBRUSH brushCard = nullptr;
-    HBRUSH brushBanner = nullptr;
     HWND tooltip = nullptr;
     HWND hoveredControl = nullptr;
 
+    HICON iconAppSmall = nullptr;
+    HICON iconAppLarge = nullptr;
     HICON iconNormal = nullptr;
-    HICON iconNormalLarge = nullptr;
     HICON iconGray = nullptr;
-    HICON iconGrayLarge = nullptr;
+    std::unique_ptr<Gdiplus::Bitmap> brandBitmap;
 
     PanelConfig cfg;
     UpdateConfig updateCfg;
@@ -429,28 +439,88 @@ HICON CreateGrayscaleIcon(HICON source) {
     return icon;
 }
 
+std::unique_ptr<Gdiplus::Bitmap> LoadBrandBitmap(WORD resId) {
+    HICON raw = static_cast<HICON>(LoadImageW(g_app.hInst, MAKEINTRESOURCEW(resId), IMAGE_ICON, 256, 256, LR_DEFAULTCOLOR));
+    if (!raw) return nullptr;
+
+    ICONINFO info{};
+    std::unique_ptr<Gdiplus::Bitmap> result;
+    if (GetIconInfo(raw, &info)) {
+        BITMAP bm{};
+        if (info.hbmColor && GetObjectW(info.hbmColor, sizeof(bm), &bm) && bm.bmWidth > 0 && bm.bmHeight > 0) {
+            BITMAPINFO bmi{};
+            bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+            bmi.bmiHeader.biWidth = bm.bmWidth;
+            bmi.bmiHeader.biHeight = -bm.bmHeight;
+            bmi.bmiHeader.biPlanes = 1;
+            bmi.bmiHeader.biBitCount = 32;
+            bmi.bmiHeader.biCompression = BI_RGB;
+            std::vector<uint32_t> pixels(static_cast<size_t>(bm.bmWidth) * static_cast<size_t>(bm.bmHeight));
+            HDC screen = GetDC(nullptr);
+            const bool ok = GetDIBits(screen, info.hbmColor, 0, static_cast<UINT>(bm.bmHeight),
+                                      pixels.data(), &bmi, DIB_RGB_COLORS) == bm.bmHeight;
+            ReleaseDC(nullptr, screen);
+            if (ok) {
+                auto bmp = std::make_unique<Gdiplus::Bitmap>(bm.bmWidth, bm.bmHeight, PixelFormat32bppPARGB);
+                Gdiplus::BitmapData bmpData{};
+                const Gdiplus::Rect lockRect(0, 0, bm.bmWidth, bm.bmHeight);
+                if (bmp->LockBits(&lockRect, Gdiplus::ImageLockModeWrite, PixelFormat32bppPARGB, &bmpData) == Gdiplus::Ok) {
+                    auto* dstBase = static_cast<uint8_t*>(bmpData.Scan0);
+                    for (int y = 0; y < bm.bmHeight; ++y) {
+                        auto* dstRow = reinterpret_cast<uint32_t*>(dstBase + static_cast<ptrdiff_t>(y) * bmpData.Stride);
+                        const uint32_t* srcRow = pixels.data() + static_cast<size_t>(y) * static_cast<size_t>(bm.bmWidth);
+                        for (int x = 0; x < bm.bmWidth; ++x) {
+                            const uint32_t px = srcRow[x];
+                            const uint32_t a = (px >> 24) & 0xffu;
+                            const uint32_t r = (((px >> 16) & 0xffu) * a + 127u) / 255u;
+                            const uint32_t g = (((px >> 8) & 0xffu) * a + 127u) / 255u;
+                            const uint32_t b = ((px & 0xffu) * a + 127u) / 255u;
+                            dstRow[x] = (a << 24) | (r << 16) | (g << 8) | b;
+                        }
+                    }
+                    bmp->UnlockBits(&bmpData);
+                    result = std::move(bmp);
+                }
+            }
+        }
+        if (info.hbmColor) DeleteObject(info.hbmColor);
+        if (info.hbmMask) DeleteObject(info.hbmMask);
+    }
+    DestroyIcon(raw);
+    return result;
+}
+
 bool LoadPanelIcons(HWND hwnd) {
     const UINT dpi = GetDpiForWindow(hwnd);
-    auto load = [dpi](int widthMetric, int heightMetric) {
-        return static_cast<HICON>(LoadImageW(g_app.hInst, MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON,
+    auto load = [dpi](WORD resId, int widthMetric, int heightMetric) {
+        return static_cast<HICON>(LoadImageW(g_app.hInst, MAKEINTRESOURCEW(resId), IMAGE_ICON,
             GetSystemMetricsForDpi(widthMetric, dpi), GetSystemMetricsForDpi(heightMetric, dpi), LR_DEFAULTCOLOR));
     };
-    HICON normal = load(SM_CXSMICON, SM_CYSMICON);
-    HICON normalLarge = load(SM_CXICON, SM_CYICON);
+    HICON appSmall = load(IDI_APP_ICON, SM_CXSMICON, SM_CYSMICON);
+    HICON appLarge = load(IDI_APP_ICON, SM_CXICON, SM_CYICON);
+    HICON normal = load(IDI_TRAY_ICON, SM_CXSMICON, SM_CYSMICON);
     HICON gray = normal ? CreateGrayscaleIcon(normal) : nullptr;
-    HICON grayLarge = normalLarge ? CreateGrayscaleIcon(normalLarge) : nullptr;
-    if (!normal || !normalLarge || !gray || !grayLarge) {
-        for (HICON icon : {normal, normalLarge, gray, grayLarge}) {
+    std::unique_ptr<Gdiplus::Bitmap> brand;
+    if (!g_app.brandBitmap) {
+        brand = LoadBrandBitmap(IDI_TRAY_ICON);
+    }
+    if (!appSmall || !appLarge || !normal || !gray || (!g_app.brandBitmap && !brand)) {
+        for (HICON icon : {appSmall, appLarge, normal, gray}) {
             if (icon) DestroyIcon(icon);
         }
         return false;
     }
 
-    const HICON previous[] = {g_app.iconNormal, g_app.iconNormalLarge, g_app.iconGray, g_app.iconGrayLarge};
+    const HICON previous[] = {g_app.iconAppSmall, g_app.iconAppLarge, g_app.iconNormal, g_app.iconGray};
+    g_app.iconAppSmall = appSmall;
+    g_app.iconAppLarge = appLarge;
     g_app.iconNormal = normal;
-    g_app.iconNormalLarge = normalLarge;
     g_app.iconGray = gray;
-    g_app.iconGrayLarge = grayLarge;
+    if (brand) {
+        g_app.brandBitmap = std::move(brand);
+    }
+    SendMessageW(hwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(g_app.iconAppSmall));
+    SendMessageW(hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(g_app.iconAppLarge));
     UpdateTrayAppearance();
     for (HICON icon : previous) {
         if (icon) DestroyIcon(icon);
@@ -865,7 +935,6 @@ void UpdateTrayAppearance() {
     const bool active = g_app.state.pluginInstalled && g_app.state.serviceRunning &&
                         g_app.state.takeoverEnabled.value_or(false);
     HICON hIcon = active ? g_app.iconNormal : g_app.iconGray;
-    HICON largeIcon = active ? g_app.iconNormalLarge : g_app.iconGrayLarge;
     std::wstring tip = L"Gravity Steward v" + g_app.state.serviceVersion;
     if (!g_app.state.pluginInstalled || !g_app.state.serviceRunning) {
         tip += g_app.state.pluginInstalled ? L" · 服务未运行" : L" · 未安装";
@@ -885,8 +954,6 @@ void UpdateTrayAppearance() {
     wcsncpy_s(g_app.nid.szTip, tip.c_str(), _TRUNCATE);
     g_app.nid.uFlags = NIF_ICON | NIF_TIP;
     if (g_app.trayAdded) Shell_NotifyIconW(NIM_MODIFY, &g_app.nid);
-    SendMessageW(g_app.hwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(hIcon));
-    SendMessageW(g_app.hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(largeIcon));
 }
 
 void SyncControlsToUi() {
@@ -937,12 +1004,12 @@ void SyncControlsToUi() {
     SyncStatsToUi();
 
     // Toggles & logs
-    SendMessageW(g_app.chkDetailedLogs, BM_SETCHECK, s.detailedLogs ? BST_CHECKED : BST_UNCHECKED, 0);
     EnableWindow(g_app.chkDetailedLogs, s.pluginInstalled);
+    InvalidateRect(g_app.chkDetailedLogs, nullptr, FALSE);
     SetWindowTextW(g_app.lblLogBadge, s.detailedLogs ? L"高写入已开启" : L"");
 
-    SendMessageW(g_app.chkAutostart, BM_SETCHECK, cfgCopy.autostart ? BST_CHECKED : BST_UNCHECKED, 0);
-    SendMessageW(g_app.chkAutoUpdate, BM_SETCHECK, cfgCopy.autoUpdate ? BST_CHECKED : BST_UNCHECKED, 0);
+    InvalidateRect(g_app.chkAutostart, nullptr, FALSE);
+    InvalidateRect(g_app.chkAutoUpdate, nullptr, FALSE);
 
     SetWindowTextW(g_app.lblVersionInfo, L"v" PANEL_VERSION_WIDE);
 
@@ -1496,20 +1563,50 @@ void ShowTrayContextMenu() {
     DestroyMenu(menu);
 }
 
+bool HasFontFamily(HDC hdc, const wchar_t* face) {
+    bool found = false;
+    LOGFONTW query{};
+    query.lfCharSet = DEFAULT_CHARSET;
+    wcsncpy_s(query.lfFaceName, face, _TRUNCATE);
+    EnumFontFamiliesExW(
+        hdc, &query,
+        [](const LOGFONTW*, const TEXTMETRICW*, DWORD, LPARAM param) -> int {
+            *reinterpret_cast<bool*>(param) = true;
+            return 0;
+        },
+        reinterpret_cast<LPARAM>(&found), 0);
+    return found;
+}
+
 void CreateFonts(HWND hwnd) {
-    auto font = [&](int size, int weight) {
-        return CreateFontW(-Scale(hwnd, size), 0, 0, 0, weight, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-                           OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Microsoft YaHei UI");
+    HDC screen = GetDC(hwnd);
+    auto choose = [&](std::initializer_list<const wchar_t*> faces) {
+        for (auto face : faces) {
+            if (screen && HasFontFamily(screen, face)) return face;
+        }
+        return *faces.begin();
     };
-    g_app.fontTitle = CreateFontW(-Scale(hwnd, 16), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-                                 OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
-    g_app.fontHeading = font(14, FW_SEMIBOLD);
-    g_app.fontBold = font(14, FW_SEMIBOLD);
-    g_app.fontRegular = font(14, FW_NORMAL);
-    g_app.fontSmall = font(12, FW_NORMAL);
-    g_app.fontDialogTitle = font(18, FW_SEMIBOLD);
-    g_app.fontMetric = CreateFontW(-Scale(hwnd, 36), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-                                  OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+    const wchar_t* displayFace = choose({L"SF Pro Display", L"SF Pro", L"Segoe UI Variable Display", L"Segoe UI"});
+    const wchar_t* textFace = choose({L"SF Pro Text", L"SF Pro", L"Segoe UI Variable Text", L"Segoe UI"});
+    const wchar_t* smallFace = choose({L"SF Pro Text", L"SF Pro", L"Segoe UI Variable Small", L"Segoe UI"});
+    const wchar_t* cjkFace = choose({L"PingFang SC", L"Noto Sans SC", L"Microsoft YaHei UI"});
+    if (screen) ReleaseDC(hwnd, screen);
+
+    auto make = [&](int size, int weight, const wchar_t* face) {
+        return CreateFontW(-Scale(hwnd, size), 0, 0, 0, weight, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                           OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, face);
+    };
+    // Use installed Apple faces when available, with explicit Latin/CJK fallbacks
+    // so mixed-language labels do not inherit oversized Windows FontLink metrics.
+    g_app.fontTitle = make(11, FW_MEDIUM, displayFace);
+    g_app.fontHeading = make(11, FW_MEDIUM, cjkFace);
+    g_app.fontBold = make(11, FW_MEDIUM, cjkFace);
+    g_app.fontRegular = make(11, FW_NORMAL, cjkFace);
+    g_app.fontSmall = make(10, FW_NORMAL, cjkFace);
+    g_app.fontSmallLatin = make(10, FW_NORMAL, smallFace);
+    g_app.fontDialogTitle = make(14, FW_MEDIUM, cjkFace);
+    g_app.fontMetric = make(24, FW_MEDIUM, displayFace);
+    g_app.fontSubMetric = make(11, FW_MEDIUM, textFace);
 }
 
 LRESULT CALLBACK ControlSubclass(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, UINT_PTR id, DWORD_PTR data) {
@@ -1585,13 +1682,13 @@ void CreateChildControls(HWND hwnd) {
     g_app.btnUninstall = button(L"完整卸载", ID_BTN_UNINSTALL);
 
     g_app.btnPreferences = button(L"偏好设置", ID_BTN_PREFERENCES);
-    g_app.chkDetailedLogs = button(L"详细调试日志", ID_CHK_DETAILED_LOGS, BS_CHECKBOX);
+    g_app.chkDetailedLogs = button(L"详细调试日志", ID_CHK_DETAILED_LOGS);
     g_app.lblLogBadge = label(L"", SS_RIGHT);
     g_app.lblLogSize = label(L"");
     g_app.btnOpenLogs = button(L"打开日志", ID_BTN_OPEN_LOGS);
     g_app.btnCompactLogs = button(L"压缩清理", ID_BTN_COMPACT_LOGS);
-    g_app.chkAutostart = button(L"开机自启 · 收回托盘", ID_CHK_AUTOSTART, BS_CHECKBOX);
-    g_app.chkAutoUpdate = button(L"启动时自动更新", ID_CHK_AUTO_UPDATE, BS_CHECKBOX);
+    g_app.chkAutostart = button(L"开机自启 · 收回托盘", ID_CHK_AUTOSTART);
+    g_app.chkAutoUpdate = button(L"启动时自动更新", ID_CHK_AUTO_UPDATE);
     g_app.lblVersionInfo = label(L"");
     g_app.btnCheckUpdate = button(L"检查更新", ID_BTN_CHECK_UPDATE);
     g_app.scrollbar = CreateWindowExW(0, L"SCROLLBAR", nullptr, WS_CHILD | SBS_VERT,
@@ -1619,11 +1716,11 @@ void CreateChildControls(HWND hwnd) {
 }
 
 struct PanelLayout {
-    int stats = 160 + (g_app.state.updateAvailable ? kBannerSpace : 0);
-    int pricing = stats + 234;
-    int apps = pricing + 76;
-    int prefs = apps + 200;
-    int height = prefs + 60 + (g_app.preferencesOpen ? kPreferencesSpace : 0);
+    int stats = 116 + (g_app.state.updateAvailable ? kBannerSpace : 0);
+    int pricing = stats + 172;
+    int apps = pricing + 64;
+    int prefs = apps + 212;
+    int height = prefs + 36 + (g_app.preferencesOpen ? kPreferencesSpace : 0);
 };
 
 void PositionControls(const PanelLayout& layout) {
@@ -1639,60 +1736,60 @@ void PositionControls(const PanelLayout& layout) {
         const int clipped = header ? 0 : std::clamp(S(kHeaderHeight) - top, 0, S(h));
         SetWindowRgn(control, clipped ? CreateRectRgn(0, clipped, S(w), S(h)) : nullptr, TRUE);
     };
-    place(a.lblTitle, a.fontTitle, 52, 20, 194, 24, true, true);
-    place(a.btnHeaderUpdate, a.fontRegular, 262, 16, 30, 32, true, true);
-    place(a.btnGitHub, a.fontRegular, 296, 16, 30, 32, true, true);
-    place(a.btnRefresh, a.fontRegular, 330, 16, 30, 32, true, true);
-    place(a.btnHide, a.fontRegular, 364, 16, 30, 32, true, true);
-    place(a.lblStatus, a.fontRegular, 50, 78, a.state.pluginInstalled ? 276 : 328, 24);
-    place(a.btnApprovalTakeover, a.fontSmall, 338, 76, 40, 28, a.state.pluginInstalled);
-    place(a.btnServiceAction, a.fontSmall, 36, 112, 112, 32);
-    place(a.btnLaunchAg, a.fontBold, 156, 112, 222, 32);
-    place(a.lblUpdateBanner, a.fontSmall, 36, 168, 231, 34, a.state.updateAvailable);
-    place(a.btnUpdateNow, a.fontSmall, 278, 169, 100, 30, a.state.updateAvailable);
+    place(a.lblTitle, a.fontTitle, 30, 11, 138, 16, true, true);
+    place(a.btnHeaderUpdate, a.fontRegular, 174, 7, 22, 22, true, true);
+    place(a.btnGitHub, a.fontRegular, 196, 7, 22, 22, true, true);
+    place(a.btnRefresh, a.fontRegular, 218, 7, 22, 22, true, true);
+    place(a.btnHide, a.fontRegular, 240, 7, 22, 22, true, true);
+    place(a.lblStatus, a.fontRegular, 24, 53, a.state.pluginInstalled ? 202 : 238, 16);
+    place(a.btnApprovalTakeover, a.fontSmall, 232, 50, 30, 20, a.state.pluginInstalled);
+    place(a.btnServiceAction, a.fontSmall, 10, 80, 74, 25);
+    place(a.btnLaunchAg, a.fontRegular, 90, 80, 172, 25);
+    place(a.lblUpdateBanner, a.fontSmall, 10, 123, 176, 30, a.state.updateAvailable);
+    place(a.btnUpdateNow, a.fontSmall, 190, 126, 72, 24, a.state.updateAvailable);
 
     const int stats = layout.stats;
-    place(a.lblStatsTitle, a.fontHeading, 36, stats + 16, 300, 22);
-    place(a.btnStatsDate, a.fontRegular, 348, stats + 11, 30, 30);
-    place(a.lblStatsCount, a.fontMetric, 36, stats + 43, 342, 48);
-    place(a.lblStatsSub, a.fontSmall, 36, stats + 98, 342, 20);
-    place(a.lblStatsCost, a.fontSmall, 244, stats + 65, 134, 20);
-    place(a.lblStatsInputTitle, a.fontSmall, 36, stats + 140, 112, 18);
-    place(a.lblStatsOutputTitle, a.fontSmall, 156, stats + 140, 112, 18);
-    place(a.lblStatsCacheTitle, a.fontSmall, 276, stats + 140, 102, 18);
-    place(a.lblStatsTokens, a.fontBold, 36, stats + 162, 112, 22);
-    place(a.lblStatsOutput, a.fontBold, 156, stats + 162, 112, 22);
-    place(a.lblStatsCacheRate, a.fontBold, 276, stats + 162, 102, 22);
-    place(a.lblStatsTokenDetail, a.fontSmall, 36, stats + 192, 342, 18);
+    place(a.lblStatsTitle, a.fontHeading, 10, stats + 15, 222, 17);
+    place(a.btnStatsDate, a.fontRegular, 240, stats + 11, 22, 22);
+    place(a.lblStatsCount, a.fontMetric, 10, stats + 41, 166, 30);
+    place(a.lblStatsCost, a.fontSmall, 180, stats + 53, 82, 15);
+    place(a.lblStatsSub, a.fontSmall, 10, stats + 80, 252, 16);
+    place(a.lblStatsInputTitle, a.fontSmall, 10, stats + 113, 96, 15);
+    place(a.lblStatsOutputTitle, a.fontSmall, 116, stats + 113, 68, 15);
+    place(a.lblStatsCacheTitle, a.fontSmall, 194, stats + 113, 68, 15);
+    place(a.lblStatsTokens, a.fontSubMetric, 10, stats + 132, 96, 17);
+    place(a.lblStatsOutput, a.fontSubMetric, 116, stats + 132, 68, 17);
+    place(a.lblStatsCacheRate, a.fontSubMetric, 194, stats + 132, 68, 17);
+    place(a.lblStatsTokenDetail, a.fontSmall, 10, stats + 153, 252, 14);
 
     const int pricing = layout.pricing;
-    place(a.lblPricingTitle, a.fontHeading, 36, pricing + 12, 232, 22);
-    place(a.lblPricingNote, a.fontSmall, 36, pricing + 36, 252, 18);
-    place(a.btnOpenPricing, a.fontSmall, 294, pricing + 18, 84, 30);
+    place(a.lblPricingTitle, a.fontHeading, 10, pricing + 14, 172, 17);
+    place(a.lblPricingNote, a.fontSmall, 10, pricing + 37, 252, 15);
+    place(a.btnOpenPricing, a.fontSmall, 204, pricing + 11, 58, 24);
 
     const int apps = layout.apps;
-    place(a.lblAppsTitle, a.fontHeading, 36, apps + 16, 342, 22);
-    place(a.lblAgTitle, a.fontBold, 80, apps + 50, 228, 22);
-    place(a.lblAgPath, a.fontSmall, 80, apps + 74, 228, 18);
-    place(a.btnBrowseAg, a.fontSmall, 318, apps + 55, 60, 30);
-    place(a.lblGuardianTitle, a.fontBold, 80, apps + 104, 228, 22);
-    place(a.lblGuardianAuth, a.fontSmall, 80, apps + 128, 228, 18);
-    place(a.btnDetectEnv, a.fontSmall, 318, apps + 109, 60, 30);
-    place(a.btnInstallRepair, a.fontSmall, 36, apps + 156, 167, 30);
-    place(a.btnUninstall, a.fontSmall, 211, apps + 156, 167, 30);
+    place(a.lblAppsTitle, a.fontHeading, 10, apps + 15, 252, 17);
+    place(a.lblAgTitle, a.fontRegular, 32, apps + 47, 184, 17);
+    place(a.lblAgPath, a.fontSmall, 32, apps + 69, 184, 15);
+    place(a.btnBrowseAg, a.fontSmall, 222, apps + 51, 40, 24);
+    place(a.lblGuardianTitle, a.fontRegular, 32, apps + 109, 184, 17);
+    place(a.lblGuardianAuth, a.fontSmall, 32, apps + 131, 184, 15);
+    place(a.btnDetectEnv, a.fontSmall, 222, apps + 113, 40, 24);
+    place(a.btnInstallRepair, a.fontSmall, 10, apps + 169, 122, 25);
+    place(a.btnUninstall, a.fontSmall, 140, apps + 169, 122, 25);
 
     const int prefs = layout.prefs;
-    place(a.btnPreferences, a.fontRegular, 20, prefs, 374, 44);
+    place(a.btnPreferences, a.fontSmall, 10, prefs, 252, 36);
     const bool expanded = a.preferencesOpen;
-    place(a.chkDetailedLogs, a.fontRegular, 36, prefs + 64, 230, 26, expanded);
-    place(a.lblLogBadge, a.fontSmall, 270, prefs + 68, 108, 20, expanded);
-    place(a.lblLogSize, a.fontSmall, 36, prefs + 106, 166, 20, expanded);
-    place(a.btnOpenLogs, a.fontSmall, 210, prefs + 100, 80, 30, expanded);
-    place(a.btnCompactLogs, a.fontSmall, 298, prefs + 100, 80, 30, expanded);
-    place(a.chkAutostart, a.fontRegular, 36, prefs + 140, 342, 26, expanded);
-    place(a.chkAutoUpdate, a.fontRegular, 36, prefs + 174, 342, 26, expanded);
-    place(a.lblVersionInfo, a.fontSmall, 36, prefs + 220, 250, 20, expanded);
-    place(a.btnCheckUpdate, a.fontSmall, 294, prefs + 214, 84, 30, expanded);
+    place(a.chkDetailedLogs, a.fontRegular, 10, prefs + 47, 158, 20, expanded);
+    place(a.lblLogBadge, a.fontSmall, 174, prefs + 50, 88, 15, expanded);
+    place(a.lblLogSize, a.fontSmall, 10, prefs + 77, 120, 15, expanded);
+    place(a.btnOpenLogs, a.fontSmall, 136, prefs + 73, 60, 24, expanded);
+    place(a.btnCompactLogs, a.fontSmall, 202, prefs + 73, 60, 24, expanded);
+    place(a.chkAutostart, a.fontRegular, 10, prefs + 109, 252, 20, expanded);
+    place(a.chkAutoUpdate, a.fontRegular, 10, prefs + 135, 252, 20, expanded);
+    place(a.lblVersionInfo, a.fontSmallLatin, 10, prefs + 178, 180, 15, expanded);
+    place(a.btnCheckUpdate, a.fontSmall, 202, prefs + 173, 60, 24, expanded);
 
     RECT client{};
     GetClientRect(a.hwnd, &client);
@@ -1785,7 +1882,7 @@ void DrawLineIcon(HDC hdc, RECT bounds, int id, COLORREF ink) {
     graphics.TranslateTransform(static_cast<float>(bounds.left), static_cast<float>(bounds.top));
     graphics.ScaleTransform(static_cast<float>(bounds.right - bounds.left) / 24.0f,
                             static_cast<float>(bounds.bottom - bounds.top) / 24.0f);
-    Gdiplus::Pen pen(Gdiplus::Color(255, GetRValue(ink), GetGValue(ink), GetBValue(ink)), 1.6f);
+    Gdiplus::Pen pen(Gdiplus::Color(255, GetRValue(ink), GetGValue(ink), GetBValue(ink)), 1.5f);
     pen.SetStartCap(Gdiplus::LineCapRound);
     pen.SetEndCap(Gdiplus::LineCapRound);
     pen.SetLineJoin(Gdiplus::LineJoinRound);
@@ -1858,6 +1955,7 @@ void DrawOwnerButton(const DRAWITEMSTRUCT& item) {
     const bool pressed = (item.itemState & ODS_SELECTED) != 0;
     const bool hovered = !disabled && g_app.hoveredControl == item.hwndItem;
     const bool takeover = item.CtlID == ID_BTN_APPROVAL_TAKEOVER;
+    const bool checkbox = item.CtlID == ID_CHK_DETAILED_LOGS || item.CtlID == ID_CHK_AUTOSTART || item.CtlID == ID_CHK_AUTO_UPDATE;
     const bool primary = item.CtlID == ID_BTN_LAUNCH_AG || item.CtlID == ID_UPDATE_PRIMARY;
     const bool disclosure = item.CtlID == ID_BTN_PREFERENCES;
     const bool danger = item.CtlID == ID_BTN_UNINSTALL;
@@ -1865,120 +1963,190 @@ void DrawOwnerButton(const DRAWITEMSTRUCT& item) {
                         item.hwndItem == g_app.btnRefresh || item.hwndItem == g_app.btnHide;
     const bool iconOnly = header || item.CtlID == ID_BTN_STATS_DATE || item.CtlID == ID_UPDATE_CLOSE;
     const bool focus = (item.itemState & ODS_FOCUS) && !(item.itemState & ODS_NOFOCUSRECT);
-    HBRUSH backdrop = header || disclosure ? g_app.brushBg : item.CtlID == ID_BTN_UPDATE_NOW ? g_app.brushBanner : g_app.brushCard;
-    FillRect(hdc, &rc, backdrop);
-    COLORREF fill = pressed ? RGB(226, 232, 240) : hovered ? RGB(241, 245, 249) : RGB(248, 250, 252);
-    COLORREF border = kBorder;
-    COLORREF ink = disabled ? RGB(148, 163, 184) : danger ? kRed : iconOnly ? kSecondary : kText;
-    if (iconOnly || disclosure) {
-        fill = pressed ? RGB(226, 232, 240) : hovered ? RGB(237, 241, 246) : header || disclosure ? kBackground : RGB(255, 255, 255);
+    FillRect(hdc, &rc, g_app.brushCard);
+    COLORREF fill = pressed ? RGB(234, 236, 241) : hovered ? RGB(244, 245, 248) : RGB(255, 255, 255);
+    COLORREF border = fill;
+    COLORREF ink = disabled ? RGB(174, 174, 178) : danger ? kRed : iconOnly || disclosure ? kSecondary : kBlue;
+    if (iconOnly) {
+        fill = pressed ? RGB(229, 232, 238) : hovered ? RGB(236, 239, 244) : header ? kBackground : RGB(255, 255, 255);
+        border = fill;
+    } else if (disclosure) {
+        fill = pressed ? RGB(238, 240, 244) : hovered ? kSubtleFill : kBackground;
         border = fill;
     }
-    if (danger && hovered) { fill = RGB(254, 242, 242); border = RGB(254, 226, 226); }
-    if (primary) {
-        fill = disabled ? RGB(226, 232, 240) : pressed ? RGB(23, 46, 127) : hovered ? RGB(25, 53, 150) : kBlue;
+    if (danger) {
+        fill = pressed ? RGB(254, 226, 226) : hovered ? RGB(254, 242, 242) : RGB(255, 255, 255);
         border = fill;
-        if (!disabled) ink = RGB(255, 255, 255);
+    }
+    if (primary) {
+        fill = disabled ? kSubtleFill : pressed ? kBluePressed : hovered ? kBlueHover : kBlue;
+        if (item.CtlID == ID_BTN_LAUNCH_AG) {
+            fill = pressed ? RGB(221, 234, 249) : hovered ? RGB(235, 242, 252) : kSubtleFill;
+        }
+        border = fill;
+        if (!disabled) ink = item.CtlID == ID_BTN_LAUNCH_AG ? kBlue : RGB(255, 255, 255);
     }
     if (focus) {
-        FillRoundedRect(hdc, rc, S(20), RGB(59, 130, 246), RGB(59, 130, 246));
+        FillRoundedRect(hdc, rc, S(16), RGB(56, 148, 246), RGB(56, 148, 246));
         InflateRect(&rc, -S(2), -S(2));
-        FillRoundedRect(hdc, rc, S(16), RGB(255, 255, 255), RGB(255, 255, 255));
-        InflateRect(&rc, -S(2), -S(2));
-    } else if (pressed && !takeover) {
+        FillRoundedRect(hdc, rc, S(12), RGB(255, 255, 255), RGB(255, 255, 255));
+        InflateRect(&rc, -S(1), -S(1));
+    } else if (pressed && !takeover && !checkbox) {
         InflateRect(&rc, -S(1), -S(1));
     }
     const int cy = (rc.top + rc.bottom) / 2;
     if (takeover) {
         const bool enabled = g_app.state.takeoverEnabled.value_or(false);
         const int cx = (rc.left + rc.right) / 2;
-        const RECT track{cx - S(18), cy - S(10), cx + S(18), cy + S(10)};
-        const COLORREF trackColor = disabled ? RGB(203, 213, 225) : enabled ? (hovered ? RGB(25, 53, 150) : kBlue) : RGB(148, 163, 184);
-        FillRoundedRect(hdc, track, S(20), trackColor, trackColor);
-        const int thumb = enabled ? track.right - S(10) : track.left + S(10);
-        const RECT knob{thumb - S(7), cy - S(7), thumb + S(7), cy + S(7)};
+        const RECT track{cx - S(13), cy - S(7), cx + S(13), cy + S(7)};
+        const COLORREF trackColor = disabled ? RGB(210, 214, 222) : enabled ? (hovered ? kBlueHover : kBlue) : RGB(199, 202, 210);
+        FillRoundedRect(hdc, track, S(14), trackColor, trackColor);
+        const int thumb = enabled ? track.right - S(7) : track.left + S(7);
+        const RECT knob{thumb - S(5), cy - S(5), thumb + S(5), cy + S(5)};
         constexpr COLORREF white = RGB(255, 255, 255);
-        FillRoundedRect(hdc, knob, S(14), white, white);
+        FillRoundedRect(hdc, knob, S(10), white, white);
+    } else if (checkbox) {
+        bool checked = false;
+        if (item.CtlID == ID_CHK_DETAILED_LOGS) checked = g_app.state.detailedLogs;
+        else {
+            std::lock_guard<std::mutex> lk(g_app.cfgMutex);
+            checked = item.CtlID == ID_CHK_AUTOSTART ? g_app.cfg.autostart : g_app.cfg.autoUpdate;
+        }
+        const int boxSize = S(14);
+        const RECT box{rc.left, cy - boxSize / 2, rc.left + boxSize, cy - boxSize / 2 + boxSize};
+        const COLORREF boxFill = checked
+            ? (disabled ? RGB(199, 202, 210) : hovered ? kBlueHover : kBlue)
+            : (hovered ? RGB(244, 245, 248) : RGB(255, 255, 255));
+        const COLORREF boxBorder = checked ? boxFill : (hovered ? RGB(180, 185, 196) : RGB(204, 209, 218));
+        FillRoundedRect(hdc, box, S(8), boxFill, boxBorder);
+        if (checked) {
+            Gdiplus::Graphics graphics(hdc);
+            graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+            Gdiplus::Pen checkPen(Gdiplus::Color(255, 255, 255, 255), std::max(1.4f, static_cast<float>(S(15)) / 10.0f));
+            checkPen.SetStartCap(Gdiplus::LineCapRound);
+            checkPen.SetEndCap(Gdiplus::LineCapRound);
+            checkPen.SetLineJoin(Gdiplus::LineJoinRound);
+            const float x0 = static_cast<float>(box.left) + boxSize * 0.24f;
+            const float y0 = static_cast<float>(box.top) + boxSize * 0.52f;
+            const float x1 = static_cast<float>(box.left) + boxSize * 0.43f;
+            const float y1 = static_cast<float>(box.top) + boxSize * 0.72f;
+            const float x2 = static_cast<float>(box.left) + boxSize * 0.76f;
+            const float y2 = static_cast<float>(box.top) + boxSize * 0.32f;
+            Gdiplus::PointF pts[] = {{x0, y0}, {x1, y1}, {x2, y2}};
+            graphics.DrawLines(&checkPen, pts, 3);
+        }
+        wchar_t text[96]{};
+        GetWindowTextW(item.hwndItem, text, static_cast<int>(std::size(text)));
+        auto oldFont = SelectObject(hdc, reinterpret_cast<HFONT>(SendMessageW(item.hwndItem, WM_GETFONT, 0, 0)));
+        SetBkMode(hdc, TRANSPARENT);
+        SetTextColor(hdc, disabled ? kTertiary : kText);
+        RECT textRect = rc;
+        textRect.left = box.right + S(8);
+        DrawTextW(hdc, text, -1, &textRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        SelectObject(hdc, oldFont);
     } else {
-        FillRoundedRect(hdc, rc, S(disclosure ? 24 : 16), fill, border);
+        FillRoundedRect(hdc, rc, S(disclosure ? 20 : 14), fill, border);
     }
     if (iconOnly) {
         const int cx = (rc.left + rc.right) / 2;
-        DrawLineIcon(hdc, {cx - S(9), cy - S(9), cx + S(9), cy + S(9)}, static_cast<int>(item.CtlID), ink);
+        DrawLineIcon(hdc, {cx - S(6), cy - S(6), cx + S(6), cy + S(6)}, static_cast<int>(item.CtlID), ink);
         if (item.hwndItem == g_app.btnHeaderUpdate && g_app.state.updateAvailable) {
-            FillRoundedRect(hdc, {rc.right - S(7), rc.top + S(3), rc.right - S(2), rc.top + S(8)}, S(5), kBlue, kBlue);
+            FillRoundedRect(hdc, {rc.right - S(6), rc.top + S(3), rc.right - S(1), rc.top + S(8)}, S(5), kBlue, kBlue);
         }
-    } else if (!takeover) {
+    } else if (!takeover && !checkbox) {
         wchar_t text[96]{};
         GetWindowTextW(item.hwndItem, text, static_cast<int>(std::size(text)));
         auto oldFont = SelectObject(hdc, reinterpret_cast<HFONT>(SendMessageW(item.hwndItem, WM_GETFONT, 0, 0)));
         SetBkMode(hdc, TRANSPARENT);
         SetTextColor(hdc, ink);
         RECT textRect = rc;
-        if (disclosure) textRect.left += S(44);
+        if (disclosure) textRect.left += S(20);
         DrawTextW(hdc, text, -1, &textRect, (disclosure ? DT_LEFT : DT_CENTER) | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
         SelectObject(hdc, oldFont);
         if (disclosure) {
-            DrawLineIcon(hdc, {rc.left + S(16), cy - S(8), rc.left + S(32), cy + S(8)}, ID_BTN_PREFERENCES, kSecondary);
-            int x = rc.right - S(20);
-            HPEN pen = CreatePen(PS_SOLID, S(2), kSecondary);
-            auto oldPen = SelectObject(hdc, pen);
+            DrawLineIcon(hdc, {rc.left, cy - S(6), rc.left + S(12), cy + S(6)}, ID_BTN_PREFERENCES, kSecondary);
+            Gdiplus::Graphics graphics(hdc);
+            graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+            Gdiplus::Pen chevronPen(Gdiplus::Color(255, static_cast<BYTE>(kTertiary & 0xff),
+                                                   static_cast<BYTE>((kTertiary >> 8) & 0xff),
+                                                   static_cast<BYTE>((kTertiary >> 16) & 0xff)),
+                                    std::max(1.3f, static_cast<float>(S(14)) / 10.0f));
+            chevronPen.SetStartCap(Gdiplus::LineCapRound);
+            chevronPen.SetEndCap(Gdiplus::LineCapRound);
+            chevronPen.SetLineJoin(Gdiplus::LineJoinRound);
+            const float x = static_cast<float>(rc.right - S(5));
+            const float fcy = static_cast<float>(cy);
+            const float arm = static_cast<float>(S(3));
             if (g_app.preferencesOpen) {
-                POINT arrow[] = {{x - S(4), cy - S(2)}, {x, cy + S(2)}, {x + S(4), cy - S(2)}};
-                Polyline(hdc, arrow, static_cast<int>(std::size(arrow)));
+                Gdiplus::PointF arrow[] = {{x - arm, fcy - arm * 0.55f}, {x, fcy + arm * 0.55f}, {x + arm, fcy - arm * 0.55f}};
+                graphics.DrawLines(&chevronPen, arrow, 3);
             } else {
-                POINT arrow[] = {{x - S(2), cy - S(4)}, {x + S(2), cy}, {x - S(2), cy + S(4)}};
-                Polyline(hdc, arrow, static_cast<int>(std::size(arrow)));
+                Gdiplus::PointF arrow[] = {{x - arm * 0.55f, fcy - arm}, {x + arm * 0.55f, fcy}, {x - arm * 0.55f, fcy + arm}};
+                graphics.DrawLines(&chevronPen, arrow, 3);
             }
-            SelectObject(hdc, oldPen);
-            DeleteObject(pen);
         }
     }
 }
 
-void PaintWindowCards(HWND hwnd, HDC hdc) {
+void PaintPanelSurface(HWND hwnd, HDC hdc) {
     RECT client{};
     GetClientRect(hwnd, &client);
     FillRect(hdc, &client, g_app.brushBg);
 
     auto S = [&](int dp) { return Scale(hwnd, dp); };
     auto Y = [&](int dp) { return S(dp) - g_app.scrollY; };
-    constexpr COLORREF white = RGB(255, 255, 255);
-    auto card = [&](int y, int h, COLORREF fill = RGB(255, 255, 255)) {
-        FillRoundedRect(hdc, {S(20), Y(y + 1), S(394), Y(y + h + 1)}, S(24), RGB(239, 242, 246), RGB(239, 242, 246));
-        FillRoundedRect(hdc, {S(20), Y(y), S(394), Y(y + h)}, S(24), fill, kBorder);
-    };
     PanelLayout layout;
     const int saved = SaveDC(hdc);
     IntersectClipRect(hdc, 0, S(kHeaderHeight), client.right, client.bottom);
-    // Service controls sit directly on a white surface, with no extra frame.
-    RECT service{S(20), Y(68), S(394), Y(148)};
-    FillRoundedRect(hdc, service, S(24), white, white);
-    if (g_app.state.updateAvailable) card(160, 44, RGB(239, 246, 255));
-    card(layout.stats, 222);
-    card(layout.pricing, 64);
-    card(layout.apps, 194);
-    if (g_app.preferencesOpen) card(layout.prefs + 56, kPreferencesSpace - 4);
 
-    const COLORREF statusColor = g_app.state.serviceRunning ? kGreen : kSecondary;
-    FillRoundedRect(hdc, {S(36), Y(86), S(42), Y(92)}, S(6), statusColor, statusColor);
-    HPEN divider = CreatePen(PS_SOLID, 1, kBorder);
+    // A continuous white surface, with reference-style inset hairlines.
+    HPEN divider = CreatePen(PS_SOLID, 1, kDivider);
     auto oldPen = SelectObject(hdc, divider);
-    MoveToEx(hdc, S(36), Y(layout.stats + 126), nullptr);
-    LineTo(hdc, S(378), Y(layout.stats + 126));
-    for (int row : {54, 108}) {
-        FillRoundedRect(hdc, {S(36), Y(layout.apps + row), S(68), Y(layout.apps + row + 32)}, S(16), kBackground, kBackground);
-        DrawLineIcon(hdc, {S(43), Y(layout.apps + row + 7), S(61), Y(layout.apps + row + 25)},
-                     row == 54 ? ID_BTN_BROWSE_AG : ID_BTN_DETECT_ENV, kSecondary);
+    auto separate = [&](int y, int left = kContentInset) {
+        MoveToEx(hdc, S(left), Y(y), nullptr);
+        LineTo(hdc, S(kPanelWidth - kContentInset), Y(y));
+    };
+    for (int y : {layout.stats, layout.pricing, layout.apps, layout.prefs}) separate(y);
+    if (g_app.state.updateAvailable) separate(116);
+    separate(layout.apps + 96, 32);
+    // Keep numeric columns readable without surrounding them with another box.
+    for (int x : {110, 188}) {
+        MoveToEx(hdc, S(x), Y(layout.stats + 117), nullptr);
+        LineTo(hdc, S(x), Y(layout.stats + 147));
+    }
+    if (g_app.preferencesOpen) {
+        separate(layout.prefs + 102);
+        separate(layout.prefs + 164);
     }
     SelectObject(hdc, oldPen);
     DeleteObject(divider);
+
+    const COLORREF statusColor = g_app.state.serviceRunning ? kGreen : kTertiary;
+    FillRoundedRect(hdc, {S(11), Y(57), S(17), Y(63)}, S(6), statusColor, statusColor);
+    for (int row : {49, 111}) {
+        DrawLineIcon(hdc, {S(10), Y(layout.apps + row), S(24), Y(layout.apps + row + 14)},
+                     row == 49 ? ID_BTN_BROWSE_AG : ID_BTN_DETECT_ENV, kSecondary);
+    }
     RestoreDC(hdc, saved);
 
     RECT header{0, 0, client.right, S(kHeaderHeight)};
     FillRect(hdc, &header, g_app.brushBg);
     // The brand keeps its colors; the tray icon continues to reflect runtime state.
-    DrawIconEx(hdc, S(20), S(20), g_app.iconNormalLarge, S(24), S(24), 0, nullptr, DI_NORMAL);
+    if (g_app.brandBitmap) {
+        Gdiplus::Graphics graphics(hdc);
+        graphics.SetSmoothingMode(Gdiplus::SmoothingModeHighQuality);
+        graphics.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+        graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
+        graphics.SetCompositingQuality(Gdiplus::CompositingQualityHighQuality);
+        Gdiplus::ImageAttributes attrs;
+        attrs.SetWrapMode(Gdiplus::WrapModeTileFlipXY);
+        // Crop excess outer transparent padding (shield spans ~38..218 in 256x256)
+        // so the shield fills the compact brand slot cleanly while staying centered.
+        const Gdiplus::RectF dest(static_cast<Gdiplus::REAL>(S(10)), static_cast<Gdiplus::REAL>(S(11)),
+                                  static_cast<Gdiplus::REAL>(S(14)), static_cast<Gdiplus::REAL>(S(14)));
+        graphics.DrawImage(g_app.brandBitmap.get(), dest, 34.0f, 34.0f, 188.0f, 188.0f,
+                           Gdiplus::UnitPixel, &attrs);
+    }
 }
 
 void PositionUpdatePopup() {
@@ -1987,8 +2155,8 @@ void PositionUpdatePopup() {
     GetWindowRect(g_app.hwnd, &owner);
     MONITORINFO monitor{sizeof(monitor)};
     GetMonitorInfoW(MonitorFromWindow(g_app.hwnd, MONITOR_DEFAULTTONEAREST), &monitor);
-    const int width = Scale(g_app.hwnd, 360);
-    const int height = Scale(g_app.hwnd, 328);
+    const int width = Scale(g_app.hwnd, 316);
+    const int height = Scale(g_app.hwnd, 264);
     const LONG x = std::clamp((owner.left + owner.right - width) / 2, monitor.rcWork.left,
                               std::max(monitor.rcWork.left, monitor.rcWork.right - width));
     const LONG y = std::clamp((owner.top + owner.bottom - height) / 2, monitor.rcWork.top,
@@ -2015,15 +2183,15 @@ void SyncUpdatePopup() {
     SetWindowTextW(g_app.btnUpdatePopupSecondary, g_app.updatePhase == UpdatePhase::Available ||
         g_app.updatePhase == UpdatePhase::Ready ? L"稍后" : L"关闭");
     EnableWindow(g_app.btnUpdatePopupPrimary, !notice.busy);
-    place(g_app.btnUpdatePopupClose, g_app.fontRegular, 312, 12, 32, 32);
-    place(g_app.lblUpdatePopupTitle, g_app.fontDialogTitle, 88, 26, 218, 28);
-    place(g_app.lblUpdatePopupBody, g_app.fontRegular, 24, 96, 312, 48);
-    place(g_app.lblUpdatePopupDetail, g_app.fontSmall, 24, 148, 312, 18, !notice.detail.empty());
-    place(g_app.lblUpdatePopupCurrent, g_app.fontSmall, 142, 184, 178, 20);
-    place(g_app.lblUpdatePopupLatest, g_app.fontSmall, 142, 212, 178, 20);
-    place(g_app.btnUpdatePopupSecondary, g_app.fontRegular, 24, 268, 104, 36, notice.showSecondary);
-    place(g_app.btnUpdatePopupPrimary, g_app.fontRegular, notice.showSecondary ? 136 : 24, 268,
-          notice.showSecondary ? 200 : 312, 36);
+    place(g_app.btnUpdatePopupClose, g_app.fontRegular, 276, 12, 26, 26);
+    place(g_app.lblUpdatePopupTitle, g_app.fontDialogTitle, 68, 20, 200, 22);
+    place(g_app.lblUpdatePopupBody, g_app.fontRegular, 20, 72, 276, 38);
+    place(g_app.lblUpdatePopupDetail, g_app.fontSmall, 20, 114, 276, 16, !notice.detail.empty());
+    place(g_app.lblUpdatePopupCurrent, g_app.fontSmallLatin, 130, 146, 154, 16);
+    place(g_app.lblUpdatePopupLatest, g_app.fontSmallLatin, 130, 174, 154, 16);
+    place(g_app.btnUpdatePopupSecondary, g_app.fontSmall, 20, 218, 86, 28, notice.showSecondary);
+    place(g_app.btnUpdatePopupPrimary, g_app.fontBold, notice.showSecondary ? 114 : 20, 218,
+          notice.showSecondary ? 182 : 276, 28);
     TOOLINFOW tool{sizeof(tool)};
     tool.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
     tool.hwnd = g_app.updatePopup;
@@ -2039,19 +2207,28 @@ void PaintUpdatePopup(HWND hwnd, HDC hdc) {
     FillRect(hdc, &client, g_app.brushCard);
     auto S = [&](int dip) { return Scale(hwnd, dip); };
     const auto notice = GetUpdateNotice();
-    FillRoundedRect(hdc, client, S(24), RGB(255, 255, 255), kBorder);
+    FillRoundedRect(hdc, client, S(22), RGB(255, 255, 255), kBorder);
     const COLORREF badge = notice.accent == kRed ? RGB(254, 242, 242) :
-        notice.accent == kGreen ? RGB(236, 253, 245) : RGB(239, 243, 255);
-    FillRoundedRect(hdc, {S(24), S(24), S(72), S(72)}, S(24), badge, badge);
-    DrawLineIcon(hdc, {S(36), S(36), S(60), S(60)}, notice.icon, notice.accent);
-    FillRoundedRect(hdc, {S(24), S(176), S(336), S(240)}, S(16), kBackground, kBackground);
-    auto oldFont = SelectObject(hdc, g_app.fontSmall);
+        notice.accent == kGreen ? RGB(235, 249, 242) : RGB(238, 245, 255);
+    FillRoundedRect(hdc, {S(20), S(20), S(58), S(58)}, S(20), badge, badge);
+    DrawLineIcon(hdc, {S(30), S(30), S(48), S(48)}, notice.icon, notice.accent);
+    HPEN rowSep = CreatePen(PS_SOLID, 1, kDivider);
+    auto oldPen = SelectObject(hdc, rowSep);
+    MoveToEx(hdc, S(20), S(134), nullptr);
+    LineTo(hdc, S(296), S(134));
+    MoveToEx(hdc, S(32), S(168), nullptr);
+    LineTo(hdc, S(284), S(168));
+    SelectObject(hdc, oldPen);
+    DeleteObject(rowSep);
+    auto oldFont = SelectObject(hdc, g_app.fontSmallLatin);
     SetBkMode(hdc, TRANSPARENT);
-    SetTextColor(hdc, kSecondary);
-    RECT brand{S(88), S(56), S(306), S(76)};
+    SetTextColor(hdc, kTertiary);
+    RECT brand{S(68), S(43), S(268), S(58)};
     DrawTextW(hdc, L"Gravity Steward", -1, &brand, DT_SINGLELINE | DT_NOPREFIX);
-    RECT current{S(40), S(184), S(140), S(204)};
-    RECT latest{S(40), S(212), S(140), S(232)};
+    SelectObject(hdc, g_app.fontSmall);
+    SetTextColor(hdc, kSecondary);
+    RECT current{S(32), S(146), S(124), S(162)};
+    RECT latest{S(32), S(174), S(124), S(190)};
     DrawTextW(hdc, L"当前版本", -1, &current, DT_SINGLELINE | DT_NOPREFIX);
     DrawTextW(hdc, L"最新版本", -1, &latest, DT_SINGLELINE | DT_NOPREFIX);
     SelectObject(hdc, oldFont);
@@ -2127,9 +2304,8 @@ LRESULT CALLBACK UpdatePopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         HDC hdc = reinterpret_cast<HDC>(wParam);
         HWND control = reinterpret_cast<HWND>(lParam);
         SetBkMode(hdc, TRANSPARENT);
-        SetTextColor(hdc, control == g_app.lblUpdatePopupBody || control == g_app.lblUpdatePopupDetail ? kSecondary : kText);
-        return reinterpret_cast<LRESULT>(control == g_app.lblUpdatePopupCurrent || control == g_app.lblUpdatePopupLatest ?
-                                          g_app.brushBg : g_app.brushCard);
+        SetTextColor(hdc, control == g_app.lblUpdatePopupBody ? kSecondary : control == g_app.lblUpdatePopupDetail ? kTertiary : kText);
+        return reinterpret_cast<LRESULT>(g_app.brushCard);
     }
     case WM_COMMAND:
         switch (LOWORD(wParam)) {
@@ -2181,7 +2357,7 @@ void ShowUpdatePopup(bool show) {
         }
         if (!registered) return;
         CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_CONTROLPARENT, popupClass, L"应用更新",
-            kPanelStyle, 0, 0, Scale(g_app.hwnd, 360), Scale(g_app.hwnd, 328),
+            kPanelStyle, 0, 0, Scale(g_app.hwnd, 316), Scale(g_app.hwnd, 264),
             g_app.hwnd, nullptr, g_app.hInst, nullptr);
     }
     if (!g_app.updatePopup) return;
@@ -2287,7 +2463,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         ConfigureFramelessWindow(hwnd);
         g_app.brushBg = CreateSolidBrush(kBackground);
         g_app.brushCard = CreateSolidBrush(RGB(255, 255, 255));
-        g_app.brushBanner = CreateSolidBrush(RGB(239, 246, 255));
         if (!LoadPanelIcons(hwnd)) return -1;
 
         CreateChildControls(hwnd);
@@ -2345,7 +2520,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         return 1;
     case WM_DPICHANGED: {
         const HFONT oldFonts[] = {g_app.fontTitle, g_app.fontHeading, g_app.fontBold,
-                                  g_app.fontRegular, g_app.fontSmall, g_app.fontMetric, g_app.fontDialogTitle};
+                                  g_app.fontRegular, g_app.fontSmall, g_app.fontSmallLatin,
+                                  g_app.fontMetric, g_app.fontSubMetric, g_app.fontDialogTitle};
         auto suggested = reinterpret_cast<const RECT*>(lParam);
         SetWindowPos(hwnd, nullptr, suggested->left, suggested->top, 0, 0,
                      SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER);
@@ -2389,12 +2565,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_PAINT: {
         PAINTSTRUCT ps{};
         HDC hdc = BeginPaint(hwnd, &ps);
-        PaintWindowCards(hwnd, hdc);
+        PaintPanelSurface(hwnd, hdc);
         EndPaint(hwnd, &ps);
         return 0;
     }
     case WM_PRINTCLIENT:
-        PaintWindowCards(hwnd, reinterpret_cast<HDC>(wParam));
+        PaintPanelSurface(hwnd, reinterpret_cast<HDC>(wParam));
         return 0;
     case WM_DRAWITEM:
         DrawOwnerButton(*reinterpret_cast<const DRAWITEMSTRUCT*>(lParam));
@@ -2404,18 +2580,19 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         HWND ctrl = reinterpret_cast<HWND>(lParam);
         SetBkMode(hdc, TRANSPARENT);
         if (ctrl == g_app.lblUpdateBanner) {
-            SetTextColor(hdc, RGB(22, 92, 200));
-            return reinterpret_cast<LRESULT>(g_app.brushBanner);
+            SetTextColor(hdc, kBlue);
+            return reinterpret_cast<LRESULT>(g_app.brushCard);
         }
         if (ctrl == g_app.lblLogBadge) {
-            SetTextColor(hdc, g_app.state.detailedLogs ? RGB(180, 83, 9) : RGB(95, 108, 123));
+            SetTextColor(hdc, g_app.state.detailedLogs ? RGB(180, 83, 9) : kTertiary);
         } else if (ctrl == g_app.lblStatus) {
             SetTextColor(hdc, g_app.state.serviceRunning ? kGreen : kSecondary);
-        } else if (ctrl == g_app.lblStatsCost) {
-            SetTextColor(hdc, kSecondary);
-        } else if (ctrl == g_app.lblStatsSub || ctrl == g_app.lblStatsTokenDetail || ctrl == g_app.lblStatsInputTitle ||
-                   ctrl == g_app.lblStatsOutputTitle || ctrl == g_app.lblStatsCacheTitle || ctrl == g_app.lblPricingNote ||
-                   ctrl == g_app.lblAgPath || ctrl == g_app.lblGuardianAuth || ctrl == g_app.lblVersionInfo) {
+        } else if (ctrl == g_app.lblStatsInputTitle || ctrl == g_app.lblStatsOutputTitle ||
+                   ctrl == g_app.lblStatsCacheTitle || ctrl == g_app.lblStatsTokenDetail ||
+                   ctrl == g_app.lblVersionInfo) {
+            SetTextColor(hdc, kTertiary);
+        } else if (ctrl == g_app.lblStatsCost || ctrl == g_app.lblStatsSub || ctrl == g_app.lblPricingNote ||
+                   ctrl == g_app.lblAgPath || ctrl == g_app.lblGuardianAuth) {
             SetTextColor(hdc, kSecondary);
         } else {
             SetTextColor(hdc, kText);
@@ -2600,7 +2777,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     L"开启详细日志提示",
                     MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
                 if (ans != IDYES) {
-                    SendMessageW(g_app.chkDetailedLogs, BM_SETCHECK, BST_UNCHECKED, 0);
+                    InvalidateRect(g_app.chkDetailedLogs, nullptr, FALSE);
                     break;
                 }
             }
@@ -2625,14 +2802,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             } else {
                 MessageBoxW(hwnd, L"写入开机自启动注册表项失败。", L"开机自启动", MB_OK | MB_ICONERROR);
             }
-            SendMessageW(g_app.chkAutostart, BM_SETCHECK, g_app.cfg.autostart ? BST_CHECKED : BST_UNCHECKED, 0);
+            InvalidateRect(g_app.chkAutostart, nullptr, FALSE);
             break;
         }
         case ID_CHK_AUTO_UPDATE: {
             std::lock_guard<std::mutex> lk(g_app.cfgMutex);
             g_app.cfg.autoUpdate = !g_app.cfg.autoUpdate;
             SavePanelConfig(g_app.cfg);
-            SendMessageW(g_app.chkAutoUpdate, BM_SETCHECK, g_app.cfg.autoUpdate ? BST_CHECKED : BST_UNCHECKED, 0);
+            InvalidateRect(g_app.chkAutoUpdate, nullptr, FALSE);
             break;
         }
         case ID_BTN_CHECK_UPDATE:
@@ -2692,15 +2869,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             Shell_NotifyIconW(NIM_DELETE, &g_app.nid);
             g_app.trayAdded = false;
         }
-        for (HFONT f : {g_app.fontTitle, g_app.fontHeading, g_app.fontBold, g_app.fontRegular, g_app.fontSmall, g_app.fontMetric, g_app.fontDialogTitle}) {
+        for (HFONT f : {g_app.fontTitle, g_app.fontHeading, g_app.fontBold, g_app.fontRegular, g_app.fontSmall, g_app.fontSmallLatin, g_app.fontMetric, g_app.fontSubMetric, g_app.fontDialogTitle}) {
             if (f) DeleteObject(f);
         }
-        for (HBRUSH b : {g_app.brushBg, g_app.brushCard, g_app.brushBanner}) {
+        for (HBRUSH b : {g_app.brushBg, g_app.brushCard}) {
             if (b) DeleteObject(b);
         }
-        for (HICON ic : {g_app.iconNormal, g_app.iconNormalLarge, g_app.iconGray, g_app.iconGrayLarge}) {
+        for (HICON ic : {g_app.iconAppSmall, g_app.iconAppLarge, g_app.iconNormal, g_app.iconGray}) {
             if (ic) DestroyIcon(ic);
         }
+        g_app.brandBitmap.reset();
         PostQuitMessage(0);
         return 0;
     }
@@ -2856,6 +3034,10 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
     wc.cbSize = sizeof(wc);
     wc.lpfnWndProc = WndProc;
     wc.hInstance = hInst;
+    wc.hIcon = static_cast<HICON>(LoadImageW(hInst, MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON,
+        GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), LR_DEFAULTCOLOR | LR_SHARED));
+    wc.hIconSm = static_cast<HICON>(LoadImageW(hInst, MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON,
+        GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR | LR_SHARED));
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     wc.lpszClassName = kWindowClass;
     wc.hbrBackground = nullptr;
