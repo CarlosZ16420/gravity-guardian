@@ -113,3 +113,6 @@ try {
     }
     $env:CODEX_HOME=$taskSavedHome
 }
+# A disconnected service returns a nonzero status during best-effort cleanup.
+# Only reach this reset after every assertion and the finally block succeeded.
+$global:LASTEXITCODE = 0
