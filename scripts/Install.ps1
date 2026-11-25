@@ -74,10 +74,6 @@ $taskBundleAssembly = Join-Path $taskBundle 'scripts/gravity-guardian.dll'
 
 $taskConfigRoot = [IO.Path]::GetFullPath((Join-Path $GeminiRoot 'config'))
 $taskPlugin = [IO.Path]::GetFullPath((Join-Path $taskConfigRoot 'plugins/gravity-guardian'))
-$taskLegacyPlugin = Join-Path $taskConfigRoot 'plugins/codex-approval'
-if (Test-Path -LiteralPath $taskLegacyPlugin) {
-    throw 'Legacy Gravity Steward installation detected. Exit Antigravity and run the OLD package scripts/Uninstall.ps1 WITHOUT -PurgeData first. Then install Gravity Guardian; use -DataDirectory with the retained data path to keep historical logs. See docs/release-0.6.6.md.'
-}
 $taskBundleRuntime = Resolve-ApprovalRuntime $taskBundle -Installed:($taskBundle -eq $taskPlugin)
 $taskRuntime = if ($taskDistribution -eq 'lite') { $taskBundleRuntime } else { Join-Path $taskPlugin 'runtime/dotnet.exe' }
 if ($taskPlugin -ne [IO.Path]::GetFullPath((Join-Path $taskConfigRoot 'plugins/gravity-guardian'))) { throw 'Invalid plugin target' }

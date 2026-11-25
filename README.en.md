@@ -22,8 +22,6 @@ To uninstall, fully exit Antigravity and choose 「完整卸载」 in the panel.
 
 ## Build from source
 
-Upgrading from Gravity Steward requires removing the old plugin first with the **old** package's `scripts/Uninstall.ps1` **without** `-PurgeData`, then installing the new ZIP. Exit Antigravity and the old panel first. To retain historical logs, pass the original data directory to the new installer with `-DataDirectory`. Old installation settings are not automatically migrated; review them in the new panel. See the [0.6.6 release notes](docs/release-0.6.6.md).
-
 Use Windows x64 with PowerShell 7, the .NET 10 SDK, Node.js 22+, stable Rust, and MSVC C++ build tools. Run `./scripts/Build.ps1`, then `./scripts/Package.ps1` to build both editions and `./scripts/Test-Distributions.ps1` to verify installation and updates.
 
 Gravity Guardian is an independent open-source project. See [Apache-2.0](LICENSE) and [NOTICE](NOTICE).

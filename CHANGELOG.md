@@ -4,7 +4,6 @@
 
 - **品牌与底层标识统一更名为 Gravity Guardian**：
   - 将对外品牌、GitHub 仓库引用、插件 ID 与安装目录（`plugins/gravity-guardian`）、数据目录（`gravity-guardian-data`）、Win32 面板（`GravityGuardian.exe`）、核心服务程序集（`gravity-guardian.dll`）、命名管道前缀（`gravity-guardian-*`）及开机自启注册表项（`GravityGuardian`）统一为 **Gravity Guardian**。
-  - 旧版需使用原安装包卸载（不加 `-PurgeData`）后再安装；检测到旧插件时，新版安装器在修改前停止。历史数据可通过 `-DataDirectory` 继续使用，详见本版升级说明。
 - **审核缓存与会话续接修复**：当前授权紧随开发者指令、先于持久历史，当前动作事实独立置于末尾；检查点按每次推理输入相对基线的增量触发，避免大基础提示和重试累计输入造成每轮重建。
 - **移除项目长期授权**：
   - 7 天 6795 次真实审批日志显示长期授权目录启用次数为 0，且该机制只能把授权抬升到 `high`，无法覆盖 `risk_level = critical` 的强制拒绝。

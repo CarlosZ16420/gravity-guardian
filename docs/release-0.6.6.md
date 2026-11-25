@@ -2,12 +2,6 @@
 
 本版本正式将项目统一命名为 **Gravity Guardian**，移除「项目长期授权」，将"Guardian 判 `deny` 但判定用户明确授权（`user_authorization = high`）"的请求转为 Antigravity 原生人工确认（`force_ask`），并新增生命周期绑定的「受保护目录全局审核委派」。
 
-## 从 Gravity Steward 升级
-
-本次插件 ID、目录及程序集名称发生变化，旧版面板的在线更新器不支持跨名称升级。请下载并完整解压本版 ZIP，完全退出 Antigravity 和旧面板，先运行**旧版安装包**的 `scripts/Uninstall.ps1`（**不要加 `-PurgeData`**），再运行新版 `scripts/Install.ps1`。新版安装器检测到旧插件目录时会在写入前停止，避免两个审批插件同时启用。
-
-若要继续使用旧日志与统计，在新版安装时传入 `-DataDirectory "$env:USERPROFILE\.gemini\codex-approval-data"`；自定义过数据目录的用户请传入原目录。旧数据保留，新的默认目录为 `gravity-guardian-data`。旧版设置请在新版面板重新核对；本版不自动迁移旧安装身份。Codex 登录不受影响。
-
 ## 改动摘要
 
 - **品牌与底层标识统一命名为 Gravity Guardian**：

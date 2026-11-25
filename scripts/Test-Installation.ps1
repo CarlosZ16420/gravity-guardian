@@ -18,21 +18,6 @@ $taskProjectFile = Join-Path $taskProjects 'auto-project.json'
 $taskUserModeFile = Join-Path $taskProjects 'later-user-selection.json'
 @{ id = 'later-user-selection'; projectResources = @{}; settings = @{ permissionPreset = 'AGENT_PERMISSION_PRESET_AUTO' } } | ConvertTo-Json -Depth 10 | Set-Utf8NoBom -LiteralPath $taskUserModeFile -Encoding utf8
 
-$taskLegacyPlugin = Join-Path $taskConfig 'plugins/codex-approval'
-New-Item -ItemType Directory -Path $taskLegacyPlugin -Force | Out-Null
-$taskBeforeLegacyCheck = (Get-FileHash -LiteralPath (Join-Path $taskConfig 'config.json')).Hash
-$taskLegacyFailure = $null
-try {
-    & (Join-Path $PSScriptRoot 'Install.ps1') -GeminiRoot $taskGemini -DataDirectory $taskData @taskExecutables
-} catch { $taskLegacyFailure = $_.Exception.Message }
-if ($taskLegacyFailure -notlike 'Legacy Gravity Steward installation detected.*' -or
-    (Get-FileHash -LiteralPath (Join-Path $taskConfig 'config.json')).Hash -cne $taskBeforeLegacyCheck -or
-    (Test-Path -LiteralPath $taskData) -or (Test-Path -LiteralPath (Join-Path $taskConfig 'plugins/gravity-guardian'))) {
-    throw 'Legacy installation was not rejected before changing configuration or data'
-}
-[IO.Directory]::Delete($taskLegacyPlugin)
-Write-Host 'PASS legacy plugin requires explicit migration before any installation changes'
-
 & (Join-Path $PSScriptRoot 'Install.ps1') -GeminiRoot $taskGemini -DataDirectory $taskData @taskExecutables
 $taskInstalled = Get-Content -Encoding UTF8 -LiteralPath (Join-Path $taskConfig 'config.json') -Raw | ConvertFrom-Json
 if (!$taskInstalled.sidecars.other.enabled -or !$taskInstalled.sidecars.'gravity-guardian/reviewer'.enabled) { throw 'Sidecar merge failed' }

@@ -23,8 +23,6 @@ Gravity Guardian 内置 Codex 原生审核宿主（Native Guardian），由它�
 2. 从 [Releases](https://github.com/CarlosZ16420/gravity-guardian/releases/latest) 下载 `gravity-guardian-*-windows-x64.zip`，完整解压到可写目录。
 3. 完全退出 Antigravity，在解压目录的 PowerShell 中运行 `.\scripts\Install.ps1`，然后重新打开 Antigravity。
 
-从 Gravity Steward 升级时，先按[0.6.6 升级说明](docs/release-0.6.6.md#从-gravity-steward-升级)移除旧安装并保留数据，再安装新版。
-
 运行 `GravityGuardian.exe` 可以打开面板「安装 / 修复插件」、查看审批结果，并在「Guardian 登录」检测本机凭据。升级时，旧 CLI 审核设置会自动迁移到 Guardian，自定义凭据目录和历史审批统计会保留。支持的验证范围见[验收记录](docs/guardian-0.172.0-validation.md)。
 
 **Standalone** 沿用原安装包文件名，自带 x64 .NET 10。**Lite** 的文件名带 `-lite-`，需要系统已安装 x64 .NET 10，可运行 `winget install Microsoft.DotNet.Runtime.10 --architecture x64` 安装。切换类型时，完整解压目标 ZIP，再从该目录运行「安装 / 修复插件」。下载后可对照同页的 `checksums.sha256` 核对 ZIP。升级或卸载前先完全退出 Antigravity。
