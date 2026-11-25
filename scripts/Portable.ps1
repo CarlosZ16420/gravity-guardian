@@ -186,7 +186,7 @@ function Connect-Portable($Layout, [string]$GeminiRoot, [string]$AntigravityPath
         if ($plugin.name -cne 'gravity-guardian') { throw 'Refusing to replace another plugin' }
         Copy-PortableVerified $registration (Join-Path $backup 'registration')
     }
-    $restore = if ($previous) { $previous } elseif ($oldManifest) { $oldManifest } else { @{ oldSidecar=$hostSettings.sidecars['gravity-guardian/reviewer']; reviewModeChanges=@() } }
+    $restore = if ($previous -and ($binding -or $previous.connected -eq $true)) { $previous } elseif ($oldManifest) { $oldManifest } else { @{ oldSidecar=$hostSettings.sidecars['gravity-guardian/reviewer']; reviewModeChanges=@() } }
     $oldSidecar = $hostSettings.sidecars['gravity-guardian/reviewer']
     $modeChanges = @()
     $registrationChanged = $false
@@ -227,7 +227,7 @@ function Connect-Portable($Layout, [string]$GeminiRoot, [string]$AntigravityPath
             if ($preferences) { Write-PortableJson (Join-Path (Split-Path $Layout.config) 'panel-settings.json') @{ autoCheckUpdates=[bool]$preferences.autoCheckUpdates; autoUpdate=[bool]$preferences.autoUpdate } }
         }
         $manifest = @{
-            storageMode='portable'; portableRoot=$Layout.root; programDirectory=$Layout.app; pluginDirectory=$registration; configRoot=$configRoot; geminiRoot=$GeminiRoot; antigravityPath=$AntigravityPath
+            storageMode='portable'; connected=$true; portableRoot=$Layout.root; programDirectory=$Layout.app; pluginDirectory=$registration; configRoot=$configRoot; geminiRoot=$GeminiRoot; antigravityPath=$AntigravityPath
             codexHome=$(if ($legacy.codexHome) { $legacy.codexHome } elseif ($previous.codexHome) { $previous.codexHome } elseif ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $env:USERPROFILE '.codex' })
             oldSidecar=$restore.oldSidecar; reviewModeChanges=@($restore.reviewModeChanges); backupDirectory=$restore.backupDirectory; sidecarId='gravity-guardian/reviewer'; distribution='standalone'; dotnetPath=(Join-Path $Layout.app 'runtime/dotnet.exe')
         }
@@ -299,6 +299,8 @@ function Disconnect-Portable($Layout, [switch]$PlanOnly) {
     Restore-CodexReviewMode -ConfigRoot $manifest.configRoot -Changes @($manifest.reviewModeChanges)
     $hostSettings = Read-PortableJson (Join-Path $manifest.configRoot 'config.json')
     if ($hostSettings.sidecars -and $hostSettings.sidecars['gravity-guardian/reviewer'].enabled -eq $true) { Set-PortableSidecar $manifest.configRoot $manifest.oldSidecar }
+    $manifest.connected=$false
+    Write-PortableJson $Layout.manifest $manifest
     Remove-Item -LiteralPath $registration -Recurse -Force
     $runKey='HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
     $run=(Get-ItemProperty -LiteralPath $runKey -Name GravityGuardian -ErrorAction SilentlyContinue).GravityGuardian

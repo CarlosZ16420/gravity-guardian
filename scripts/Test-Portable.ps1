@@ -96,6 +96,17 @@ try {
     if ($restored.userSettings.permissionPreset -cne 'AGENT_PERMISSION_PRESET_AUTO' -or !$restored.sidecars.other.enabled -or $restored.userSettings.globalPermissionGrants.allow -cnotcontains 'command(git status)') { throw 'Portable disconnect failed to restore user settings' }
     if (!(Test-Path -LiteralPath $taskLayout.config) -or !(Test-Path -LiteralPath $sourceLog)) { throw 'Disconnect removed settings or original logs' }
     Write-Host ('PASS portable disconnect preserves data; fixture: '+$taskFixture)
+    # A subsequent connection must restore choices made while the plugin was disconnected.
+    $restored.userSettings.permissionPreset='AGENT_PERMISSION_PRESET_DEFAULT'
+    $restored.userSettings.enableTerminalSandbox=$false
+    $restored.sidecars['gravity-guardian/reviewer']=@{enabled=$false;note='user-choice'}
+    Write-PortableJson (Join-Path $taskHostConfig 'config.json') $restored
+    & $taskWindowsPowerShell -NoProfile -ExecutionPolicy Bypass -File $install -GeminiRoot $taskGemini -AntigravityPath $env:ComSpec -NoStart | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'Portable reconnect failed' }
+    & $taskWindowsPowerShell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $taskLayout.app 'scripts/Uninstall.ps1') | Out-Null
+    $restoredAgain=Read-PortableJson (Join-Path $taskHostConfig 'config.json')
+    if ($LASTEXITCODE -ne 0 -or $restoredAgain.userSettings.permissionPreset -cne 'AGENT_PERMISSION_PRESET_DEFAULT' -or $restoredAgain.userSettings.enableTerminalSandbox -ne $false -or $restoredAgain.sidecars['gravity-guardian/reviewer'].note -cne 'user-choice') { throw 'Reconnect reused stale restore settings' }
+    Write-Host 'PASS reconnect retains the latest user settings'
 } finally {
     if ($taskLayout -and (Test-Path -LiteralPath $taskLayout.config)) {
         try { Stop-PortableService $taskLayout } catch {}
