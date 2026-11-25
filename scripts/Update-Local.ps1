@@ -68,6 +68,15 @@ foreach ($taskEnvName in @(
 }
 
 $taskUtf8NoBom = [Text.UTF8Encoding]::new($false)
+function Restore-LocalBuildEnvironment {
+    foreach ($entry in $taskSavedEnv.GetEnumerator()) {
+        if ($null -eq $entry.Value) {
+            Remove-Item -LiteralPath ("Env:" + $entry.Key) -ErrorAction SilentlyContinue
+        } else {
+            [Environment]::SetEnvironmentVariable($entry.Key, [string]$entry.Value, 'Process')
+        }
+    }
+}
 function Get-FileSha256([string]$Path) {
     (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
 }
@@ -491,6 +500,9 @@ try {
     }
     $taskStateRecord | ConvertTo-Json -Depth 8 | Set-Utf8NoBom -LiteralPath $taskStatePath -Encoding utf8
 
+    # Live installation and service startup must use the user's environment,
+    # especially APPDATA, rather than the isolated build profile.
+    Restore-LocalBuildEnvironment
     $taskDoctorPassed = $false
     if (!$BuildOnly) {
         $swInstall = [Diagnostics.Stopwatch]::StartNew()
@@ -550,12 +562,6 @@ try {
     if (Test-Path -LiteralPath $taskStageRoot) {
         Remove-Item -LiteralPath $taskStageRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
-    foreach ($entry in $taskSavedEnv.GetEnumerator()) {
-        if ($null -eq $entry.Value) {
-            Remove-Item -LiteralPath ("Env:" + $entry.Key) -ErrorAction SilentlyContinue
-        } else {
-            [Environment]::SetEnvironmentVariable($entry.Key, [string]$entry.Value, 'Process')
-        }
-    }
+    Restore-LocalBuildEnvironment
     Pop-Location
 }
