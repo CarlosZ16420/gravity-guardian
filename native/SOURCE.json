@@ -9,9 +9,9 @@
   "model": "codex-auto-review",
   "effort": "low",
   "releaseOptions": {
-    "OPT_LEVEL": "2",
+    "OPT_LEVEL": "s",
     "LTO": "thin",
-    "CODEGEN_UNITS": "1",
+    "CODEGEN_UNITS": "16",
     "DEBUG": "0",
     "STRIP": "symbols",
     "PANIC": "unwind"

@@ -281,8 +281,44 @@ await Test("new user revocation during review invalidates approval", async () =>
     await File.WriteAllTextAsync(transcript,original);
 });
 await Test("timeout hands off to human without executing or reusing prior grants", async () => {
-    var gate=new ReviewGate(settings,policy,new FakeReviewer(async ct=>{await Task.Delay(5000,ct);return "{\"outcome\":\"allow\"}";}));
-    var r=await gate.ReviewAsync(Payload(),default);Check(r.Status=="review_failed"&&r.ReasonCode=="review_timeout"&&r.Decision=="deny","expired request was not blocked");
+    var saved=settings.DataDirectory;settings.DataDirectory=Path.Combine(scratch,"timeout-audit-cleanup");
+    try
+    {
+        var gate=new ReviewGate(settings,policy,new FakeReviewer(async ct=>{await Task.Delay(5000,ct);return "{\"outcome\":\"allow\"}";}));
+        var r=await gate.ReviewAsync(Payload(),default);
+        Check(r.Status=="review_failed"&&r.ReasonCode=="review_timeout"&&r.Decision=="deny","expired request was not blocked");
+        var completed=Directory.GetFiles(Path.Combine(settings.DataDirectory,"logs"),"*.jsonl").SelectMany(File.ReadAllLines).Select(l=>JsonNode.Parse(l)!)
+            .LastOrDefault(n=>Json.Text(n,"requestId")==r.RequestId&&Json.Text(n,"event")=="review_completed");
+        Check(completed!=null&&Json.Text(completed,"reasonCode")=="review_timeout","timeout did not persist review_completed audit log");
+        var guardFile=Directory.GetFiles(Path.Combine(settings.DataDirectory,"denial-guard",DenialGuard.Version),"*.json").Single();
+        var guardDoc=JsonNode.Parse(await File.ReadAllTextAsync(guardFile))!;
+        Check(guardDoc["pendingRequest"]==null&&Json.Text(guardDoc,"lastOutcome")=="aborted","timeout left dirty pendingRequest in DenialGuard");
+    }
+    finally{settings.DataDirectory=saved;}
+});
+await Test("UI status and planning tools delegate deterministically and validate schemas strictly", async () => {
+    int calls=0;var gate=new ReviewGate(settings,policy,new FakeReviewer(_=>{calls++;return Task.FromResult("{\"outcome\":\"allow\"}");}));
+    foreach(var safe in new[]{
+        ToolPayload("update_focus",new{focus="Inspecting routing"}),
+        ToolPayload("update_steps",new{steps=new[]{new{title="Run unit tests",status="in_progress"},new{title="Verify output",status="pending"}}}),
+        ToolPayload("enter_plan_mode",new{}),
+        ToolPayload("manage_task",new{Action="list"})
+    })
+    {
+        var res=await gate.ReviewAsync(safe,default);
+        Check(res.Decision=="allow"&&res.Status=="delegated","UI/planning tool was not delegated: "+Json.Encode(res));
+    }
+    Check(calls==0,"UI/planning delegation invoked reviewer");
+    foreach(var invalid in new[]{
+        ToolPayload("update_focus",new{focus=""}),
+        ToolPayload("update_focus",new{focus="ok",extra=true}),
+        ToolPayload("update_steps",new{steps=new[]{new{title="Step",status="bogus"}}}),
+        ToolPayload("update_steps",new{steps=Enumerable.Range(0,13).Select(i=>new{title="S"+i,status="pending"}).ToArray()}),
+        ToolPayload("enter_plan_mode",new{reason="extra field"}),
+        ToolPayload("manage_task",new{Action="list",TaskId=conversation+"/task-1"})
+    })
+        Check((await Route(invalid)).Route=="model","invalid UI/planning payload bypassed model review: "+Json.Encode(invalid["toolCall"]!));
+    Check(Json.Text(ReviewAdapter.Describe("update_focus"),"kind")=="ui_status"&&Json.Text(ReviewAdapter.Describe("enter_plan_mode"),"kind")=="planning_mode","tool descriptor kinds missing");
 });
 await Test("invalid reviewer output hands off to human but never approves", async () => {
     var gate=new ReviewGate(settings,policy,new FakeReviewer(_=>Task.FromResult("no decision")));

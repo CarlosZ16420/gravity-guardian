@@ -143,7 +143,7 @@ index 4b8e0b3..a2f9cd6 100644
          session: Arc<Session>,
          io: SessionIo,
 diff --git a/codex-rs/core/src/guardian/input_budget.rs b/codex-rs/core/src/guardian/input_budget.rs
-index ca2768e..84ed479 100644
+index ca2768e..634fee4 100644
 --- a/codex-rs/core/src/guardian/input_budget.rs
 +++ b/codex-rs/core/src/guardian/input_budget.rs
 @@ -55,7 +55,8 @@ impl<'a> PreparedReviewContext<'a> {
@@ -204,27 +204,34 @@ index ca2768e..84ed479 100644
      let maximum = effective_input_token_limit(turn.model_info(), turn.config.model_context_window)
          .saturating_sub(super::request_budget::INPUT_TOKEN_MARGIN);
      let context = pending.context.clone();
-@@ -136,6 +160,19 @@ pub(crate) async fn check_pending(session: &Session, turn: &TurnContext) -> Code
+@@ -136,6 +160,26 @@ pub(crate) async fn check_pending(session: &Session, turn: &TurnContext) -> Code
          .await;
      let context = PreparedReviewContext::prepare(context, pending.elastic.as_ref(), &history)
          .map_err(|error| CodexErr::InvalidRequest(error.to_string()))?;
 +    if std::env::var("AG_GUARDIAN_HOST").as_deref() == Ok("1")
 +        && let PreparedReviewContext::Elastic(context) = &context
 +    {
-+        let action_and_base = context.planned_action_tokens().saturating_add(base_tokens);
++        let action_tokens = context.planned_action_tokens();
++        let action_and_base = action_tokens.saturating_add(base_tokens);
 +        if action_and_base > maximum {
 +            crate::client::set_external_guardian_action_too_large(true);
 +            return Err(CodexErr::ContextWindowExceeded);
 +        }
 +        if action_and_base.saturating_add(authorization_tokens) > maximum {
-+            crate::client::set_external_guardian_authorization_too_large(true);
++            if base_tokens.saturating_add(authorization_tokens) > maximum
++                || authorization_tokens >= action_tokens
++            {
++                crate::client::set_external_guardian_authorization_too_large(true);
++            } else {
++                crate::client::set_external_guardian_action_too_large(true);
++            }
 +            return Err(CodexErr::ContextWindowExceeded);
 +        }
 +    }
      let context_tokens = match &context {
          PreparedReviewContext::Fixed(context) => context.estimated_tokens(),
          PreparedReviewContext::Elastic(context) => context.estimated_tokens(),
-@@ -225,6 +262,8 @@ pub(crate) async fn finalize(
+@@ -225,6 +269,8 @@ pub(crate) async fn finalize(
          /*include_internal*/ true,
      )?;
      let mut existing = super::request_budget::estimate_request_tokens(&request)
@@ -233,6 +240,34 @@ index ca2768e..84ed479 100644
          .max(usize::try_from(session.get_total_token_usage().await).unwrap_or(usize::MAX));
      // These reminders are appended after the accepted input. Reserve their full
      // serialized cost before choosing optional evidence, even if the time
+@@ -281,6 +327,10 @@ pub(crate) async fn finalize(
+     } else {
+         history_truncation
+     };
++    let planned_action_tokens = match &context {
++        PreparedReviewContext::Elastic(elastic) => elastic.planned_action_tokens(),
++        PreparedReviewContext::Fixed(_) => 0,
++    };
+     let mut context = context
+         .enforce_budget(budget, history_truncation)
+         .map_err(|error| {
+@@ -290,6 +340,16 @@ pub(crate) async fn finalize(
+                 .insert(super::request_budget::ExhaustedReviewBudget::Detected);
+             match error {
+                 codex_guardian_context::SectionError::EvidenceLimitExceeded { .. } => {
++                    if std::env::var("AG_GUARDIAN_HOST").as_deref() == Ok("1")
++                        && !crate::client::external_guardian_authorization_too_large()
++                        && planned_action_tokens > 0
++                        && budget
++                            .max_input_tokens
++                            .saturating_sub(budget.existing_context_tokens)
++                            < planned_action_tokens
++                    {
++                        crate::client::set_external_guardian_action_too_large(true);
++                    }
+                     CodexErr::ContextWindowExceeded
+                 }
+                 error => CodexErr::InvalidRequest(error.to_string()),
 diff --git a/codex-rs/core/src/guardian/mod.rs b/codex-rs/core/src/guardian/mod.rs
 index 05edc81..45eb2b0 100644
 --- a/codex-rs/core/src/guardian/mod.rs
@@ -267,7 +302,7 @@ index 877b5e8..64e86d6 100644
      let maximum = effective_input_token_limit(model, step.turn.config.model_context_window)
          .saturating_sub(INPUT_TOKEN_MARGIN);
 diff --git a/codex-rs/core/src/guardian/review.rs b/codex-rs/core/src/guardian/review.rs
-index 2d13552..64adca9 100644
+index 2d13552..bc8a2af 100644
 --- a/codex-rs/core/src/guardian/review.rs
 +++ b/codex-rs/core/src/guardian/review.rs
 @@ -13,12 +13,10 @@ use codex_features::Feature;
@@ -387,7 +422,7 @@ index 2d13552..64adca9 100644
 +    use codex_protocol::protocol::CodexErrorInfo as Info;
 +    use GuardianReviewError as Error;
 +    let (code, kind, status, retryable, retry_after) = match error {
-+        Error::Session { message, .. } if message.contains("account changed while preparing model request") =>
++        Error::Session { message, .. } if message.to_ascii_lowercase().contains("account changed") =>
 +            ("action_invalidated", serde_json::json!("review_account_changed"), None, false, None),
 +        Error::Session { error_info, retry_at, .. } => {
 +            let retry_after = retry_at.map(|at| at.saturating_duration_since(Instant::now()).as_millis() as u64);

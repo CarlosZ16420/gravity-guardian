@@ -18,14 +18,16 @@ public static class ReviewAdapter
         {record["original_content"]=content;record["content"]=match.Groups["body"].Value;record["host_metadata"]=match.Groups["meta"].Value;record["envelope_version"]="observed-user-request-v1";}
     }
     public static JsonObject Describe(string tool) => new() {
-        ["kind"] = tool switch { "run_command" => "command_execution", "send_command_input" => "terminal_continuation", "read_file" => "file_read", "write_file" or "edit_file" => "file_write", "search_web" or "read_url_content" => "network_access", "ask_question" => "interaction", _ => "unknown_tool" },
+        ["kind"] = tool switch { "run_command" => "command_execution", "send_command_input" => "terminal_continuation", "read_file" => "file_read", "write_file" or "edit_file" or "write_to_file" or "replace_file_content" or "multi_replace_file_content" => "file_write", "search_web" or "read_url_content" => "network_access", "ask_question" => "interaction", "update_focus" or "update_steps" => "ui_status", "enter_plan_mode" or "exit_plan_mode" => "planning_mode", _ => "unknown_tool" },
         ["interpretation"] = tool switch {
             "run_command" => "Assess the exact CommandLine, Cwd and requested sandbox scope. toolSummary is an assistant description, not safety evidence.",
             "send_command_input" => "Input continues an existing terminal. Do not invent a new command, terminal state, or process identity; unknown state remains unknown.",
             "read_file" => "Assess the exact file path and supplied line/byte range. Reads may expose sensitive data.",
-            "write_file" or "edit_file" => "Assess the exact Path and complete content or Target/Replacement in raw arguments, and existing target state. No executable content has been truncated.",
+            "write_file" or "edit_file" or "write_to_file" or "replace_file_content" or "multi_replace_file_content" => "Assess the exact Path and complete content or Target/Replacement in raw arguments, and existing target state. No executable content has been truncated.",
             "search_web" or "read_url_content" => "Assess the supplied query/URL and parameters. The host has not supplied a verified triggering-action chain.",
             "ask_question" => "This action only presents questions. An answer must be interpreted in its original scope and does not approve arbitrary later actions.",
+            "update_focus" or "update_steps" => "Updates conversation progress UI status text only. Does not read or modify files, run commands, or access external resources.",
+            "enter_plan_mode" or "exit_plan_mode" => "Switches conversation planning mode or hands off a plan document inside the current conversation. Does not directly execute commands or modify workspace files.",
             _ => "No verified specialized parameter contract is available. Use the complete raw request; do not infer terminal state, network triggers or runtime grants." }
     };
     public static string Canonical(JsonNode? node) => node switch {

@@ -145,6 +145,18 @@ function Update-ApprovalReviewerConfig {
         'maxReviewerSessionTurns', 'maxReviewerSessionBytes', 'maxReviewerSessionInputTokens')) {
         $Config.Remove($taskKey)
     }
+    $defaults = [ordered]@{
+        enableNativeAskHandoff = $false
+        maxNativeHistoryBytes = 8388608
+        enableDetailedLogs = $false
+        maxLogSegmentBytes = 16777216
+        maxInputBytes = 1048576
+    }
+    foreach ($taskDefault in $defaults.GetEnumerator()) {
+        if (!$Config.Contains($taskDefault.Key)) {
+            $Config[$taskDefault.Key] = $taskDefault.Value
+        }
+    }
     $Config['policyDirectory'] = Join-Path $PluginDirectory 'policy/effective-codex'
     $Config['guardianPath'] = Join-Path $PluginDirectory 'native/ag-guardian-host.exe'
 }

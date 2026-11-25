@@ -242,7 +242,7 @@ public static class Program
             start.ArgumentList.Add(typeof(Program).Assembly.Location);
         foreach (var arg in new[] { "host", "--config", Path.GetFullPath(config) }) start.ArgumentList.Add(arg);
         Process.Start(start)?.Dispose();
-        for (int attempt = 0; attempt < 25; attempt++)
+        for (int attempt = 0; attempt < 40; attempt++)
         {
             try { await RequestAsync(settings, new { operation = "status" }, TimeSpan.FromMilliseconds(300)); return; }
             catch (Exception e) when (e is IOException or TimeoutException or OperationCanceledException) { await Task.Delay(100); }

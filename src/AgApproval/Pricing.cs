@@ -13,14 +13,14 @@ public sealed record PricingProfile(
     string? Note)
 {
     public static PricingProfile Default { get; } = new(
-        ProfileName: "gpt-6-luna-low-2x-estimate",
-        DisplayLabel: "GPT-6 Luna 低思考 × 2（估算）",
-        Multiplier: 2.0m,
+        ProfileName: "gpt-6-luna-low-1.5x-estimate",
+        DisplayLabel: "GPT-6 Luna 低思考 × 1.5（估算）",
+        Multiplier: 1.5m,
         InputPerMillionUsd: 0.10m,
         CachedInputPerMillionUsd: 0.01m,
         OutputPerMillionUsd: 0.50m,
-        UpdatedAt: "2026-11-21",
-        Note: "估算计价：暂按 OpenAI GPT-6 Luna 低思考模式标准价（输入 $0.10/1M，缓存输入 $0.01/1M，输出含推理 $0.50/1M）的 2 倍折算。"
+        UpdatedAt: "2026-11-25",
+        Note: "估算计价：暂按 OpenAI GPT-6 Luna 低思考模式标准价（输入 $0.10/1M，缓存输入 $0.01/1M，输出含推理 $0.50/1M）的 1.5 倍折算。"
     );
 
     public static PricingProfile Load(string? path)

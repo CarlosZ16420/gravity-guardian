@@ -104,7 +104,7 @@ const server = createServer(async (req, res) => {
         requests.push(frame);
         const index = requests.length;
         const outcome = ['allow', 'deny'][(index - 1) % 2];
-        assert.ok(index <= 2 * repetitions, 'unexpected extra inference');
+        assert.ok(index <= 2 * repetitions + 2, 'unexpected extra inference');
         if (index <= 2) writeFileSync(join(output, 'model-request-' + index + '.json'), JSON.stringify(frame, null, 2));
         const id = 'fixture-' + index;
         const events = [
@@ -136,7 +136,7 @@ try {
     };
     const cargoProfilePrefix = isDev ? 'CARGO_PROFILE_DEV_' : 'CARGO_PROFILE_RELEASE_';
     for (const [key, value] of Object.entries(profile)) env[cargoProfilePrefix + key] = value;
-    for (const name of ['OPENAI_API_KEY','CODEX_API_KEY','CODEX_AUTH_TOKEN','HTTP_PROXY','HTTPS_PROXY','ALL_PROXY']) delete env[name];
+    for (const name of ['OPENAI_API_KEY','CODEX_API_KEY','CODEX_ACCESS_TOKEN','CODEX_AUTH_TOKEN','HTTP_PROXY','HTTPS_PROXY','ALL_PROXY']) delete env[name];
     const cargoArgs = ['+stable', 'test', '--offline', '--locked'];
     if (!isDev) cargoArgs.push('--release');
     cargoArgs.push('--target', 'x86_64-pc-windows-msvc', '-p', 'ag-guardian-host', '--', '--include-ignored', '--nocapture');
@@ -152,27 +152,38 @@ try {
     const [status] = await once(child, 'exit');
     await drain;
     assert.equal(status, 0, 'native round trip failed');
-    assert.equal(requests.length, 2 * repetitions);
+    assert.equal(requests.length, 2 * repetitions + 2);
     assert.equal(latency.length, requests.length);
+    const factsPrefix = 'Host-observed Antigravity facts for the current action, not user authorization: ';
+    const authPrefix = 'Antigravity authorization evidence (current request):\n';
     for (const frame of requests) {
         assert.equal(frame.model, 'codex-auto-review');
         assert.equal(frame.tools?.length ?? 0, 0);
         const action = frame.input.find(item => item.type === 'function_call' && item.name === 'write_file');
         assert.ok(action, 'full native tool proposal missing');
         assert.deepEqual(JSON.parse(action.arguments), JSON.parse(fixture.action.arguments));
-        const prefix = 'Antigravity authorization evidence (current request):\n';
         const evidence = frame.input.filter(item => item.role === 'user')
             .flatMap(item => item.content)
-            .filter(part => part.text?.startsWith(prefix));
+            .filter(part => part.text?.startsWith(authPrefix));
         assert.equal(evidence.length, 1, 'expected exactly one copy of current authorization evidence');
-        assert.deepEqual(JSON.parse(evidence[0].text.slice(prefix.length)), fixture.authorization);
+        assert.deepEqual(JSON.parse(evidence[0].text.slice(authPrefix.length)), fixture.authorization);
+        const facts = frame.input.filter(item => item.role === 'assistant')
+            .flatMap(item => item.content)
+            .filter(part => part.text?.startsWith(factsPrefix));
+        assert.equal(facts.length, 1, 'expected exactly one copy of current host facts');
     }
+    const trunkTurn1 = requests[requests.length - 2];
+    const trunkTurn2 = requests[requests.length - 1];
+    assert.equal(JSON.parse(trunkTurn1.input.find(i => i.role === 'assistant' && i.content?.some(p => p.text?.startsWith(factsPrefix))).content.find(p => p.text?.startsWith(factsPrefix)).text.slice(factsPrefix.length)).turn, 1);
+    assert.equal(JSON.parse(trunkTurn2.input.find(i => i.role === 'assistant' && i.content?.some(p => p.text?.startsWith(factsPrefix))).content.find(p => p.text?.startsWith(factsPrefix)).text.slice(factsPrefix.length)).turn, 2);
+    assert.ok(trunkTurn2.input.some(i => i.role === 'user' && i.content?.some(p => p.text?.includes('Delta turn 2 observed context.'))), 'TrunkReused missing delta history');
     const sorted = [...latency].sort((a,b) => a-b);
     const percentile = fraction => sorted[Math.ceil(fraction * sorted.length) - 1];
     writeFileSync(join(output, 'summary.json'), JSON.stringify({
         capturedModelRequests: requests.length, toolDefinitions: 0, actionBytes: Buffer.byteLength(content),
         fullActionMatched: true, authorizationOrderMatched: true, simulatedVerdicts: ['allow', 'deny'],
         authorizationSourceCount: instructions.length, projectScopesMatched: true, oversizedAuthorizationRejectedBeforeInference: true,
+        trunkReusedVerified: true, oversizedActionAttributedCorrectly: true,
         profile: isDev ? 'Debug' : 'Release', buildOptions: profile,
         releaseOptions: profile, reviewP50Ms: percentile(0.50), reviewP95Ms: percentile(0.95),
     }, null, 2));

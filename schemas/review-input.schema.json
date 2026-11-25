@@ -108,6 +108,8 @@
             "file_write",
             "network_access",
             "interaction",
+            "ui_status",
+            "planning_mode",
             "unknown_tool"
           ]
         },

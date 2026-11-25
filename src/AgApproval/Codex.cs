@@ -105,7 +105,11 @@ public sealed class ReviewGate(Settings settings, Policy policy, IReviewer revie
                     phase = "assessment";
                     result = policy.Apply(assessmentText, id, actionHash);policyResult=result;
                     phase="denial_guard";
-                    try{await guard.RecordAsync(modelInput,result.Decision=="auto_approve",result.Reason,deadline.Token);}
+                    try
+                    {
+                        using var persistCt=new CancellationTokenSource(TimeSpan.FromMilliseconds(500));
+                        await guard.RecordAsync(modelInput,result.Decision=="auto_approve",result.Reason,persistCt.Token);
+                    }
                     catch(Exception e)when(e is IOException or UnauthorizedAccessException or OperationCanceledException)
                     {Console.Error.WriteLine("Could not persist duplicate verdict record");}
                     guardState=guard.Snapshot();
@@ -141,7 +145,11 @@ public sealed class ReviewGate(Settings settings, Policy policy, IReviewer revie
             if(guard!=null)
             {
                 if(guard.HasPending&&policyResult==null)
-                    try{await guard.CancelPendingAsync(deadline.Token);}
+                    try
+                    {
+                        using var cancelCt=new CancellationTokenSource(TimeSpan.FromMilliseconds(500));
+                        await guard.CancelPendingAsync(cancelCt.Token);
+                    }
                     catch(Exception e)when(e is IOException or UnauthorizedAccessException or OperationCanceledException){Console.Error.WriteLine("Interrupted request left for recovery");}
                 await guard.DisposeAsync();
             }
@@ -163,7 +171,8 @@ public sealed class ReviewGate(Settings settings, Policy policy, IReviewer revie
             model = route?.Route=="native"?null:settings.Model, effort = route?.Route=="native"?null:settings.Effort,
             route=route?.Route,ruleId=route?.RuleId,ruleVersion=ReviewRoute.Version,phase, queueMs, contextReadyMs, assessmentReadyMs,
             reviewTimeoutSeconds = settings.ReviewTimeoutSeconds, elapsedMs = watch.ElapsedMilliseconds };
-        await Audit.TryAppendAsync(settings, record, deadline.Token);
+        using(var completedAuditDeadline=new CancellationTokenSource(TimeSpan.FromMilliseconds(500)))
+            await Audit.TryAppendAsync(settings, record, completedAuditDeadline.Token);
         if(result.Decision is "allow" or "auto_approve" or "ask"||result.Decision=="force_ask"&&modelInvoked)
         {
             // The audit write is itself a wait; revocations arriving during it also invalidate approval.
@@ -194,7 +203,7 @@ public sealed class ReviewGate(Settings settings, Policy policy, IReviewer revie
         return result;
     }
     private static bool IsOversizedSingleRequest(Exception e,string? tool)=>
-        tool is ("write_file" or "edit_file") &&
+        tool is ("write_file" or "edit_file" or "write_to_file" or "replace_file_content" or "multi_replace_file_content") &&
         (e.Message=="Input too large" || e is NativeReviewFailure { Code: "native_action_budget_exceeded" or "native_tool_call_limit" });
     private static bool IsRecoverableTranscriptAnomaly(string message)=>
         message is "Unexplained transcript step rollback; current retry segment cannot be established"

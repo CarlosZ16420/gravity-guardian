@@ -96,6 +96,7 @@ public static class NativeGuardianTests
             var input=await Input();var wire=GuardianFacts.Build(input,settings,5000);var history=wire["history"]!.AsArray();
             Check(history.Count==81,"legacy evidence selector was applied to native history");
             Check(history.All(x=>Json.Text(x,"role")!="user"),"authorization leaked into optional history");
+            Check(Json.Text(wire,"conversationId")==conversation,"conversationId missing from native wire");
             var users=wire["authorization"]!["user_instructions"]!.AsArray();
             Check(users.Count==1&&Json.Text(users[0],"text")!.Contains("Do not execute"),"explicit prohibition lost or assistant evidence promoted");
             Check(Json.Text(wire["action"],"name")=="write_file"&&JsonNode.Parse(Json.Text(wire["action"],"arguments")! )?["Content"]?.GetValue<string>()=="evidence only","action changed");
@@ -428,6 +429,24 @@ public static class NativeGuardianTests
             await using var next=new NativeGuardianReviewer(cfg,policy);
             var retry=await new ReviewGate(cfg,policy,next).ReviewAsync(payload,default);
             Check(retry.ReasonCode=="policy_allowed","quota failure prevented the same action from being reviewed again");
+        });
+        await test("bridge frame action overflow attributes to action budget and preserves healthy host process",async()=>{
+            var cfg=JsonSerializer.Deserialize<Settings>(Json.Encode(settings),AgApproval.Json.Options)!;
+            cfg.DataDirectory=Path.Combine(settings.DataDirectory,"bridge-action-overflow");
+            cfg.MaxNativeHistoryBytes=262144;
+            await using var reviewer=new NativeGuardianReviewer(cfg,policy);
+            var gate=new ReviewGate(cfg,policy,reviewer);
+            Check((await gate.ReviewAsync(payload,default)).Decision=="auto_approve","initial review failed");
+            var nearMaxWrite=payload.DeepClone();
+            nearMaxWrite["toolCall"]!["name"]="write_to_file";
+            nearMaxWrite["toolCall"]!["args"]=new JsonObject{["TargetFile"]=Path.Combine(settings.DataDirectory,"large.txt"),["CodeContent"]=new string('x',260500)};
+            var overflow=await gate.ReviewAsync(nearMaxWrite,default);
+            Check(overflow.Decision=="deny"&&overflow.ReasonCode=="request_too_large_retry_smaller","oversized write_to_file misclassified or not retried: "+Json.Encode(overflow));
+            Check((await gate.ReviewAsync(payload,default)).Decision=="auto_approve","subsequent review after bridge overflow failed");
+            var usage=Directory.GetFiles(Path.Combine(cfg.DataDirectory,"logs"),"*.jsonl").SelectMany(File.ReadLines).Select(line=>JsonNode.Parse(line)!)
+                .Where(item=>Json.Text(item,"event")=="review_usage").ToArray();
+            Check(usage.Length==3&&Json.Text(usage[1],"reasonCode")=="native_action_budget_exceeded"
+                &&Json.Text(usage[2]["diagnostics"],"sessionReason")=="continued","pre-submit failure misattributed or killed healthy host");
         });
     }
 }

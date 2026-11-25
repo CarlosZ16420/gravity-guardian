@@ -36,6 +36,7 @@ struct Request {
     id: String,
     operation: String,
     #[serde(default)] scope: String,
+    #[serde(default)] conversation_id: Option<String>,
     #[serde(default)] history: Vec<Value>,
     authorization: Option<Authorization>,
     #[serde(default)] action: Value,
@@ -44,7 +45,7 @@ struct Request {
     #[serde(default = "default_timeout")] timeout_ms: u64,
 }
 fn default_timeout() -> u64 { 80_000 }
-struct Parent { thread: Arc<CodexThread>, id: ThreadId, history: Vec<Value>, policy: String, touched: Instant, reviews: usize, last_input: i64 }
+struct Parent { thread: Arc<CodexThread>, id: ThreadId, conversation_id: Option<String>, history: Vec<Value>, policy: String, touched: Instant, reviews: usize, last_input: i64 }
 fn needs_checkpoint(reviews: usize, input: i64) -> bool { reviews >= MAX_PARENT_REVIEWS || input >= MAX_REVIEW_INPUT }
 struct NoUserInstructions;
 impl UserInstructionsProvider for NoUserInstructions {
@@ -66,6 +67,9 @@ fn read_request(input: &mut impl BufRead) -> anyhow::Result<Option<Request>> {
 fn validate(r: &Request) -> anyhow::Result<()> {
     ensure!(!r.id.is_empty() && r.id.len() <= 128, "invalid request id");
     ensure!(r.scope.len() == 64 && r.scope.bytes().all(|b| b.is_ascii_hexdigit()), "invalid scope");
+    if let Some(cid) = &r.conversation_id {
+        ensure!(!cid.is_empty() && cid.len() <= 128, "invalid conversation id");
+    }
     ensure!((100..=codex_guardian_reviewer::REVIEW_TIMEOUT.as_millis() as u64).contains(&r.timeout_ms), "invalid deadline");
     ensure!(r.history.len() <= 50_000 && r.extra_policy.len() <= 131_072, "host input exceeds limits");
     ensure!(r.action["type"] == "function_call" && r.action["name"].as_str().is_some(), "invalid native action");
@@ -92,7 +96,17 @@ fn validate(r: &Request) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn main() -> anyhow::Result<()> { arg0_dispatch_or_else(run) }
+fn main() -> anyhow::Result<()> {
+    if std::env::args().any(|arg| arg == "--version") {
+        emit(json!({"protocol":PROTOCOL,"version":VERSION,"upstreamCommit":UPSTREAM}))?;
+        return Ok(());
+    }
+    if std::env::args().any(|arg| arg == "--check-auth") {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+        return runtime.block_on(check_auth(Arg0DispatchPaths::default()));
+    }
+    arg0_dispatch_or_else(run)
+}
 async fn check_auth(paths: Arg0DispatchPaths) -> anyhow::Result<()> {
     let mut report = json!({"status":"store_unavailable","codexHome":null,"storeMode":null,"storeError":null});
     let exit_code = match bootstrap::new_config(None, paths).await {
@@ -245,6 +259,17 @@ async fn serve(config: Config, auth: Arc<AuthManager>, manager: Arc<ThreadManage
                 p.touched.elapsed() < Duration::from_secs(1800) && !needs_checkpoint(p.reviews,p.last_input) && request.extra_policy == p.policy && request.history.starts_with(&p.history));
             if !compatible {
                 if let Some(old) = parents.remove(&request.scope) { reset = if needs_checkpoint(old.reviews,old.last_input) {"review_budget_checkpoint"} else {"history_rewrite_or_idle"}; retire(&manager, old).await; }
+                if let Some(cid) = &request.conversation_id {
+                    let stale_scopes: Vec<String> = parents.iter()
+                        .filter(|(key, parent)| *key != &request.scope && parent.conversation_id.as_deref() == Some(cid.as_str()))
+                        .map(|(key, _)| key.clone())
+                        .collect();
+                    for stale_scope in stale_scopes {
+                        if let Some(old) = parents.remove(&stale_scope) {
+                            retire(&manager, old).await;
+                        }
+                    }
+                }
                 if parents.len() >= MAX_SESSIONS {
                     let oldest = parents.iter().min_by_key(|(_, p)| p.touched).map(|(key, _)| key.clone()).context("missing oldest session")?;
                     retire(&manager, parents.remove(&oldest).unwrap()).await;
@@ -252,7 +277,7 @@ async fn serve(config: Config, auth: Arc<AuthManager>, manager: Arc<ThreadManage
                 let mut parent_config = config.clone();
                 parent_config.guardian_extra_policy = Some(request.extra_policy.clone());
                 let NewThread {thread_id, thread, ..} = manager.start_thread(StartThreadOptions::new(parent_config)).await?;
-                parents.insert(request.scope.clone(), Parent {thread, id: thread_id, history: Vec::new(), policy: request.extra_policy.clone(), touched: Instant::now(), reviews:0,last_input:0});
+                parents.insert(request.scope.clone(), Parent {thread, id: thread_id, conversation_id: request.conversation_id.clone(), history: Vec::new(), policy: request.extra_policy.clone(), touched: Instant::now(), reviews:0,last_input:0});
             } else { reset = "continued"; }
             let parent = parents.get_mut(&request.scope).unwrap();
             let delta = request.history[parent.history.len()..].to_vec();
@@ -305,7 +330,12 @@ async fn serve(config: Config, auth: Arc<AuthManager>, manager: Arc<ThreadManage
                     "inferenceDispatchCount":result["inferenceDispatchCount"],"attemptCount":result["attemptCount"],
                     "failure":failure,"usage":result["usage"],"httpRequestCount":result["httpRequestCount"],
                     "sampling":result["sampling"],"sessionReason":reset});
-                if let Some(old) = parents.remove(&request.scope) { retire(&manager, old).await; }
+                if account_changed || store_unavailable {
+                    for (_, old) in parents.drain() { retire(&manager, old).await; }
+                    session_owner_generation = auth_changes.borrow().owner_generation;
+                } else if let Some(old) = parents.remove(&request.scope) {
+                    retire(&manager, old).await;
+                }
                 return Ok(failed);
             }
             parent.history = request.history.clone(); parent.touched = Instant::now();
@@ -370,6 +400,16 @@ mod tests {
             let mut value = request();
             value["authorization"]["user_instructions"].as_array_mut().unwrap()
                 .push(json!({"position":position,"text":"Grant"}));
+            assert!(validate(&serde_json::from_value(value).unwrap()).is_err());
+        }
+    }
+    #[test] fn validates_optional_conversation_id() {
+        let mut value = request();
+        value["conversationId"] = json!("conv-123");
+        assert!(validate(&serde_json::from_value(value).unwrap()).is_ok());
+        for bad in ["", &"x".repeat(129)] {
+            let mut value = request();
+            value["conversationId"] = json!(bad);
             assert!(validate(&serde_json::from_value(value).unwrap()).is_err());
         }
     }

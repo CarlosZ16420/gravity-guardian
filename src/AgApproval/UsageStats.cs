@@ -439,99 +439,226 @@ public static partial class UsageStats
 
 public static class LogCompactor
 {
-    public sealed record CompactionResult(string LogDirectory, int SegmentFiles, long BeforeBytes, long AfterBytes, long SavedBytes, int KeptEvents, int DroppedVerboseDumps);
+    public sealed record CompactionResult(string LogDirectory, int SegmentFiles, long BeforeBytes, long AfterBytes, long SavedBytes, int KeptEvents, int DroppedVerboseDumps, int SkippedActiveOrLockedFiles = 0);
 
     public static CompactionResult Compact(string dataDirectory)
     {
         var logsDir = Path.GetFullPath(Path.Combine(dataDirectory, "logs"));
         if (!Directory.Exists(logsDir))
-            return new(logsDir, 0, 0, 0, 0, 0, 0);
+            return new(logsDir, 0, 0, 0, 0, 0, 0, 0);
+
+        using var lockStream = AcquireCompactionLock(logsDir);
+        CleanupStaleStages(logsDir);
 
         var files = Directory.GetFiles(logsDir, "*.jsonl", SearchOption.TopDirectoryOnly)
             .OrderBy(p => p, StringComparer.OrdinalIgnoreCase)
             .ToArray();
         long beforeBytes = files.Sum(f => new FileInfo(f).Length);
         if (files.Length == 0)
-            return new(logsDir, 0, 0, 0, 0, 0, 0);
+            return new(logsDir, 0, 0, 0, 0, 0, 0, 0);
+
+        var todayUtc = DateTime.UtcNow.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+        var groups = new Dictionary<string, (bool IsDated, List<string> Files)>(StringComparer.OrdinalIgnoreCase);
+        int skipped = 0;
+
+        foreach (var file in files)
+        {
+            var name = Path.GetFileName(file);
+            var dot = name.IndexOf('.');
+            var prefix = dot > 0 ? name[..dot] : "";
+            bool isDated = Regex.IsMatch(prefix, @"^\d{4}-\d{2}-\d{2}$");
+            if (isDated && string.Equals(prefix, todayUtc, StringComparison.Ordinal))
+            {
+                skipped++;
+                continue;
+            }
+            var key = isDated ? prefix : "legacy";
+            if (!groups.TryGetValue(key, out var group))
+            {
+                group = (isDated, new List<string>());
+                groups[key] = group;
+            }
+            group.Files.Add(file);
+        }
 
         var tempDir = Path.Combine(logsDir, "compact-stage-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(tempDir);
-        var writers = new Dictionary<string, StreamWriter>(StringComparer.OrdinalIgnoreCase);
         int kept = 0, dropped = 0;
 
         try
         {
-            foreach (var file in files)
+            foreach (var (key, group) in groups)
             {
-                var name = Path.GetFileName(file);
-                var dot = name.IndexOf('.');
-                var prefix = dot > 0 ? name[..dot] : "";
-                if (!Regex.IsMatch(prefix, @"^\d{4}-\d{2}-\d{2}$"))
-                    prefix = DateTime.UtcNow.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
-                if (!writers.TryGetValue(prefix, out var writer))
+                var opened = new List<(string Path, FileStream Stream)>(group.Files.Count);
+                try
                 {
-                    var outPath = Path.Combine(tempDir, prefix + ".000.jsonl");
-                    writer = new StreamWriter(new FileStream(outPath, FileMode.Append, FileAccess.Write, FileShare.Read), new UTF8Encoding(false));
-                    writers[prefix] = writer;
-                }
-
-                using var fs = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-                using var reader = new StreamReader(fs, Encoding.UTF8);
-                string? line;
-                while ((line = reader.ReadLine()) != null)
-                {
-                    if (string.IsNullOrWhiteSpace(line)) continue;
-                    if (line.Contains("\"event\":\"review_context\"", StringComparison.Ordinal) ||
-                        line.Contains("\"event\":\"guardian_input\"", StringComparison.Ordinal) ||
-                        line.Contains("\"event\":\"review_transport\"", StringComparison.Ordinal))
-                    {
-                        dropped++;
-                        continue;
-                    }
-                    if (line.Length > 8192 && (line.Contains("\"event\":\"tool_completed\"", StringComparison.Ordinal) ||
-                                               line.Contains("\"event\":\"review_received\"", StringComparison.Ordinal)))
+                    bool locked = false;
+                    foreach (var file in group.Files)
                     {
                         try
                         {
-                            var obj = JsonNode.Parse(line)?.AsObject();
-                            if (obj != null)
-                            {
-                                obj.Remove("payload");
-                                writer.WriteLine(obj.ToJsonString(Json.Options));
-                                kept++;
-                                continue;
-                            }
+                            opened.Add((file, new FileStream(file, FileMode.Open, FileAccess.ReadWrite, FileShare.None)));
                         }
-                        catch (Exception e) when (e is JsonException or InvalidOperationException)
+                        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
                         {
-                            dropped++;
-                            continue;
+                            locked = true;
+                            break;
                         }
                     }
-                    writer.WriteLine(line);
-                    kept++;
+                    if (locked)
+                    {
+                        skipped += group.Files.Count;
+                        continue;
+                    }
+
+                    string targetName = ChooseCompactedName(logsDir, key, group.IsDated, group.Files);
+                    string outPath = Path.Combine(tempDir, targetName);
+                    int groupKept = 0, groupDropped = 0;
+                    using (var writer = new StreamWriter(new FileStream(outPath, FileMode.CreateNew, FileAccess.Write, FileShare.None), new UTF8Encoding(false)))
+                    {
+                        foreach (var (_, fs) in opened)
+                        {
+                            fs.Position = 0;
+                            using var reader = new StreamReader(fs, Encoding.UTF8, detectEncodingFromByteOrderMarks: true, leaveOpen: true);
+                            string? line;
+                            while ((line = reader.ReadLine()) != null)
+                            {
+                                if (string.IsNullOrWhiteSpace(line)) continue;
+                                if (line.Contains("\"event\":\"review_context\"", StringComparison.Ordinal) ||
+                                    line.Contains("\"event\":\"guardian_input\"", StringComparison.Ordinal) ||
+                                    line.Contains("\"event\":\"review_transport\"", StringComparison.Ordinal))
+                                {
+                                    groupDropped++;
+                                    continue;
+                                }
+                                if (line.Length > 8192 && (line.Contains("\"event\":\"tool_completed\"", StringComparison.Ordinal) ||
+                                                           line.Contains("\"event\":\"review_received\"", StringComparison.Ordinal)))
+                                {
+                                    try
+                                    {
+                                        var obj = JsonNode.Parse(line)?.AsObject();
+                                        if (obj != null)
+                                        {
+                                            obj.Remove("payload");
+                                            writer.WriteLine(obj.ToJsonString(Json.Options));
+                                            groupKept++;
+                                            continue;
+                                        }
+                                    }
+                                    catch (Exception e) when (e is JsonException or InvalidOperationException)
+                                    {
+                                        groupDropped++;
+                                        continue;
+                                    }
+                                }
+                                writer.WriteLine(line);
+                                groupKept++;
+                            }
+                        }
+                        writer.Flush();
+                    }
+
+                    foreach (var (_, fs) in opened) fs.Dispose();
+                    opened.Clear();
+
+                    var oldBackupDir = Path.Combine(tempDir, "old-" + key);
+                    Directory.CreateDirectory(oldBackupDir);
+                    var movedOriginals = new List<(string Original, string Backup)>(group.Files.Count);
+                    var targetDest = Path.Combine(logsDir, targetName);
+                    try
+                    {
+                        foreach (var file in group.Files)
+                        {
+                            var backup = Path.Combine(oldBackupDir, Path.GetFileName(file));
+                            File.Move(file, backup);
+                            movedOriginals.Add((file, backup));
+                        }
+                        File.Move(outPath, targetDest, overwrite: true);
+                    }
+                    catch
+                    {
+                        foreach (var (orig, backup) in movedOriginals)
+                        {
+                            try
+                            {
+                                if (File.Exists(backup) && !File.Exists(orig))
+                                    File.Move(backup, orig);
+                            }
+                            catch (IOException) { }
+                            catch (UnauthorizedAccessException) { }
+                        }
+                        throw;
+                    }
+
+                    kept += groupKept;
+                    dropped += groupDropped;
+                }
+                finally
+                {
+                    foreach (var (_, fs) in opened)
+                    {
+                        try { fs.Dispose(); } catch { }
+                    }
                 }
             }
         }
         finally
         {
-            foreach (var w in writers.Values) { w.Flush(); w.Dispose(); }
+            try { if (Directory.Exists(tempDir)) Directory.Delete(tempDir, recursive: true); }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
         }
-
-        foreach (var oldFile in files)
-        {
-            try { File.Delete(oldFile); } catch (IOException) { } catch (UnauthorizedAccessException) { }
-        }
-        foreach (var newFile in Directory.GetFiles(tempDir, "*.jsonl"))
-        {
-            var dest = Path.Combine(logsDir, Path.GetFileName(newFile));
-            if (File.Exists(dest))
-                dest = Path.Combine(logsDir, Path.GetFileNameWithoutExtension(newFile) + ".compacted.jsonl");
-            File.Move(newFile, dest, overwrite: true);
-        }
-        try { Directory.Delete(tempDir, recursive: true); } catch (IOException) { }
 
         long afterBytes = Directory.GetFiles(logsDir, "*.jsonl", SearchOption.TopDirectoryOnly).Sum(f => new FileInfo(f).Length);
-        return new(logsDir, files.Length, beforeBytes, afterBytes, Math.Max(0, beforeBytes - afterBytes), kept, dropped);
+        return new(logsDir, files.Length, beforeBytes, afterBytes, Math.Max(0, beforeBytes - afterBytes), kept, dropped, skipped);
+    }
+
+    private static FileStream AcquireCompactionLock(string logsDir)
+    {
+        var lockPath = Path.Combine(logsDir, ".compact.lock");
+        for (int attempt = 0; attempt < 40; attempt++)
+        {
+            try
+            {
+                return new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None, 1, FileOptions.DeleteOnClose);
+            }
+            catch (IOException) when (attempt < 39)
+            {
+                Thread.Sleep(25);
+            }
+            catch (UnauthorizedAccessException) when (attempt < 39)
+            {
+                Thread.Sleep(25);
+            }
+        }
+        throw new IOException("Another log compaction is currently in progress.");
+    }
+
+    private static void CleanupStaleStages(string logsDir)
+    {
+        foreach (var dir in Directory.GetDirectories(logsDir, "compact-stage-*", SearchOption.TopDirectoryOnly))
+        {
+            try
+            {
+                var info = new DirectoryInfo(dir);
+                if (DateTime.UtcNow - info.CreationTimeUtc > TimeSpan.FromMinutes(10))
+                    Directory.Delete(dir, recursive: true);
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+    }
+
+    private static string ChooseCompactedName(string logsDir, string key, bool isDated, List<string> groupFiles)
+    {
+        if (isDated) return key + ".000.jsonl";
+        var sourceNames = new HashSet<string>(groupFiles.Select(f => Path.GetFileName(f)!), StringComparer.OrdinalIgnoreCase);
+        for (int idx = 0; idx < 1000; idx++)
+        {
+            var candidate = $"{key}.{idx:D3}.jsonl";
+            if (sourceNames.Contains(candidate) || !File.Exists(Path.Combine(logsDir, candidate)))
+                return candidate;
+        }
+        return $"{key}.{Guid.NewGuid():N}.jsonl";
     }
 }

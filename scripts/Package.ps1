@@ -40,7 +40,7 @@ foreach ($item in (Get-ChildItem -LiteralPath $taskBundle -Force)) {
 Copy-Item -LiteralPath (Join-Path $taskBundle 'app/CodexApprovalPanel.exe') -Destination (Join-Path $taskRelease 'GravitySteward.exe') -Force
 
 New-Item -ItemType Directory -Path (Join-Path $taskRelease 'scripts') -Force | Out-Null
-foreach ($taskName in @('Install.ps1','Uninstall.ps1','Review-Mode.ps1','Doctor.ps1','Analyze-Logs.ps1','Compact-Logs.ps1','Apply-Update.ps1','Test-Hooks.ps1')) {
+foreach ($taskName in @('Install.ps1','Uninstall.ps1','Review-Mode.ps1','Resolve-Runtime.ps1','Doctor.ps1','Analyze-Logs.ps1','Compact-Logs.ps1','Apply-Update.ps1','Test-Hooks.ps1')) {
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot $taskName) -Destination (Join-Path $taskRelease 'scripts')
 }
 
@@ -257,11 +257,6 @@ try {
     $taskPublishLock.Dispose()
 }
 
-if ([IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($taskStage)) -eq (Join-Path $taskArtifacts 'releases') -and
-    (Split-Path $taskStage -Leaf) -match '^stage-[a-f0-9]{32}$') {
-    Remove-Item -LiteralPath $taskStage -Recurse -Force
-}
-
 @{
     package = Join-Path $taskArtifacts $taskStandalone.assetName
     litePackage = Join-Path $taskArtifacts $taskLite.assetName
@@ -273,6 +268,12 @@ if ([IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($taskStage)) -eq (Join-Pa
     bytes = $taskStandalone.zipSizeBytes
 } | ConvertTo-Json
 } finally {
+    if ($taskStage -and
+        [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($taskStage)) -eq (Join-Path $taskRoot 'artifacts/releases') -and
+        (Split-Path $taskStage -Leaf) -match '^stage-[a-f0-9]{32}$' -and
+        (Test-Path -LiteralPath $taskStage)) {
+        Remove-Item -LiteralPath $taskStage -Recurse -Force -ErrorAction SilentlyContinue
+    }
     if ($null -eq $taskOriginalTmp) { Remove-Item -LiteralPath 'Env:TMP' -ErrorAction SilentlyContinue } else { [Environment]::SetEnvironmentVariable('TMP', [string]$taskOriginalTmp, 'Process') }
     if ($null -eq $taskOriginalTemp) { Remove-Item -LiteralPath 'Env:TEMP' -ErrorAction SilentlyContinue } else { [Environment]::SetEnvironmentVariable('TEMP', [string]$taskOriginalTemp, 'Process') }
 }

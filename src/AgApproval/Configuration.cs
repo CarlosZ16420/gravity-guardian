@@ -20,7 +20,7 @@ public sealed class Settings
     public string[] TranscriptRoots { get; set; } = [];
     public int ReviewTimeoutSeconds { get; set; } = 90;
     public int HookTimeoutSeconds { get; set; } = 100;
-    public int MaxInputBytes { get; set; } = 524288;
+    public int MaxInputBytes { get; set; } = 1048576;
     public int MaxQueue { get; set; } = 8;
     public bool EnableNativeRouting { get; set; } = true;
     public string GuardianPath { get; set; } = "";

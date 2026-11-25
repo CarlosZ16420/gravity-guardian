@@ -71,7 +71,7 @@ public static class GuardianFacts
                 history.Add(Message("assistant",$"Host-observed trajectory window: {skipNonUserUnits} older context units were omitted to fit the {settings.MaxNativeHistoryBytes} byte bridge budget; the authorization evidence is unchanged."));
             foreach(var unit in units.Skip(skipNonUserUnits))
                 foreach(var item in unit)history.Add(item.DeepClone());
-            return new JsonObject{["id"]=input.Id,["operation"]="assess",["scope"]=scope,["history"]=history,
+            return new JsonObject{["id"]=input.Id,["operation"]="assess",["scope"]=scope,["conversationId"]=input.Conversation,["history"]=history,
                 ["authorization"]=new JsonObject{["user_instructions"]=instructions.DeepClone(),
                     ["project_rules"]=rules.DeepClone(),["project_authorizations"]=grants?.DeepClone()??new JsonObject()},
                 ["action"]=Action(action["toolCall"]!,"proposed-"+input.Id),["extraPolicy"]=extraPolicy,["timeoutMs"]=Math.Clamp(timeoutMs,100,90000),
@@ -96,8 +96,10 @@ public static class GuardianFacts
                 return request;
             if(boundedSkip==totalNonUser)break;
         }
-        var actionBytes=Encoding.UTF8.GetByteCount(request["action"]!.ToJsonString(Json.PromptOptions));
-        var code=actionBytes>=settings.MaxNativeHistoryBytes?"native_action_budget_exceeded":"review_authorization_budget_exceeded";
+        var withoutAction=request.DeepClone().AsObject();
+        withoutAction["action"]=new JsonObject();
+        var withoutActionBytes=Encoding.UTF8.GetByteCount(withoutAction.ToJsonString(Json.PromptOptions));
+        var code=withoutActionBytes>settings.MaxNativeHistoryBytes?"review_authorization_budget_exceeded":"native_action_budget_exceeded";
         throw new NativeReviewFailure("Required native review input exceeds the bridge frame budget.",
             new JsonObject{["reasonCode"]=code,["rawErrorKind"]="bridge_frame_budget",["retryable"]=false});
     }

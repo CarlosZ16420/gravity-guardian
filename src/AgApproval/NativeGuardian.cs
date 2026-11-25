@@ -12,6 +12,7 @@ public sealed class NativeReviewFailure(string message,JsonObject? failure) : IO
 
 public sealed class NativeGuardianReviewer(Settings settings,Policy policy) : IReviewer,IAsyncDisposable
 {
+    internal static readonly string[] StrippedAuthEnvironmentVariables=["OPENAI_API_KEY","CODEX_API_KEY","CODEX_ACCESS_TOKEN","CODEX_AUTH_TOKEN","CODEX_GUARDIAN_REPLAY","CODEX_GUARDIAN_REPLAY_ALLOW_INFERENCE"];
     private readonly SemaphoreSlim serial=new(1);
     private readonly Queue<string> stderr=new();
     private Process? process;
@@ -68,8 +69,12 @@ public sealed class NativeGuardianReviewer(Settings settings,Policy policy) : IR
             _=policy.Apply(text,input.Id,input.Hash);
             return text;
         }
-        catch(NativeReviewFailure failure) when(reply?["sessionRetired"] is JsonValue status &&
-            status.TryGetValue<bool>(out var retired) && (retired || failure.Code is "native_tool_call_limit" or "context_invalid")){throw;}
+        catch(NativeReviewFailure failure) when((reply?["sessionRetired"] is JsonValue status &&
+            status.TryGetValue<bool>(out var retired) && (retired || failure.Code is "native_tool_call_limit" or "context_invalid")) || !submitted)
+        {
+            if(!submitted)transportFailure=failure.Details;
+            throw;
+        }
         catch(NativeReviewFailure failure) { transportFailure=failure.Details; await StopAsync(); throw; }
         catch { await StopAsync();throw; }
         finally
@@ -190,7 +195,7 @@ public sealed class NativeGuardianReviewer(Settings settings,Policy policy) : IR
         foreach(var argument in settings.GuardianPrefixArguments)start.ArgumentList.Add(argument);
         start.Environment["CODEX_HOME"]=settings.CodexHome;
         start.Environment["AG_GUARDIAN_HOST"]="1";
-        foreach(var key in new[]{"OPENAI_API_KEY","CODEX_API_KEY","CODEX_AUTH_TOKEN","CODEX_GUARDIAN_REPLAY","CODEX_GUARDIAN_REPLAY_ALLOW_INFERENCE"})start.Environment.Remove(key);
+        foreach(var key in StrippedAuthEnvironmentVariables)start.Environment.Remove(key);
         if(!string.IsNullOrWhiteSpace(settings.Proxy)){start.Environment["HTTP_PROXY"]=settings.Proxy;start.Environment["HTTPS_PROXY"]=settings.Proxy;}
         process=Process.Start(start)??throw new IOException("Cannot start native Guardian");
         lock(stderr)stderr.Clear();

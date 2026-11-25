@@ -5,7 +5,10 @@
 
 #include <commctrl.h>
 #include <dwmapi.h>
+#include <objidl.h>
+#include <gdiplus.h>
 #include <shellapi.h>
+#include <shobjidl.h>
 
 #include <algorithm>
 #include <atomic>
@@ -26,19 +29,22 @@ constexpr wchar_t kWindowClass[] = L"AntigravityCodexApprovalPanelWnd";
 constexpr UINT kDwmWindowCornerPreference = 33;
 constexpr DWORD kDwmRound = 2;
 constexpr int kPanelWidth = 414;
-constexpr int kCompactHeight = 581;
-constexpr int kBannerSpace = 50;
-constexpr int kPreferencesSpace = 158;
-constexpr DWORD kPanelStyle = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN;
-constexpr DWORD kPanelExStyle = WS_EX_DLGMODALFRAME;
+constexpr int kHeaderHeight = 60;
+constexpr int kCompactHeight = 730;
+constexpr int kBannerSpace = 56;
+constexpr int kPreferencesSpace = 204;
+// Keep DWM's shadow, without a native caption or caption buttons for Windows to
+// repaint during the system move loop. All window actions use our own controls.
+constexpr DWORD kPanelStyle = WS_POPUP | WS_THICKFRAME | WS_CLIPCHILDREN;
+constexpr DWORD kPanelExStyle = WS_EX_APPWINDOW;
 
-constexpr COLORREF kText = RGB(32, 39, 52);
-constexpr COLORREF kSecondary = RGB(87, 98, 114);
-constexpr COLORREF kBlue = RGB(15, 104, 229);
-constexpr COLORREF kGreen = RGB(20, 122, 65);
-constexpr COLORREF kRed = RGB(172, 35, 48);
-
-enum class TrayColor { Green, Blue, Amber, Red };
+constexpr COLORREF kText = RGB(15, 23, 42);
+constexpr COLORREF kSecondary = RGB(100, 116, 139);
+constexpr COLORREF kBlue = RGB(30, 64, 175);
+constexpr COLORREF kGreen = RGB(5, 130, 85);
+constexpr COLORREF kRed = RGB(185, 50, 62);
+constexpr COLORREF kBackground = RGB(248, 250, 252);
+constexpr COLORREF kBorder = RGB(229, 231, 235);
 
 struct PanelConfig {
     std::wstring geminiRoot;
@@ -79,7 +85,7 @@ struct StatsResult {
     std::optional<ApprovalStats> custom;
     std::optional<DateRange> dates;
     uint64_t logsSizeBytes = 0;
-    std::wstring pricingLabel = L"GPT-6 Luna 低思考 × 2（估算）";
+    std::wstring pricingLabel = L"GPT-6 Luna 低思考 × 1.5（估算）";
 };
 
 struct RuntimeState {
@@ -119,6 +125,23 @@ enum class WorkKind {
     InstallOrRepair
 };
 
+enum class UpdatePhase { Idle, Checking, Current, Available, CheckFailed, Downloading, Ready, Waiting, DownloadFailed };
+enum class UpdateAction { Close, Check, Download, OpenDownloads };
+
+struct UpdateNotice {
+    std::wstring title;
+    std::wstring body;
+    std::wstring detail;
+    std::wstring currentVersion;
+    std::wstring latestVersion;
+    std::wstring primaryLabel;
+    UpdateAction action = UpdateAction::Close;
+    bool busy = false;
+    bool showSecondary = false;
+    int icon = ID_BTN_CHECK_UPDATE;
+    COLORREF accent = kBlue;
+};
+
 struct WorkResult {
     WorkKind kind{};
     bool ok = false;
@@ -141,14 +164,17 @@ struct App {
     HFONT fontRegular = nullptr;
     HFONT fontSmall = nullptr;
     HFONT fontMetric = nullptr;
+    HFONT fontDialogTitle = nullptr;
     HBRUSH brushBg = nullptr;
     HBRUSH brushCard = nullptr;
     HBRUSH brushBanner = nullptr;
+    HWND tooltip = nullptr;
+    HWND hoveredControl = nullptr;
 
-    HICON iconGreen = nullptr;
-    HICON iconBlue = nullptr;
-    HICON iconAmber = nullptr;
-    HICON iconRed = nullptr;
+    HICON iconNormal = nullptr;
+    HICON iconNormalLarge = nullptr;
+    HICON iconGray = nullptr;
+    HICON iconGrayLarge = nullptr;
 
     PanelConfig cfg;
     UpdateConfig updateCfg;
@@ -168,12 +194,29 @@ struct App {
     StatsResult stats;
     bool preferencesOpen = false;
     int scrollY = 0;
+    bool needsScroll = false;
+    HWND scrollbar = nullptr;
+    UpdatePhase updatePhase = UpdatePhase::Idle;
+    std::wstring updateError;
+    std::wstring updateCurrentVersion = PANEL_VERSION_WIDE;
+    HWND updatePopup = nullptr;
+    HWND lblUpdatePopupTitle = nullptr;
+    HWND lblUpdatePopupBody = nullptr;
+    HWND lblUpdatePopupDetail = nullptr;
+    HWND lblUpdatePopupCurrent = nullptr;
+    HWND lblUpdatePopupLatest = nullptr;
+    HWND btnUpdatePopupPrimary = nullptr;
+    HWND btnUpdatePopupSecondary = nullptr;
+    HWND btnUpdatePopupClose = nullptr;
+    HWND updatePopupTooltip = nullptr;
 
     // Child controls
     HWND lblTitle = nullptr;
+    HWND btnHeaderUpdate = nullptr;
+    HWND btnGitHub = nullptr;
+    HWND btnHide = nullptr;
     HWND lblStatus = nullptr;
     HWND btnApprovalTakeover = nullptr;
-    HWND lblBackend = nullptr;
     HWND btnLaunchAg = nullptr;
     HWND btnServiceAction = nullptr;
     HWND btnRefresh = nullptr;
@@ -186,6 +229,12 @@ struct App {
     HWND lblStatsCount = nullptr;
     HWND lblStatsSub = nullptr;
     HWND lblStatsTokens = nullptr;
+    HWND lblStatsTokenDetail = nullptr;
+    HWND lblStatsInputTitle = nullptr;
+    HWND lblStatsOutputTitle = nullptr;
+    HWND lblStatsCacheTitle = nullptr;
+    HWND lblStatsOutput = nullptr;
+    HWND lblStatsCacheRate = nullptr;
     HWND lblStatsCost = nullptr;
     HWND lblPricingTitle = nullptr;
     HWND lblPricingNote = nullptr;
@@ -217,6 +266,106 @@ struct App {
 App g_app;
 
 void ResizePanelToContent();
+void UpdateTrayAppearance();
+void SyncUpdatePopup();
+void ShowUpdatePopup(bool show = true);
+void PositionUpdatePopup();
+
+void ConfigureFramelessWindow(HWND hwnd) {
+    const DWORD round = kDwmRound;
+    DwmSetWindowAttribute(hwnd, kDwmWindowCornerPreference, &round, sizeof(round));
+    const MARGINS shadow{1, 1, 1, 1};
+    DwmExtendFrameIntoClientArea(hwnd, &shadow);
+    SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+}
+
+UpdateNotice GetUpdateNotice() {
+    UpdateNotice notice;
+    notice.currentVersion = L"v" + g_app.updateCurrentVersion;
+    notice.latestVersion = g_app.state.availableUpdate.version.empty() ? L"尚未获取" : L"v" + g_app.state.availableUpdate.version;
+    notice.primaryLabel = L"知道了";
+    switch (g_app.updatePhase) {
+    case UpdatePhase::Idle:
+        notice.title = L"检查应用更新";
+        notice.body = L"检查是否有可用的新版本。";
+        notice.primaryLabel = L"检查更新";
+        notice.action = UpdateAction::Check;
+        break;
+    case UpdatePhase::Checking:
+        notice.title = L"正在检查更新";
+        notice.body = L"正在连接更新服务，确认是否有新版本。\n请稍候，这通常只需几秒。";
+        notice.latestVersion = L"检查中…";
+        notice.primaryLabel = L"正在检查…";
+        notice.busy = notice.showSecondary = true;
+        break;
+    case UpdatePhase::Current:
+        notice.title = L"当前无需更新";
+        notice.body = L"你正在使用最新版本。\n可以继续正常使用 Gravity Steward。";
+        if (g_app.state.availableUpdate.version.empty()) notice.latestVersion = notice.currentVersion;
+        notice.icon = ID_ICON_UPDATE_SUCCESS;
+        notice.accent = kGreen;
+        break;
+    case UpdatePhase::Available:
+        notice.title = L"发现新版本";
+        notice.body = g_app.state.pluginInstalled ? L"有新版本可用，建议更新以获得最新改进。\n更新包会在安装前完成校验。" :
+            L"有新版本可用。\n打开项目发布页即可下载最新安装包。";
+        notice.primaryLabel = g_app.state.pluginInstalled ? L"下载并更新" : L"前往下载";
+        notice.action = g_app.state.pluginInstalled ? UpdateAction::Download : UpdateAction::OpenDownloads;
+        notice.showSecondary = true;
+        break;
+    case UpdatePhase::CheckFailed:
+        notice.title = L"暂时无法检查更新";
+        notice.body = L"暂时无法确认是否需要更新。\n请检查网络连接后重试。";
+        notice.detail = g_app.updateError;
+        notice.primaryLabel = L"重新检查";
+        notice.action = UpdateAction::Check;
+        notice.showSecondary = true;
+        notice.icon = ID_ICON_UPDATE_ERROR;
+        notice.accent = kRed;
+        break;
+    case UpdatePhase::Downloading:
+        notice.title = L"正在准备更新";
+        notice.body = L"正在下载并校验更新包。\n完成后会自动继续安装。";
+        notice.primaryLabel = L"正在准备…";
+        notice.busy = notice.showSecondary = true;
+        break;
+    case UpdatePhase::Ready:
+        notice.title = L"更新已准备就绪";
+        notice.body = L"更新包已下载并通过校验。\n现在可以安装新版本。";
+        notice.primaryLabel = L"立即更新";
+        notice.action = UpdateAction::Download;
+        notice.showSecondary = true;
+        break;
+    case UpdatePhase::Waiting:
+        notice.title = L"等待应用关闭后更新";
+        notice.body = L"更新包已就绪。关闭 Antigravity 后，\n将自动安装并重新打开面板。";
+        notice.icon = ID_ICON_UPDATE_SUCCESS;
+        notice.accent = kGreen;
+        break;
+    case UpdatePhase::DownloadFailed:
+        notice.title = L"更新暂未完成";
+        notice.body = L"更新遇到问题，你可以稍后重试。\n已下载的有效文件会继续复用。";
+        notice.detail = g_app.updateError;
+        notice.primaryLabel = L"重试更新";
+        notice.action = UpdateAction::Download;
+        notice.showSecondary = true;
+        notice.icon = ID_ICON_UPDATE_ERROR;
+        notice.accent = kRed;
+        break;
+    }
+    return notice;
+}
+
+void SetControlTooltip(HWND control, const wchar_t* text) {
+    if (!g_app.tooltip) return;
+    TOOLINFOW tool{sizeof(tool)};
+    tool.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
+    tool.hwnd = g_app.hwnd;
+    tool.uId = reinterpret_cast<UINT_PTR>(control);
+    tool.lpszText = const_cast<wchar_t*>(text);
+    SendMessageW(g_app.tooltip, TTM_UPDATETIPTEXTW, 0, reinterpret_cast<LPARAM>(&tool));
+}
 
 void WriteStdoutUtf8(std::string_view text) {
     HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
@@ -237,66 +386,76 @@ int Scale(HWND hwnd, int dip) {
     return MulDiv(dip, static_cast<int>(dpi), 96);
 }
 
-HICON CreateShieldBadgeIcon(COLORREF fillColor, int size) {
+HICON CreateGrayscaleIcon(HICON source) {
+    ICONINFO original{};
+    if (!GetIconInfo(source, &original)) return nullptr;
+
+    BITMAP bitmap{};
+    const bool hasColor = original.hbmColor && GetObjectW(original.hbmColor, sizeof(bitmap), &bitmap);
     BITMAPINFO bmi{};
     bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bmi.bmiHeader.biWidth = size;
-    bmi.bmiHeader.biHeight = -size;
+    bmi.bmiHeader.biWidth = bitmap.bmWidth;
+    bmi.bmiHeader.biHeight = -bitmap.bmHeight;
     bmi.bmiHeader.biPlanes = 1;
     bmi.bmiHeader.biBitCount = 32;
     bmi.bmiHeader.biCompression = BI_RGB;
 
     void* bits = nullptr;
     HDC screen = GetDC(nullptr);
-    HDC mem = CreateCompatibleDC(screen);
-    HBITMAP colorBmp = CreateDIBSection(screen, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
-    HBITMAP maskBmp = CreateBitmap(size, size, 1, 1, nullptr);
+    HBITMAP grayBitmap = hasColor ? CreateDIBSection(screen, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0) : nullptr;
     HICON icon = nullptr;
 
-    if (colorBmp && maskBmp && bits) {
+    if (grayBitmap && bits && GetDIBits(screen, original.hbmColor, 0,
+            static_cast<UINT>(bitmap.bmHeight), bits, &bmi, DIB_RGB_COLORS) == bitmap.bmHeight) {
         auto* pixels = static_cast<uint32_t*>(bits);
-        double r = static_cast<double>(size) * 0.44;
-        double cx = (size - 1) * 0.5;
-        double cy = (size - 1) * 0.5;
-        uint8_t cr = GetRValue(fillColor);
-        uint8_t cg = GetGValue(fillColor);
-        uint8_t cb = GetBValue(fillColor);
-
-        for (int y = 0; y < size; ++y) {
-            for (int x = 0; x < size; ++x) {
-                double dx = x - cx;
-                double dy = y - cy;
-                double dist = std::sqrt(dx * dx + dy * dy);
-                if (dist <= r - 0.5) {
-                    // Draw a crisp inner checkmark/shield highlight
-                    bool innerDot = (dist <= r * 0.36);
-                    uint8_t pr = innerDot ? 255 : cr;
-                    uint8_t pg = innerDot ? 255 : cg;
-                    uint8_t pb = innerDot ? 255 : cb;
-                    pixels[y * size + x] = (0xFFu << 24) | (static_cast<uint32_t>(pr) << 16) |
-                                           (static_cast<uint32_t>(pg) << 8) | pb;
-                } else if (dist <= r + 0.7) {
-                    // Subtle border ring
-                    pixels[y * size + x] = (0xFFu << 24) | (static_cast<uint32_t>(cr / 2) << 16) |
-                                           (static_cast<uint32_t>(cg / 2) << 8) | (cb / 2);
-                } else {
-                    pixels[y * size + x] = 0;
-                }
-            }
+        const size_t count = static_cast<size_t>(bitmap.bmWidth) * bitmap.bmHeight;
+        for (size_t i = 0; i < count; ++i) {
+            const uint32_t pixel = pixels[i];
+            const uint32_t gray = (77 * ((pixel >> 16) & 0xff) +
+                                   150 * ((pixel >> 8) & 0xff) + 29 * (pixel & 0xff) + 128) >> 8;
+            // Keep the original alpha and mask so transparent edges stay transparent.
+            pixels[i] = (pixel & 0xff000000) | (gray << 16) | (gray << 8) | gray;
         }
 
-        ICONINFO ii{};
-        ii.fIcon = TRUE;
-        ii.hbmColor = colorBmp;
-        ii.hbmMask = maskBmp;
-        icon = CreateIconIndirect(&ii);
+        ICONINFO grayInfo = original;
+        grayInfo.hbmColor = grayBitmap;
+        icon = CreateIconIndirect(&grayInfo);
     }
 
-    if (maskBmp) DeleteObject(maskBmp);
-    if (colorBmp) DeleteObject(colorBmp);
-    DeleteDC(mem);
+    if (grayBitmap) DeleteObject(grayBitmap);
+    if (original.hbmColor) DeleteObject(original.hbmColor);
+    if (original.hbmMask) DeleteObject(original.hbmMask);
     ReleaseDC(nullptr, screen);
     return icon;
+}
+
+bool LoadPanelIcons(HWND hwnd) {
+    const UINT dpi = GetDpiForWindow(hwnd);
+    auto load = [dpi](int widthMetric, int heightMetric) {
+        return static_cast<HICON>(LoadImageW(g_app.hInst, MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON,
+            GetSystemMetricsForDpi(widthMetric, dpi), GetSystemMetricsForDpi(heightMetric, dpi), LR_DEFAULTCOLOR));
+    };
+    HICON normal = load(SM_CXSMICON, SM_CYSMICON);
+    HICON normalLarge = load(SM_CXICON, SM_CYICON);
+    HICON gray = normal ? CreateGrayscaleIcon(normal) : nullptr;
+    HICON grayLarge = normalLarge ? CreateGrayscaleIcon(normalLarge) : nullptr;
+    if (!normal || !normalLarge || !gray || !grayLarge) {
+        for (HICON icon : {normal, normalLarge, gray, grayLarge}) {
+            if (icon) DestroyIcon(icon);
+        }
+        return false;
+    }
+
+    const HICON previous[] = {g_app.iconNormal, g_app.iconNormalLarge, g_app.iconGray, g_app.iconGrayLarge};
+    g_app.iconNormal = normal;
+    g_app.iconNormalLarge = normalLarge;
+    g_app.iconGray = gray;
+    g_app.iconGrayLarge = grayLarge;
+    UpdateTrayAppearance();
+    for (HICON icon : previous) {
+        if (icon) DestroyIcon(icon);
+    }
+    return true;
 }
 
 std::wstring GetUserProfileDir() {
@@ -523,6 +682,13 @@ StatsResult QueryApprovalStats(const PanelConfig& cfg, const std::optional<DateR
     return result;
 }
 
+std::wstring FormatCacheHitRate(const ApprovalStats& stats) {
+    if (stats.inputTokens <= 0) return L"—";
+    wchar_t rate[32]{};
+    swprintf_s(rate, L"%.1f%%", 100.0 * static_cast<double>(stats.cachedTokens) / static_cast<double>(stats.inputTokens));
+    return rate;
+}
+
 void SyncStatsToUi() {
     const auto& report = g_app.stats;
     const auto* value = &report.today;
@@ -539,21 +705,30 @@ void SyncStatsToUi() {
     if (!value || !*value) {
         SetWindowTextW(g_app.lblStatsCount, L"—");
         SetWindowTextW(g_app.lblStatsSub, !g_app.statsLoaded || g_app.statsRunning ? L"正在读取统计…" : L"暂时无法读取统计");
-        SetWindowTextW(g_app.lblStatsTokens, L"");
+        SetWindowTextW(g_app.lblStatsTokens, L"—");
+        SetWindowTextW(g_app.lblStatsOutput, L"—");
+        SetWindowTextW(g_app.lblStatsCacheRate, L"—");
+        SetWindowTextW(g_app.lblStatsTokenDetail, L"");
         SetWindowTextW(g_app.lblStatsCost, L"");
     } else {
         const auto& s = **value;
-        auto count = FormatIntWithCommas(s.total) + L" 次";
-        auto sub = L"模型 " + FormatIntWithCommas(s.model) + L"（准 " + FormatIntWithCommas(s.approved) +
-                   L" / 拒 " + FormatIntWithCommas(s.denied) + L"） · 放行 " + FormatIntWithCommas(s.delegated);
-        auto tokens = L"Token " + FormatIntWithCommas(s.tokens) + L"（入 " + FormatIntWithCommas(s.inputTokens) +
-                      L" / 缓 " + FormatIntWithCommas(s.cachedTokens) + L" / 出 " + FormatIntWithCommas(s.outputTokens) + L"）";
-        auto cost = L"估算 " + FormatUsd(s.costUsd);
-        if (s.unknownUsage > 0) cost += L"（+" + FormatIntWithCommas(s.unknownUsage) + L" 未回报）";
+        auto count = FormatIntWithCommas(s.total);
+        auto sub = L"模型 " + FormatIntWithCommas(s.model) + L" · 批准 " + FormatIntWithCommas(s.approved) +
+                   L" / 拒绝 " + FormatIntWithCommas(s.denied) + L" · 放行 " + FormatIntWithCommas(s.delegated);
+        auto tokens = FormatIntWithCommas(s.inputTokens);
+        auto output = FormatIntWithCommas(s.outputTokens);
+        auto rate = FormatCacheHitRate(s);
+        auto detail = s.unknownUsage > 0 ? L"另有 " + FormatIntWithCommas(s.unknownUsage) + L" 次未回报用量" : L"";
+        auto cost = L"预估 " + FormatUsd(s.costUsd);
         SetWindowTextW(g_app.lblStatsCount, count.c_str());
         SetWindowTextW(g_app.lblStatsSub, sub.c_str());
         SetWindowTextW(g_app.lblStatsTokens, tokens.c_str());
+        SetWindowTextW(g_app.lblStatsOutput, output.c_str());
+        SetWindowTextW(g_app.lblStatsCacheRate, rate.c_str());
+        SetWindowTextW(g_app.lblStatsTokenDetail, detail.c_str());
         SetWindowTextW(g_app.lblStatsCost, cost.c_str());
+        SetControlTooltip(g_app.lblStatsSub, sub.c_str());
+        SetControlTooltip(g_app.lblStatsTokenDetail, detail.c_str());
     }
     SetWindowTextW(g_app.lblPricingNote, report.pricingLabel.c_str());
     SetWindowTextW(g_app.lblLogSize, (L"日志占用 " + FormatBytes(report.logsSizeBytes)).c_str());
@@ -659,7 +834,7 @@ void QueryCoreSnapshot(const PanelConfig& cfg, RuntimeState& snap, bool runDetec
         if (snap.pluginInstalled) dArgs += L" --config \"" + approvalCfg + L"\"";
         if (!cfg.antigravityPath.empty()) dArgs += L" --antigravity \"" + cfg.antigravityPath + L"\"";
         if (skipLoginCheck) dArgs += L" --skip-login-check";
-        CommandResult dRes = RunHiddenCommand(dotnet, dArgs, GetDirectoryName(dll), 10000);
+        CommandResult dRes = RunHiddenCommand(dotnet, dArgs, GetDirectoryName(dll), 18000);
         JsonValue dJson;
         if (dRes.started && !dRes.timedOut && dRes.exitCode == 0 && JsonValue::Parse(dRes.stdoutUtf8, dJson)) {
             if (const auto* ag = dJson.Get("antigravity")) {
@@ -686,20 +861,21 @@ void QueryCoreSnapshot(const PanelConfig& cfg, RuntimeState& snap, bool runDetec
 }
 
 void UpdateTrayAppearance() {
-    if (!g_app.trayAdded || !g_app.hwnd) return;
-    HICON hIcon = g_app.iconGreen;
+    if (!g_app.hwnd) return;
+    const bool active = g_app.state.pluginInstalled && g_app.state.serviceRunning &&
+                        g_app.state.takeoverEnabled.value_or(false);
+    HICON hIcon = active ? g_app.iconNormal : g_app.iconGray;
+    HICON largeIcon = active ? g_app.iconNormalLarge : g_app.iconGrayLarge;
     std::wstring tip = L"Gravity Steward v" + g_app.state.serviceVersion;
     if (!g_app.state.pluginInstalled || !g_app.state.serviceRunning) {
-        hIcon = g_app.iconRed;
         tip += g_app.state.pluginInstalled ? L" · 服务未运行" : L" · 未安装";
+    } else if (!g_app.state.takeoverEnabled.has_value()) {
+        tip += L" · 接管状态未知";
     } else if (g_app.state.takeoverEnabled == false) {
-        hIcon = g_app.iconAmber;
         tip += L" · 插件接管已关闭";
     } else if (g_app.state.updateAvailable) {
-        hIcon = g_app.iconBlue;
         tip += L" · 发现新版本 v" + g_app.state.availableUpdate.version;
     } else if (g_app.state.detailedLogs || g_app.state.guardianAuthStatus != L"credentials_found") {
-        hIcon = g_app.iconAmber;
         tip += g_app.state.detailedLogs ? L" · 详细日志已开启" : L" · 请确认 Codex 登录";
     } else {
         tip += L" · 运行正常";
@@ -708,9 +884,9 @@ void UpdateTrayAppearance() {
     g_app.nid.hIcon = hIcon;
     wcsncpy_s(g_app.nid.szTip, tip.c_str(), _TRUNCATE);
     g_app.nid.uFlags = NIF_ICON | NIF_TIP;
-    Shell_NotifyIconW(NIM_MODIFY, &g_app.nid);
+    if (g_app.trayAdded) Shell_NotifyIconW(NIM_MODIFY, &g_app.nid);
     SendMessageW(g_app.hwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(hIcon));
-    SendMessageW(g_app.hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(hIcon));
+    SendMessageW(g_app.hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(largeIcon));
 }
 
 void SyncControlsToUi() {
@@ -722,13 +898,22 @@ void SyncControlsToUi() {
     }
 
     SetWindowTextW(g_app.lblStatus, s.serviceDetail.c_str());
-    const wchar_t* takeoverText = L"接管状态未知";
+    const wchar_t* takeoverText = L"审批接管状态未知";
     if (g_app.busyTakeover) takeoverText = L"切换中…";
-    else if (s.takeoverEnabled.has_value()) takeoverText = *s.takeoverEnabled ? L"插件接管 开" : L"插件接管 关";
+    else if (s.takeoverEnabled.has_value()) takeoverText = *s.takeoverEnabled ? L"关闭审批接管" : L"开启审批接管";
     SetWindowTextW(g_app.btnApprovalTakeover, takeoverText);
+    SetControlTooltip(g_app.btnApprovalTakeover, takeoverText);
     EnableWindow(g_app.btnApprovalTakeover, s.pluginInstalled && s.takeoverEnabled.has_value() && !g_app.busyTakeover);
     InvalidateRect(g_app.btnApprovalTakeover, nullptr, FALSE);
-    SetWindowTextW(g_app.lblBackend, s.serviceBackend.c_str());
+    SetControlTooltip(g_app.lblStatus, s.serviceDetail.c_str());
+    const auto updateNotice = GetUpdateNotice();
+    SetControlTooltip(g_app.btnHeaderUpdate, updateNotice.title.c_str());
+    SetControlTooltip(g_app.btnCheckUpdate, updateNotice.title.c_str());
+    SetControlTooltip(g_app.btnRefresh, g_app.busyRefresh ? L"正在刷新…" : L"刷新状态与统计");
+    EnableWindow(g_app.btnHeaderUpdate, !g_app.busyUpdate);
+    EnableWindow(g_app.btnRefresh, !g_app.busyRefresh);
+    InvalidateRect(g_app.btnHeaderUpdate, nullptr, FALSE);
+    InvalidateRect(g_app.btnRefresh, nullptr, FALSE);
     SetWindowTextW(g_app.btnServiceAction, s.pluginInstalled ? (s.serviceRunning ? L"重启服务" : L"启动服务") : L"安装插件");
     EnableWindow(g_app.btnLaunchAg, !cfgCopy.antigravityPath.empty() && FileExists(cfgCopy.antigravityPath));
 
@@ -754,24 +939,18 @@ void SyncControlsToUi() {
     // Toggles & logs
     SendMessageW(g_app.chkDetailedLogs, BM_SETCHECK, s.detailedLogs ? BST_CHECKED : BST_UNCHECKED, 0);
     EnableWindow(g_app.chkDetailedLogs, s.pluginInstalled);
-    SetWindowTextW(g_app.lblLogBadge, s.detailedLogs ? L"高写入已开启" : L"精简模式");
+    SetWindowTextW(g_app.lblLogBadge, s.detailedLogs ? L"高写入已开启" : L"");
 
     SendMessageW(g_app.chkAutostart, BM_SETCHECK, cfgCopy.autostart ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(g_app.chkAutoUpdate, BM_SETCHECK, cfgCopy.autoUpdate ? BST_CHECKED : BST_UNCHECKED, 0);
 
-    std::wstring verText = L"面板 v" PANEL_VERSION_WIDE;
-    if (s.pluginInstalled && s.serviceVersion != PANEL_VERSION_WIDE) {
-        verText += L" · 插件 v" + s.serviceVersion;
-    }
-    if (!g_app.updateCfg.repository.empty()) {
-        verText += L" · 更新源: GitHub";
-    }
-    SetWindowTextW(g_app.lblVersionInfo, verText.c_str());
+    SetWindowTextW(g_app.lblVersionInfo, L"v" PANEL_VERSION_WIDE);
 
     // Environment
     std::wstring agText = cfgCopy.antigravityPath.empty() ? L"未检测到，请手动选择" : cfgCopy.antigravityPath;
     SetWindowTextW(g_app.lblAgTitle, (s.agVersion.empty() ? L"Antigravity" : L"Antigravity · v" + s.agVersion).c_str());
     SetWindowTextW(g_app.lblAgPath, agText.c_str());
+    SetControlTooltip(g_app.lblAgPath, agText.c_str());
 
     const wchar_t* authText = L"未检测";
     if (s.guardianAuthStatus == L"credentials_found") authText = L"已读取本机凭据";
@@ -782,6 +961,7 @@ void SyncControlsToUi() {
     EnableWindow(g_app.btnUninstall, FileExists(JoinPath(cfgCopy.dataDirectory, L"installation.json")));
     UpdateTrayAppearance();
     ResizePanelToContent();
+    SyncUpdatePopup();
     InvalidateRect(g_app.hwnd, nullptr, FALSE);
 }
 
@@ -794,6 +974,8 @@ void PostWorkResult(std::unique_ptr<WorkResult> res) {
 void StartRefreshWorker(bool initialStartup, bool runDetect, bool skipLoginCheck) {
     StartStatsWorker();
     if (g_app.busyRefresh.exchange(true)) return;
+    EnableWindow(g_app.btnRefresh, FALSE);
+    SetControlTooltip(g_app.btnRefresh, L"正在刷新…");
     PanelConfig cfgCopy;
     {
         std::lock_guard<std::mutex> lk(g_app.cfgMutex);
@@ -822,7 +1004,12 @@ void StartRefreshWorker(bool initialStartup, bool runDetect, bool skipLoginCheck
 }
 
 void StartCheckUpdateWorker(bool allowAutoApply) {
-    if (g_app.busyUpdate.exchange(true)) return;
+    if (g_app.busyUpdate.exchange(true)) {
+        if (!allowAutoApply) ShowUpdatePopup();
+        return;
+    }
+    EnableWindow(g_app.btnHeaderUpdate, FALSE);
+    SetControlTooltip(g_app.btnHeaderUpdate, L"正在检查更新…");
     PanelConfig cfgCopy;
     {
         std::lock_guard<std::mutex> lk(g_app.cfgMutex);
@@ -834,6 +1021,11 @@ void StartCheckUpdateWorker(bool allowAutoApply) {
     if (CompareSemVer(baseSnap.serviceVersion, currentVer) > 0) {
         currentVer = baseSnap.serviceVersion;
     }
+    g_app.updateCurrentVersion = currentVer;
+    g_app.updatePhase = UpdatePhase::Checking;
+    g_app.updateError.clear();
+    SyncUpdatePopup();
+    if (!allowAutoApply) ShowUpdatePopup();
     bool installed = baseSnap.pluginInstalled;
 
     std::thread([cfgCopy, updCopy, baseSnap, currentVer, allowAutoApply, installed]() mutable {
@@ -846,22 +1038,26 @@ void StartCheckUpdateWorker(bool allowAutoApply) {
         if (!check.ok) {
             res->ok = false;
             res->message = check.error;
-            g_app.busyUpdate = false;
             PostWorkResult(std::move(res));
             return;
         }
 
         res->ok = true;
+        if (!check.hasUpdate || res->snapshot.availableUpdate.version != check.manifest.version) {
+            res->snapshot.updateDownloaded = false;
+            res->snapshot.waitingAntigravityExit = false;
+            res->snapshot.downloadedZipPath.clear();
+        }
         res->snapshot.updateAvailable = check.hasUpdate;
         res->snapshot.availableUpdate = check.manifest;
         if (!check.hasUpdate) {
             res->message = L"当前已是最新版本 (v" + currentVer + L")";
-            g_app.busyUpdate = false;
             PostWorkResult(std::move(res));
             return;
         }
 
         if (allowAutoApply && cfgCopy.autoUpdate && installed) {
+            PostMessageW(g_app.hwnd, WM_APP_UPDATE_PROGRESS, 0, 0);
             std::wstring zipPath;
             std::wstring dlErr;
             std::wstring stagingDir = JoinPath(cfgCopy.dataDirectory, L"updates");
@@ -879,13 +1075,16 @@ void StartCheckUpdateWorker(bool allowAutoApply) {
                 res->message = dlErr;
             }
         }
-        g_app.busyUpdate = false;
         PostWorkResult(std::move(res));
     }).detach();
 }
 
 void StartDownloadAndApplyWorker() {
     if (g_app.busyUpdate.exchange(true)) return;
+    g_app.updatePhase = UpdatePhase::Downloading;
+    g_app.updateError.clear();
+    SyncControlsToUi();
+    ShowUpdatePopup();
     PanelConfig cfgCopy;
     {
         std::lock_guard<std::mutex> lk(g_app.cfgMutex);
@@ -902,7 +1101,6 @@ void StartDownloadAndApplyWorker() {
         if (!snapCopy.pluginInstalled) {
             res->ok = false;
             res->message = L"请先安装并启用插件，然后再执行在线更新。";
-            g_app.busyUpdate = false;
             PostWorkResult(std::move(res));
             return;
         }
@@ -913,7 +1111,6 @@ void StartDownloadAndApplyWorker() {
             if (!DownloadAndVerifyUpdate(updCopy, snapCopy.availableUpdate, JoinPath(cfgCopy.dataDirectory, L"updates"), zipPath, dlErr)) {
                 res->ok = false;
                 res->message = dlErr;
-                g_app.busyUpdate = false;
                 PostWorkResult(std::move(res));
                 return;
             }
@@ -928,7 +1125,6 @@ void StartDownloadAndApplyWorker() {
         } else {
             res->triggerImmediateApply = true;
         }
-        g_app.busyUpdate = false;
         PostWorkResult(std::move(res));
     }).detach();
 }
@@ -955,7 +1151,10 @@ void ExecutePendingUpdateAndExit() {
         }
         PostQuitMessage(0);
     } else {
-        MessageBoxW(g_app.hwnd, err.c_str(), L"启动更新器失败", MB_OK | MB_ICONERROR);
+        g_app.updatePhase = UpdatePhase::DownloadFailed;
+        g_app.updateError = err;
+        SyncUpdatePopup();
+        if (IsWindowVisible(g_app.hwnd)) ShowUpdatePopup();
     }
 }
 
@@ -1063,6 +1262,53 @@ void StartCompactLogsWorker() {
     }).detach();
 }
 
+bool IsPathWithinDirectory(const std::wstring& path, const std::wstring& directory) {
+    if (path.empty() || directory.empty()) return false;
+    wchar_t fullPath[MAX_PATH * 2]{}, fullDir[MAX_PATH * 2]{};
+    DWORD pathLen = GetFullPathNameW(path.c_str(), static_cast<DWORD>(std::size(fullPath)), fullPath, nullptr);
+    DWORD dirLen = GetFullPathNameW(directory.c_str(), static_cast<DWORD>(std::size(fullDir)), fullDir, nullptr);
+    if (pathLen == 0 || pathLen >= std::size(fullPath) || dirLen == 0 || dirLen >= std::size(fullDir)) return false;
+    std::wstring normPath(fullPath, pathLen);
+    std::wstring normDir(fullDir, dirLen);
+    while (normDir.size() > 3 && (normDir.back() == L'\\' || normDir.back() == L'/')) normDir.pop_back();
+    if (normDir.empty()) return false;
+    if (normDir.back() != L'\\') normDir.push_back(L'\\');
+    if (normPath.size() < normDir.size()) return false;
+    return _wcsnicmp(normPath.c_str(), normDir.c_str(), normDir.size()) == 0;
+}
+
+bool CopyDirectoryTree(const std::wstring& sourceDir, const std::wstring& destDir) {
+    if (!EnsureDirectoryTree(destDir)) return false;
+    WIN32_FIND_DATAW fd{};
+    std::wstring pattern = JoinPath(sourceDir, L"*");
+    HANDLE h = FindFirstFileW(pattern.c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    bool ok = true;
+    do {
+        std::wstring name = fd.cFileName;
+        if (name == L"." || name == L"..") continue;
+        std::wstring src = JoinPath(sourceDir, name);
+        std::wstring dst = JoinPath(destDir, name);
+        if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+            if ((fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+                ok = false;
+                break;
+            }
+            if (!CopyDirectoryTree(src, dst)) {
+                ok = false;
+                break;
+            }
+        } else {
+            if (!CopyFileW(src.c_str(), dst.c_str(), FALSE)) {
+                ok = false;
+                break;
+            }
+        }
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    return ok;
+}
+
 std::wstring GetLifecycleScriptPath(const PanelConfig& cfg, const std::wstring& exeDir, const wchar_t* name) {
     const auto relative = JoinPath(L"scripts", name);
     // Use the script shipped with the running panel when a portable package is opened over an older installation.
@@ -1081,18 +1327,68 @@ void StartInstallScriptWorker() {
         cfgCopy = g_app.cfg;
     }
     RuntimeState snapBase = g_app.state;
-    std::wstring exeDir = GetDirectoryName(GetExecutablePath());
+    std::wstring exePath = GetExecutablePath();
+    std::wstring exeDir = GetDirectoryName(exePath);
+
+    // When invoked from inside the installed plugin directory, Install.ps1 replaces pluginDirectory
+    // and cannot run while this panel holds file/working-directory locks inside it.
+    if (IsPathWithinDirectory(exePath, cfgCopy.pluginDirectory)) {
+        if (!cfgCopy.antigravityPath.empty() && IsProcessRunningByPath(cfgCopy.antigravityPath)) {
+            g_app.busyAction = false;
+            MessageBoxW(g_app.hwnd, L"请先完全退出 Antigravity，再修复插件。", L"修复插件", MB_OK | MB_ICONINFORMATION);
+            return;
+        }
+        std::wstring updatesDir = JoinPath(cfgCopy.dataDirectory, L"updates");
+        std::wstring stagedBundle = JoinPath(updatesDir, L"repair-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()));
+        if (!CopyDirectoryTree(cfgCopy.pluginDirectory, stagedBundle)) {
+            g_app.busyAction = false;
+            MessageBoxW(g_app.hwnd, L"无法创建临时修复目录，请确认数据目录可写后重试。", L"修复插件", MB_OK | MB_ICONERROR);
+            return;
+        }
+        std::wstring stagedScript = JoinPath(stagedBundle, L"scripts\\Install.ps1");
+        if (!FileExists(stagedScript)) {
+            g_app.busyAction = false;
+            MessageBoxW(g_app.hwnd, L"缺少安装脚本 Install.ps1，无法执行修复。", L"修复插件", MB_OK | MB_ICONERROR);
+            return;
+        }
+        wchar_t sysDir[MAX_PATH]{};
+        GetSystemDirectoryW(sysDir, static_cast<DWORD>(std::size(sysDir)));
+        std::wstring psExe = JoinPath(sysDir, L"WindowsPowerShell\\v1.0\\powershell.exe");
+        std::wstring args = L"-NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"" + stagedScript + L"\"" +
+                            L" -BundlePath \"" + stagedBundle + L"\"" +
+                            L" -GeminiRoot \"" + cfgCopy.geminiRoot + L"\"" +
+                            L" -DataDirectory \"" + cfgCopy.dataDirectory + L"\"" +
+                            L" -WaitPid " + std::to_wstring(GetCurrentProcessId()) +
+                            L" -RelaunchPanel -ShowResult -CleanupBundlePath";
+        if (!cfgCopy.antigravityPath.empty()) args += L" -AntigravityPath \"" + cfgCopy.antigravityPath + L"\"";
+        if (!LaunchDetached(psExe, args, sysDir, true)) {
+            g_app.busyAction = false;
+            MessageBoxW(g_app.hwnd, L"无法启动独立修复进程。", L"修复插件", MB_OK | MB_ICONERROR);
+            return;
+        }
+        if (g_app.trayAdded) {
+            Shell_NotifyIconW(NIM_DELETE, &g_app.nid);
+            g_app.trayAdded = false;
+        }
+        DestroyWindow(g_app.hwnd);
+        return;
+    }
+
     std::thread([cfgCopy, snapBase, exeDir]() mutable {
         wchar_t sysDir[MAX_PATH]{};
         GetSystemDirectoryW(sysDir, static_cast<DWORD>(std::size(sysDir)));
         std::wstring psExe = JoinPath(sysDir, L"WindowsPowerShell\\v1.0\\powershell.exe");
 
         std::wstring script = GetLifecycleScriptPath(cfgCopy, exeDir, L"Install.ps1");
+        std::wstring workDir = GetDirectoryName(script);
+        if (IsPathWithinDirectory(workDir, cfgCopy.pluginDirectory)) {
+            workDir = sysDir;
+        }
         std::wstring args = L"-NoProfile -ExecutionPolicy Bypass -File \"" + script + L"\" -GeminiRoot \"" + cfgCopy.geminiRoot +
                             L"\" -DataDirectory \"" + cfgCopy.dataDirectory + L"\"";
         if (!cfgCopy.antigravityPath.empty()) args += L" -AntigravityPath \"" + cfgCopy.antigravityPath + L"\"";
 
-        CommandResult cr = RunHiddenCommand(psExe, args, GetDirectoryName(script), 45000);
+        CommandResult cr = RunHiddenCommand(psExe, args, workDir, 45000);
         QueryCoreSnapshot(cfgCopy, snapBase, false, true);
         auto res = std::make_unique<WorkResult>();
         res->kind = WorkKind::InstallOrRepair;
@@ -1205,31 +1501,60 @@ void CreateFonts(HWND hwnd) {
         return CreateFontW(-Scale(hwnd, size), 0, 0, 0, weight, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                            OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Microsoft YaHei UI");
     };
-    g_app.fontTitle = font(23, FW_SEMIBOLD);
-    g_app.fontHeading = font(16, FW_SEMIBOLD);
-    g_app.fontBold = font(13, FW_SEMIBOLD);
-    g_app.fontRegular = font(13, FW_NORMAL);
+    g_app.fontTitle = CreateFontW(-Scale(hwnd, 16), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                                 OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+    g_app.fontHeading = font(14, FW_SEMIBOLD);
+    g_app.fontBold = font(14, FW_SEMIBOLD);
+    g_app.fontRegular = font(14, FW_NORMAL);
     g_app.fontSmall = font(12, FW_NORMAL);
-    g_app.fontMetric = font(29, FW_BOLD);
+    g_app.fontDialogTitle = font(18, FW_SEMIBOLD);
+    g_app.fontMetric = CreateFontW(-Scale(hwnd, 36), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                                  OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+}
+
+LRESULT CALLBACK ControlSubclass(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, UINT_PTR id, DWORD_PTR data) {
+    if (data == 1 && msg == WM_NCHITTEST) return HTTRANSPARENT;
+    if (data == 0 && msg == WM_MOUSEMOVE && g_app.hoveredControl != hwnd) {
+        if (g_app.hoveredControl) InvalidateRect(g_app.hoveredControl, nullptr, FALSE);
+        g_app.hoveredControl = hwnd;
+        TRACKMOUSEEVENT tracking{sizeof(tracking), TME_LEAVE, hwnd, 0};
+        TrackMouseEvent(&tracking);
+        InvalidateRect(hwnd, nullptr, FALSE);
+    } else if (msg == WM_MOUSELEAVE && g_app.hoveredControl == hwnd) {
+        g_app.hoveredControl = nullptr;
+        InvalidateRect(hwnd, nullptr, FALSE);
+    } else if (data == 0 && msg == WM_SETCURSOR && IsWindowEnabled(hwnd)) {
+        SetCursor(LoadCursorW(nullptr, IDC_HAND));
+        return TRUE;
+    } else if (msg == WM_NCDESTROY) {
+        if (g_app.hoveredControl == hwnd) g_app.hoveredControl = nullptr;
+        RemoveWindowSubclass(hwnd, ControlSubclass, id);
+    }
+    return DefSubclassProc(hwnd, msg, wParam, lParam);
 }
 
 void CreateChildControls(HWND hwnd) {
     CreateFonts(hwnd);
     auto label = [&](const wchar_t* txt, DWORD style = SS_LEFT) {
-        return CreateWindowExW(0, L"STATIC", txt, WS_CHILD | SS_NOPREFIX | style,
+        return CreateWindowExW(0, L"STATIC", txt, WS_CHILD | SS_NOPREFIX | SS_NOTIFY | style,
                                0, 0, 0, 0, hwnd, nullptr, g_app.hInst, nullptr);
     };
     auto button = [&](const wchar_t* txt, int id, DWORD style = BS_OWNERDRAW) {
-        return CreateWindowExW(0, L"BUTTON", txt, WS_CHILD | WS_TABSTOP | style,
+        HWND control = CreateWindowExW(0, L"BUTTON", txt, WS_CHILD | WS_TABSTOP | style,
                                0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), g_app.hInst, nullptr);
+        SetWindowSubclass(control, ControlSubclass, 1, 0);
+        return control;
     };
 
-    g_app.lblTitle = label(L"自动审批");
+    g_app.lblTitle = label(L"Gravity Steward");
+    SetWindowSubclass(g_app.lblTitle, ControlSubclass, 1, 1);
+    g_app.btnHeaderUpdate = button(L"检查应用更新", ID_BTN_CHECK_UPDATE);
+    g_app.btnGitHub = button(L"打开 GitHub 项目", ID_BTN_GITHUB);
+    g_app.btnRefresh = button(L"刷新状态与统计", ID_BTN_REFRESH);
+    g_app.btnHide = button(L"关闭窗口并收回托盘", ID_BTN_HIDE);
     g_app.lblStatus = label(L"", SS_ENDELLIPSIS);
     g_app.btnApprovalTakeover = button(L"接管状态未知", ID_BTN_APPROVAL_TAKEOVER);
-    g_app.lblBackend = label(L"", SS_ENDELLIPSIS);
     g_app.btnServiceAction = button(L"启动服务", ID_BTN_SERVICE_ACTION);
-    g_app.btnRefresh = button(L"刷新", ID_BTN_REFRESH);
     g_app.btnLaunchAg = button(L"启动 Antigravity", ID_BTN_LAUNCH_AG);
     g_app.lblUpdateBanner = label(L"");
     g_app.btnUpdateNow = button(L"立即更新", ID_BTN_UPDATE_NOW);
@@ -1238,7 +1563,13 @@ void CreateChildControls(HWND hwnd) {
     g_app.lblStatsCount = label(L"");
     g_app.lblStatsSub = label(L"", SS_ENDELLIPSIS);
     g_app.lblStatsTokens = label(L"", SS_ENDELLIPSIS);
-    g_app.lblStatsCost = label(L"", SS_ENDELLIPSIS);
+    g_app.lblStatsTokenDetail = label(L"");
+    g_app.lblStatsInputTitle = label(L"输入");
+    g_app.lblStatsOutputTitle = label(L"输出");
+    g_app.lblStatsCacheTitle = label(L"缓存命中率");
+    g_app.lblStatsOutput = label(L"", SS_ENDELLIPSIS);
+    g_app.lblStatsCacheRate = label(L"", SS_ENDELLIPSIS);
+    g_app.lblStatsCost = label(L"", SS_RIGHT | SS_ENDELLIPSIS);
     g_app.lblPricingTitle = label(L"计价基准");
     g_app.lblPricingNote = label(L"", SS_ENDELLIPSIS);
     g_app.btnOpenPricing = button(L"修改单价", ID_BTN_OPEN_PRICING);
@@ -1247,87 +1578,128 @@ void CreateChildControls(HWND hwnd) {
     g_app.lblAgTitle = label(L"Antigravity");
     g_app.lblAgPath = label(L"", SS_PATHELLIPSIS);
     g_app.btnBrowseAg = button(L"更改…", ID_BTN_BROWSE_AG);
-    g_app.lblGuardianTitle = label(L"Guardian 登录");
+    g_app.lblGuardianTitle = label(L"审批账号");
     g_app.lblGuardianAuth = label(L"", SS_ENDELLIPSIS);
     g_app.btnDetectEnv = button(L"检测", ID_BTN_DETECT_ENV);
     g_app.btnInstallRepair = button(L"安装 / 修复插件", ID_BTN_INSTALL_REPAIR);
     g_app.btnUninstall = button(L"完整卸载", ID_BTN_UNINSTALL);
 
     g_app.btnPreferences = button(L"偏好设置", ID_BTN_PREFERENCES);
-    g_app.chkDetailedLogs = button(L"详细调试日志（仅 Debug 时开启）", ID_CHK_DETAILED_LOGS, BS_CHECKBOX);
+    g_app.chkDetailedLogs = button(L"详细调试日志", ID_CHK_DETAILED_LOGS, BS_CHECKBOX);
     g_app.lblLogBadge = label(L"", SS_RIGHT);
     g_app.lblLogSize = label(L"");
     g_app.btnOpenLogs = button(L"打开日志", ID_BTN_OPEN_LOGS);
     g_app.btnCompactLogs = button(L"压缩清理", ID_BTN_COMPACT_LOGS);
-    g_app.chkAutostart = button(L"开机自启（最小化到托盘）", ID_CHK_AUTOSTART, BS_CHECKBOX);
+    g_app.chkAutostart = button(L"开机自启 · 收回托盘", ID_CHK_AUTOSTART, BS_CHECKBOX);
     g_app.chkAutoUpdate = button(L"启动时自动更新", ID_CHK_AUTO_UPDATE, BS_CHECKBOX);
     g_app.lblVersionInfo = label(L"");
     g_app.btnCheckUpdate = button(L"检查更新", ID_BTN_CHECK_UPDATE);
+    g_app.scrollbar = CreateWindowExW(0, L"SCROLLBAR", nullptr, WS_CHILD | SBS_VERT,
+        0, 0, 0, 0, hwnd, nullptr, g_app.hInst, nullptr);
+
+    g_app.tooltip = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr,
+        WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
+        hwnd, nullptr, g_app.hInst, nullptr);
+    SendMessageW(g_app.tooltip, TTM_SETMAXTIPWIDTH, 0, Scale(hwnd, 360));
+    for (HWND control : {g_app.btnHeaderUpdate, g_app.btnGitHub, g_app.btnRefresh, g_app.btnHide,
+                         g_app.btnStatsDate, g_app.btnApprovalTakeover, g_app.lblStatus, g_app.lblAgPath,
+                         g_app.lblStatsSub, g_app.lblStatsTokenDetail, g_app.lblStatsCacheTitle,
+                         g_app.lblStatsCacheRate, g_app.btnCheckUpdate}) {
+        wchar_t text[96]{};
+        GetWindowTextW(control, text, static_cast<int>(std::size(text)));
+        TOOLINFOW tool{sizeof(tool)};
+        tool.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
+        tool.hwnd = hwnd;
+        tool.uId = reinterpret_cast<UINT_PTR>(control);
+        tool.lpszText = text;
+        SendMessageW(g_app.tooltip, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&tool));
+    }
+    SetControlTooltip(g_app.lblStatsCacheTitle, L"缓存命中率 = 缓存 Token ÷ 输入 Token");
+    SetControlTooltip(g_app.lblStatsCacheRate, L"缓存命中率 = 缓存 Token ÷ 输入 Token");
 }
 
 struct PanelLayout {
-    int stats = 150 + (g_app.state.updateAvailable ? kBannerSpace : 0);
-    int pricing = stats + 148;
-    int apps = pricing + 60;
-    int prefs = apps + 170;
-    int height = prefs + 53 + (g_app.preferencesOpen ? kPreferencesSpace : 0);
+    int stats = 160 + (g_app.state.updateAvailable ? kBannerSpace : 0);
+    int pricing = stats + 234;
+    int apps = pricing + 76;
+    int prefs = apps + 200;
+    int height = prefs + 60 + (g_app.preferencesOpen ? kPreferencesSpace : 0);
 };
 
 void PositionControls(const PanelLayout& layout) {
     auto& a = g_app;
     auto S = [&](int dip) { return Scale(a.hwnd, dip); };
-    auto place = [&](HWND control, HFONT font, int x, int y, int w, int h, bool show = true) {
+    auto place = [&](HWND control, HFONT font, int x, int y, int w, int h, bool show = true, bool header = false) {
         if (reinterpret_cast<HFONT>(SendMessageW(control, WM_GETFONT, 0, 0)) != font)
             SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(font), FALSE);
-        SetWindowPos(control, nullptr, S(x), S(y) - a.scrollY, S(w), S(h),
+        const int top = S(y) - (header ? 0 : a.scrollY);
+        SetWindowPos(control, nullptr, S(x), top, S(w), S(h),
                      SWP_NOZORDER | SWP_NOACTIVATE | (show ? SWP_SHOWWINDOW : SWP_HIDEWINDOW));
+        // The custom title bar stays fixed when a short display needs scrolling.
+        const int clipped = header ? 0 : std::clamp(S(kHeaderHeight) - top, 0, S(h));
+        SetWindowRgn(control, clipped ? CreateRectRgn(0, clipped, S(w), S(h)) : nullptr, TRUE);
     };
-    place(a.lblTitle, a.fontTitle, 55, 13, 320, 34);
-    place(a.lblStatus, a.fontBold, 50, 68, a.state.serviceRunning ? 106 : a.state.pluginInstalled ? 150 : 336, 20);
-    place(a.btnApprovalTakeover, a.fontSmall, a.state.serviceRunning ? 158 : 204, 64, 123, 26, a.state.pluginInstalled);
-    place(a.lblBackend, a.fontSmall, 293, 69, 93, 19, a.state.serviceRunning && !a.state.serviceBackend.empty());
-    place(a.btnServiceAction, a.fontRegular, 28, 97, 91, 31);
-    place(a.btnRefresh, a.fontRegular, 127, 97, 68, 31);
-    place(a.btnLaunchAg, a.fontBold, 203, 97, 183, 31);
-    place(a.lblUpdateBanner, a.fontSmall, 28, 154, 253, 32, a.state.updateAvailable);
-    place(a.btnUpdateNow, a.fontRegular, 289, 156, 97, 28, a.state.updateAvailable);
+    place(a.lblTitle, a.fontTitle, 52, 20, 194, 24, true, true);
+    place(a.btnHeaderUpdate, a.fontRegular, 262, 16, 30, 32, true, true);
+    place(a.btnGitHub, a.fontRegular, 296, 16, 30, 32, true, true);
+    place(a.btnRefresh, a.fontRegular, 330, 16, 30, 32, true, true);
+    place(a.btnHide, a.fontRegular, 364, 16, 30, 32, true, true);
+    place(a.lblStatus, a.fontRegular, 50, 78, a.state.pluginInstalled ? 276 : 328, 24);
+    place(a.btnApprovalTakeover, a.fontSmall, 338, 76, 40, 28, a.state.pluginInstalled);
+    place(a.btnServiceAction, a.fontSmall, 36, 112, 112, 32);
+    place(a.btnLaunchAg, a.fontBold, 156, 112, 222, 32);
+    place(a.lblUpdateBanner, a.fontSmall, 36, 168, 231, 34, a.state.updateAvailable);
+    place(a.btnUpdateNow, a.fontSmall, 278, 169, 100, 30, a.state.updateAvailable);
 
     const int stats = layout.stats;
-    place(a.lblStatsTitle, a.fontHeading, 28, stats + 11, 310, 24);
-    place(a.btnStatsDate, a.fontRegular, 351, stats + 9, 35, 30);
-    place(a.lblStatsCount, a.fontMetric, 28, stats + 35, 310, 38);
-    place(a.lblStatsSub, a.fontSmall, 28, stats + 76, 358, 19);
-    place(a.lblStatsTokens, a.fontSmall, 28, stats + 96, 358, 19);
-    place(a.lblStatsCost, a.fontBold, 28, stats + 115, 358, 19);
+    place(a.lblStatsTitle, a.fontHeading, 36, stats + 16, 300, 22);
+    place(a.btnStatsDate, a.fontRegular, 348, stats + 11, 30, 30);
+    place(a.lblStatsCount, a.fontMetric, 36, stats + 43, 342, 48);
+    place(a.lblStatsSub, a.fontSmall, 36, stats + 98, 342, 20);
+    place(a.lblStatsCost, a.fontSmall, 244, stats + 65, 134, 20);
+    place(a.lblStatsInputTitle, a.fontSmall, 36, stats + 140, 112, 18);
+    place(a.lblStatsOutputTitle, a.fontSmall, 156, stats + 140, 112, 18);
+    place(a.lblStatsCacheTitle, a.fontSmall, 276, stats + 140, 102, 18);
+    place(a.lblStatsTokens, a.fontBold, 36, stats + 162, 112, 22);
+    place(a.lblStatsOutput, a.fontBold, 156, stats + 162, 112, 22);
+    place(a.lblStatsCacheRate, a.fontBold, 276, stats + 162, 102, 22);
+    place(a.lblStatsTokenDetail, a.fontSmall, 36, stats + 192, 342, 18);
 
     const int pricing = layout.pricing;
-    place(a.lblPricingTitle, a.fontBold, 28, pricing + 7, 255, 18);
-    place(a.lblPricingNote, a.fontSmall, 28, pricing + 26, 260, 18);
-    place(a.btnOpenPricing, a.fontRegular, 298, pricing + 11, 88, 28);
+    place(a.lblPricingTitle, a.fontHeading, 36, pricing + 12, 232, 22);
+    place(a.lblPricingNote, a.fontSmall, 36, pricing + 36, 252, 18);
+    place(a.btnOpenPricing, a.fontSmall, 294, pricing + 18, 84, 30);
 
     const int apps = layout.apps;
-    place(a.lblAppsTitle, a.fontHeading, 28, apps + 7, 340, 23);
-    place(a.lblAgTitle, a.fontBold, 54, apps + 40, 246, 17);
-    place(a.lblAgPath, a.fontSmall, 54, apps + 58, 253, 17);
-    place(a.btnBrowseAg, a.fontRegular, 317, apps + 42, 69, 27);
-    place(a.lblGuardianTitle, a.fontBold, 54, apps + 82, 253, 17);
-    place(a.lblGuardianAuth, a.fontSmall, 54, apps + 100, 253, 17);
-    place(a.btnDetectEnv, a.fontRegular, 317, apps + 84, 69, 27);
-    place(a.btnInstallRepair, a.fontRegular, 28, apps + 125, 175, 28);
-    place(a.btnUninstall, a.fontRegular, 211, apps + 125, 175, 28);
+    place(a.lblAppsTitle, a.fontHeading, 36, apps + 16, 342, 22);
+    place(a.lblAgTitle, a.fontBold, 80, apps + 50, 228, 22);
+    place(a.lblAgPath, a.fontSmall, 80, apps + 74, 228, 18);
+    place(a.btnBrowseAg, a.fontSmall, 318, apps + 55, 60, 30);
+    place(a.lblGuardianTitle, a.fontBold, 80, apps + 104, 228, 22);
+    place(a.lblGuardianAuth, a.fontSmall, 80, apps + 128, 228, 18);
+    place(a.btnDetectEnv, a.fontSmall, 318, apps + 109, 60, 30);
+    place(a.btnInstallRepair, a.fontSmall, 36, apps + 156, 167, 30);
+    place(a.btnUninstall, a.fontSmall, 211, apps + 156, 167, 30);
 
     const int prefs = layout.prefs;
-    place(a.btnPreferences, a.fontHeading, 16, prefs, 382, 39);
+    place(a.btnPreferences, a.fontRegular, 20, prefs, 374, 44);
     const bool expanded = a.preferencesOpen;
-    place(a.chkDetailedLogs, a.fontSmall, 28, prefs + 46, 252, 25, expanded);
-    place(a.lblLogBadge, a.fontSmall, 280, prefs + 50, 106, 19, expanded);
-    place(a.lblLogSize, a.fontSmall, 28, prefs + 80, 184, 19, expanded);
-    place(a.btnOpenLogs, a.fontRegular, 219, prefs + 75, 79, 26, expanded);
-    place(a.btnCompactLogs, a.fontRegular, 307, prefs + 75, 79, 26, expanded);
-    place(a.chkAutostart, a.fontSmall, 28, prefs + 105, 358, 24, expanded);
-    place(a.chkAutoUpdate, a.fontSmall, 28, prefs + 132, 358, 24, expanded);
-    place(a.lblVersionInfo, a.fontSmall, 28, prefs + 167, 260, 19, expanded);
-    place(a.btnCheckUpdate, a.fontRegular, 298, prefs + 162, 88, 26, expanded);
+    place(a.chkDetailedLogs, a.fontRegular, 36, prefs + 64, 230, 26, expanded);
+    place(a.lblLogBadge, a.fontSmall, 270, prefs + 68, 108, 20, expanded);
+    place(a.lblLogSize, a.fontSmall, 36, prefs + 106, 166, 20, expanded);
+    place(a.btnOpenLogs, a.fontSmall, 210, prefs + 100, 80, 30, expanded);
+    place(a.btnCompactLogs, a.fontSmall, 298, prefs + 100, 80, 30, expanded);
+    place(a.chkAutostart, a.fontRegular, 36, prefs + 140, 342, 26, expanded);
+    place(a.chkAutoUpdate, a.fontRegular, 36, prefs + 174, 342, 26, expanded);
+    place(a.lblVersionInfo, a.fontSmall, 36, prefs + 220, 250, 20, expanded);
+    place(a.btnCheckUpdate, a.fontSmall, 294, prefs + 214, 84, 30, expanded);
+
+    RECT client{};
+    GetClientRect(a.hwnd, &client);
+    const int scrollWidth = GetSystemMetricsForDpi(SM_CXVSCROLL, GetDpiForWindow(a.hwnd));
+    SetWindowPos(a.scrollbar, nullptr, client.right - scrollWidth, S(kHeaderHeight), scrollWidth,
+                 std::max(0L, client.bottom - S(kHeaderHeight)), SWP_NOZORDER | SWP_NOACTIVATE |
+                 (a.needsScroll ? SWP_SHOWWINDOW : SWP_HIDEWINDOW));
 
     InvalidateRect(a.hwnd, nullptr, FALSE);
 }
@@ -1338,22 +1710,26 @@ void SetPanelScroll(int proposed) {
     GetClientRect(g_app.hwnd, &client);
     int total = Scale(g_app.hwnd, layout.height);
     g_app.scrollY = std::clamp(proposed, 0, std::max(0, total - static_cast<int>(client.bottom)));
-    SCROLLINFO info{sizeof(info), SIF_RANGE | SIF_PAGE | SIF_POS, 0, total - 1,
-                    static_cast<UINT>(client.bottom), g_app.scrollY, 0};
-    SetScrollInfo(g_app.hwnd, SB_VERT, &info, TRUE);
+    const int header = Scale(g_app.hwnd, kHeaderHeight);
+    SCROLLINFO info{sizeof(info), SIF_RANGE | SIF_PAGE | SIF_POS, 0, total - header - 1,
+                    static_cast<UINT>(std::max(0L, client.bottom - header)), g_app.scrollY, 0};
+    SetScrollInfo(g_app.scrollbar, SB_CTL, &info, TRUE);
     PositionControls(layout);
 }
 
 void ScrollFocusIntoView(HWND hwnd) {
     auto focus = GetFocus();
-    if (!focus || !IsChild(hwnd, focus) || !(GetWindowLongPtrW(hwnd, GWL_STYLE) & WS_VSCROLL)) return;
+    if (!focus || !IsChild(hwnd, focus) || !g_app.needsScroll) return;
 
     RECT bounds{}, client{};
     GetWindowRect(focus, &bounds);
     MapWindowPoints(HWND_DESKTOP, hwnd, reinterpret_cast<POINT*>(&bounds), 2);
     GetClientRect(hwnd, &client);
     const int padding = Scale(hwnd, 8);
-    if (bounds.top < padding) SetPanelScroll(g_app.scrollY + bounds.top - padding);
+    if (bounds.top < Scale(hwnd, kHeaderHeight) &&
+        (focus == g_app.btnHeaderUpdate || focus == g_app.btnGitHub || focus == g_app.btnRefresh || focus == g_app.btnHide)) return;
+    const int top = Scale(hwnd, kHeaderHeight) + padding;
+    if (bounds.top < top) SetPanelScroll(g_app.scrollY + bounds.top - top);
     else if (bounds.bottom > client.bottom - padding) SetPanelScroll(g_app.scrollY + bounds.bottom - client.bottom + padding);
 }
 
@@ -1362,7 +1738,6 @@ void ResizePanelToContent() {
     auto dpi = GetDpiForWindow(hwnd);
     PanelLayout layout;
     RECT frame{0, 0, Scale(hwnd, kPanelWidth), Scale(hwnd, layout.height)};
-    AdjustWindowRectExForDpi(&frame, kPanelStyle, FALSE, kPanelExStyle, dpi);
     RECT bounds{};
     GetWindowRect(hwnd, &bounds);
     MONITORINFO monitor{sizeof(monitor)};
@@ -1371,6 +1746,7 @@ void ResizePanelToContent() {
     LONG width = frame.right - frame.left;
     LONG height = frame.bottom - frame.top;
     const bool scroll = height > work.bottom - work.top;
+    g_app.needsScroll = scroll;
     if (scroll) {
         height = work.bottom - work.top;
         width += GetSystemMetricsForDpi(SM_CXVSCROLL, dpi);
@@ -1379,20 +1755,99 @@ void ResizePanelToContent() {
     LONG y = std::clamp(bounds.top, work.top, work.bottom - height);
     if (bounds.left != x || bounds.top != y || bounds.right != x + width || bounds.bottom != y + height)
         SetWindowPos(hwnd, nullptr, x, y, width, height, SWP_NOZORDER | SWP_NOACTIVATE);
-    ShowScrollBar(hwnd, SB_VERT, scroll);
     SetPanelScroll(g_app.scrollY);
 }
 
 void FillRoundedRect(HDC hdc, RECT r, int radius, COLORREF fill, COLORREF border) {
-    HBRUSH brush = CreateSolidBrush(fill);
-    HPEN pen = CreatePen(PS_SOLID, 1, border);
-    HGDIOBJ oldBrush = SelectObject(hdc, brush);
-    HGDIOBJ oldPen = SelectObject(hdc, pen);
-    RoundRect(hdc, r.left, r.top, r.right, r.bottom, radius, radius);
-    SelectObject(hdc, oldBrush);
-    SelectObject(hdc, oldPen);
-    DeleteObject(brush);
-    DeleteObject(pen);
+    Gdiplus::Graphics graphics(hdc);
+    graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    const float x = static_cast<float>(r.left) + 0.5f;
+    const float y = static_cast<float>(r.top) + 0.5f;
+    const float w = static_cast<float>(r.right - r.left) - 1.0f;
+    const float h = static_cast<float>(r.bottom - r.top) - 1.0f;
+    const float d = std::min({static_cast<float>(radius), w, h});
+    Gdiplus::GraphicsPath path;
+    path.AddArc(x, y, d, d, 180.0f, 90.0f);
+    path.AddArc(x + w - d, y, d, d, 270.0f, 90.0f);
+    path.AddArc(x + w - d, y + h - d, d, d, 0.0f, 90.0f);
+    path.AddArc(x, y + h - d, d, d, 90.0f, 90.0f);
+    path.CloseFigure();
+    Gdiplus::SolidBrush brush(Gdiplus::Color(255, GetRValue(fill), GetGValue(fill), GetBValue(fill)));
+    Gdiplus::Pen pen(Gdiplus::Color(255, GetRValue(border), GetGValue(border), GetBValue(border)), 1.0f);
+    graphics.FillPath(&brush, &path);
+    if (fill != border) graphics.DrawPath(&pen, &path);
+}
+
+void DrawLineIcon(HDC hdc, RECT bounds, int id, COLORREF ink) {
+    using Gdiplus::PointF;
+    Gdiplus::Graphics graphics(hdc);
+    graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    graphics.TranslateTransform(static_cast<float>(bounds.left), static_cast<float>(bounds.top));
+    graphics.ScaleTransform(static_cast<float>(bounds.right - bounds.left) / 24.0f,
+                            static_cast<float>(bounds.bottom - bounds.top) / 24.0f);
+    Gdiplus::Pen pen(Gdiplus::Color(255, GetRValue(ink), GetGValue(ink), GetBValue(ink)), 1.6f);
+    pen.SetStartCap(Gdiplus::LineCapRound);
+    pen.SetEndCap(Gdiplus::LineCapRound);
+    pen.SetLineJoin(Gdiplus::LineJoinRound);
+    auto line = [&](float x1, float y1, float x2, float y2) { graphics.DrawLine(&pen, x1, y1, x2, y2); };
+    if (id == ID_BTN_HIDE || id == ID_UPDATE_CLOSE) {
+        line(6, 6, 18, 18);
+        line(18, 6, 6, 18);
+    } else if (id == ID_BTN_CHECK_UPDATE) {
+        graphics.DrawEllipse(&pen, 3.0f, 3.0f, 18.0f, 18.0f);
+        line(12, 17, 12, 7);
+        line(8, 11, 12, 7);
+        line(12, 7, 16, 11);
+    } else if (id == ID_ICON_UPDATE_SUCCESS) {
+        graphics.DrawEllipse(&pen, 3.0f, 3.0f, 18.0f, 18.0f);
+        line(7, 12, 10, 15);
+        line(10, 15, 17, 8);
+    } else if (id == ID_ICON_UPDATE_ERROR) {
+        graphics.DrawEllipse(&pen, 3.0f, 3.0f, 18.0f, 18.0f);
+        line(12, 7, 12, 13);
+        line(12, 16, 12, 16.2f);
+    } else if (id == ID_BTN_REFRESH) {
+        graphics.DrawArc(&pen, 4.0f, 4.0f, 16.0f, 16.0f, 40.0f, 295.0f);
+        PointF arrow[] = {{15, 3}, {20, 5}, {18, 10}};
+        graphics.DrawLines(&pen, arrow, static_cast<INT>(std::size(arrow)));
+    } else if (id == ID_BTN_GITHUB) {
+        Gdiplus::GraphicsPath cat;
+        cat.AddLine(9.0f, 21.0f, 9.0f, 17.0f);
+        cat.AddBezier(9.0f, 17.0f, 2.0f, 17.0f, 3.0f, 10.0f, 5.5f, 7.0f);
+        cat.AddBezier(5.5f, 7.0f, 5.0f, 6.0f, 5.0f, 4.0f, 5.5f, 3.0f);
+        cat.AddLine(5.5f, 3.0f, 9.0f, 4.5f);
+        cat.AddBezier(9.0f, 4.5f, 11.0f, 4.0f, 13.0f, 4.0f, 15.0f, 4.5f);
+        cat.AddLine(15.0f, 4.5f, 18.5f, 3.0f);
+        cat.AddBezier(18.5f, 3.0f, 19.0f, 4.0f, 19.0f, 6.0f, 18.5f, 7.0f);
+        cat.AddBezier(18.5f, 7.0f, 21.0f, 10.0f, 22.0f, 17.0f, 15.0f, 17.0f);
+        cat.AddLine(15.0f, 17.0f, 15.0f, 21.0f);
+        graphics.DrawPath(&pen, &cat);
+        Gdiplus::GraphicsPath tail;
+        tail.AddBezier(9.0f, 19.0f, 4.0f, 21.0f, 4.0f, 16.0f, 2.0f, 16.0f);
+        graphics.DrawPath(&pen, &tail);
+    } else if (id == ID_BTN_STATS_DATE) {
+        graphics.DrawRectangle(&pen, 4.0f, 5.0f, 16.0f, 16.0f);
+        line(4, 10, 20, 10);
+        line(8, 3, 8, 7);
+        line(16, 3, 16, 7);
+    } else if (id == ID_BTN_PREFERENCES) {
+        graphics.DrawEllipse(&pen, 5.0f, 5.0f, 14.0f, 14.0f);
+        graphics.DrawEllipse(&pen, 9.0f, 9.0f, 6.0f, 6.0f);
+        for (int i = 0; i < 8; ++i) {
+            const float angle = static_cast<float>(i) * 3.14159265f / 4.0f;
+            line(12.0f + std::cos(angle) * 7.0f, 12.0f + std::sin(angle) * 7.0f,
+                 12.0f + std::cos(angle) * 9.0f, 12.0f + std::sin(angle) * 9.0f);
+        }
+    } else if (id == ID_BTN_BROWSE_AG) {
+        graphics.DrawRectangle(&pen, 3.0f, 4.0f, 18.0f, 12.0f);
+        line(12, 16, 12, 21);
+        line(7, 21, 17, 21);
+    } else if (id == ID_BTN_DETECT_ENV) {
+        graphics.DrawRectangle(&pen, 3.0f, 4.0f, 18.0f, 16.0f);
+        line(7, 9, 10, 12);
+        line(10, 12, 7, 15);
+        line(13, 15, 17, 15);
+    }
 }
 
 void DrawOwnerButton(const DRAWITEMSTRUCT& item) {
@@ -1401,60 +1856,70 @@ void DrawOwnerButton(const DRAWITEMSTRUCT& item) {
     auto S = [&](int dp) { return Scale(g_app.hwnd, dp); };
     const bool disabled = (item.itemState & ODS_DISABLED) != 0;
     const bool pressed = (item.itemState & ODS_SELECTED) != 0;
+    const bool hovered = !disabled && g_app.hoveredControl == item.hwndItem;
     const bool takeover = item.CtlID == ID_BTN_APPROVAL_TAKEOVER;
-    const bool primary = item.CtlID == ID_BTN_LAUNCH_AG;
+    const bool primary = item.CtlID == ID_BTN_LAUNCH_AG || item.CtlID == ID_UPDATE_PRIMARY;
     const bool disclosure = item.CtlID == ID_BTN_PREFERENCES;
     const bool danger = item.CtlID == ID_BTN_UNINSTALL;
-    HBRUSH backdrop = disclosure ? g_app.brushBg : item.CtlID == ID_BTN_UPDATE_NOW ? g_app.brushBanner : g_app.brushCard;
+    const bool header = item.hwndItem == g_app.btnHeaderUpdate || item.hwndItem == g_app.btnGitHub ||
+                        item.hwndItem == g_app.btnRefresh || item.hwndItem == g_app.btnHide;
+    const bool iconOnly = header || item.CtlID == ID_BTN_STATS_DATE || item.CtlID == ID_UPDATE_CLOSE;
+    const bool focus = (item.itemState & ODS_FOCUS) && !(item.itemState & ODS_NOFOCUSRECT);
+    HBRUSH backdrop = header || disclosure ? g_app.brushBg : item.CtlID == ID_BTN_UPDATE_NOW ? g_app.brushBanner : g_app.brushCard;
     FillRect(hdc, &rc, backdrop);
-    COLORREF fill = pressed ? RGB(235, 239, 246) : RGB(255, 255, 255);
-    COLORREF border = RGB(209, 217, 227);
-    COLORREF ink = disabled ? RGB(120, 130, 145) : danger ? kRed : kText;
+    COLORREF fill = pressed ? RGB(226, 232, 240) : hovered ? RGB(241, 245, 249) : RGB(248, 250, 252);
+    COLORREF border = kBorder;
+    COLORREF ink = disabled ? RGB(148, 163, 184) : danger ? kRed : iconOnly ? kSecondary : kText;
+    if (iconOnly || disclosure) {
+        fill = pressed ? RGB(226, 232, 240) : hovered ? RGB(237, 241, 246) : header || disclosure ? kBackground : RGB(255, 255, 255);
+        border = fill;
+    }
+    if (danger && hovered) { fill = RGB(254, 242, 242); border = RGB(254, 226, 226); }
     if (primary) {
-        fill = disabled ? RGB(229, 235, 244) : pressed ? RGB(11, 84, 192) : kBlue;
+        fill = disabled ? RGB(226, 232, 240) : pressed ? RGB(23, 46, 127) : hovered ? RGB(25, 53, 150) : kBlue;
         border = fill;
         if (!disabled) ink = RGB(255, 255, 255);
+    }
+    if (focus) {
+        FillRoundedRect(hdc, rc, S(20), RGB(59, 130, 246), RGB(59, 130, 246));
+        InflateRect(&rc, -S(2), -S(2));
+        FillRoundedRect(hdc, rc, S(16), RGB(255, 255, 255), RGB(255, 255, 255));
+        InflateRect(&rc, -S(2), -S(2));
+    } else if (pressed && !takeover) {
+        InflateRect(&rc, -S(1), -S(1));
     }
     const int cy = (rc.top + rc.bottom) / 2;
     if (takeover) {
         const bool enabled = g_app.state.takeoverEnabled.value_or(false);
-        const RECT track{rc.left + S(4), cy - S(8), rc.left + S(38), cy + S(8)};
-        const COLORREF trackColor = disabled ? RGB(191, 199, 210) : enabled ? kBlue : kSecondary;
-        FillRoundedRect(hdc, track, S(16), trackColor, trackColor);
-        const int thumb = enabled ? track.right - S(8) : track.left + S(8);
-        const RECT knob{thumb - S(5), cy - S(5), thumb + S(5), cy + S(5)};
-        constexpr COLORREF white = RGB(255, 255, 255);
-        FillRoundedRect(hdc, knob, S(10), white, white);
-    } else {
-        FillRoundedRect(hdc, rc, S(disclosure ? 18 : 12), fill, border);
-    }
-    if (item.CtlID == ID_BTN_STATS_DATE) {
         const int cx = (rc.left + rc.right) / 2;
-        HPEN pen = CreatePen(PS_SOLID, S(1), ink);
-        auto oldPen = SelectObject(hdc, pen);
-        auto oldBrush = SelectObject(hdc, GetStockObject(NULL_BRUSH));
-        RoundRect(hdc, cx - S(7), cy - S(6), cx + S(8), cy + S(8), S(4), S(4));
-        MoveToEx(hdc, cx - S(7), cy - S(2), nullptr);
-        LineTo(hdc, cx + S(8), cy - S(2));
-        for (int offset : {-3, 3}) {
-            MoveToEx(hdc, cx + S(offset), cy - S(8), nullptr);
-            LineTo(hdc, cx + S(offset), cy - S(4));
-        }
-        SelectObject(hdc, oldBrush);
-        SelectObject(hdc, oldPen);
-        DeleteObject(pen);
+        const RECT track{cx - S(18), cy - S(10), cx + S(18), cy + S(10)};
+        const COLORREF trackColor = disabled ? RGB(203, 213, 225) : enabled ? (hovered ? RGB(25, 53, 150) : kBlue) : RGB(148, 163, 184);
+        FillRoundedRect(hdc, track, S(20), trackColor, trackColor);
+        const int thumb = enabled ? track.right - S(10) : track.left + S(10);
+        const RECT knob{thumb - S(7), cy - S(7), thumb + S(7), cy + S(7)};
+        constexpr COLORREF white = RGB(255, 255, 255);
+        FillRoundedRect(hdc, knob, S(14), white, white);
     } else {
+        FillRoundedRect(hdc, rc, S(disclosure ? 24 : 16), fill, border);
+    }
+    if (iconOnly) {
+        const int cx = (rc.left + rc.right) / 2;
+        DrawLineIcon(hdc, {cx - S(9), cy - S(9), cx + S(9), cy + S(9)}, static_cast<int>(item.CtlID), ink);
+        if (item.hwndItem == g_app.btnHeaderUpdate && g_app.state.updateAvailable) {
+            FillRoundedRect(hdc, {rc.right - S(7), rc.top + S(3), rc.right - S(2), rc.top + S(8)}, S(5), kBlue, kBlue);
+        }
+    } else if (!takeover) {
         wchar_t text[96]{};
         GetWindowTextW(item.hwndItem, text, static_cast<int>(std::size(text)));
         auto oldFont = SelectObject(hdc, reinterpret_cast<HFONT>(SendMessageW(item.hwndItem, WM_GETFONT, 0, 0)));
         SetBkMode(hdc, TRANSPARENT);
         SetTextColor(hdc, ink);
         RECT textRect = rc;
-        if (disclosure) textRect.left += S(12);
-        if (takeover) textRect.left += S(44);
-        DrawTextW(hdc, text, -1, &textRect, (disclosure || takeover ? DT_LEFT : DT_CENTER) | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        if (disclosure) textRect.left += S(44);
+        DrawTextW(hdc, text, -1, &textRect, (disclosure ? DT_LEFT : DT_CENTER) | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
         SelectObject(hdc, oldFont);
         if (disclosure) {
+            DrawLineIcon(hdc, {rc.left + S(16), cy - S(8), rc.left + S(32), cy + S(8)}, ID_BTN_PREFERENCES, kSecondary);
             int x = rc.right - S(20);
             HPEN pen = CreatePen(PS_SOLID, S(2), kSecondary);
             auto oldPen = SelectObject(hdc, pen);
@@ -1469,10 +1934,6 @@ void DrawOwnerButton(const DRAWITEMSTRUCT& item) {
             DeleteObject(pen);
         }
     }
-    if ((item.itemState & ODS_FOCUS) && !(item.itemState & ODS_NOFOCUSRECT)) {
-        InflateRect(&rc, -S(4), -S(4));
-        DrawFocusRect(hdc, &rc);
-    }
 }
 
 void PaintWindowCards(HWND hwnd, HDC hdc) {
@@ -1483,64 +1944,254 @@ void PaintWindowCards(HWND hwnd, HDC hdc) {
     auto S = [&](int dp) { return Scale(hwnd, dp); };
     auto Y = [&](int dp) { return S(dp) - g_app.scrollY; };
     constexpr COLORREF white = RGB(255, 255, 255);
-    constexpr COLORREF border = RGB(220, 226, 234);
     auto card = [&](int y, int h, COLORREF fill = RGB(255, 255, 255)) {
-        FillRoundedRect(hdc, {S(16), Y(y), S(398), Y(y + h)}, S(18), fill, border);
+        FillRoundedRect(hdc, {S(20), Y(y + 1), S(394), Y(y + h + 1)}, S(24), RGB(239, 242, 246), RGB(239, 242, 246));
+        FillRoundedRect(hdc, {S(20), Y(y), S(394), Y(y + h)}, S(24), fill, kBorder);
     };
     PanelLayout layout;
-    card(56, 84);
-    if (g_app.state.updateAvailable) card(150, 40, RGB(232, 242, 255));
-    card(layout.stats, 138);
-    card(layout.pricing, 50);
-    card(layout.apps, 160);
-    if (g_app.preferencesOpen) card(layout.prefs + 42, kPreferencesSpace - 3);
+    const int saved = SaveDC(hdc);
+    IntersectClipRect(hdc, 0, S(kHeaderHeight), client.right, client.bottom);
+    // Service controls sit directly on a white surface, with no extra frame.
+    RECT service{S(20), Y(68), S(394), Y(148)};
+    FillRoundedRect(hdc, service, S(24), white, white);
+    if (g_app.state.updateAvailable) card(160, 44, RGB(239, 246, 255));
+    card(layout.stats, 222);
+    card(layout.pricing, 64);
+    card(layout.apps, 194);
+    if (g_app.preferencesOpen) card(layout.prefs + 56, kPreferencesSpace - 4);
 
-    HBRUSH shield = CreateSolidBrush(kBlue);
-    auto oldBrush = SelectObject(hdc, shield);
-    auto oldPen = SelectObject(hdc, GetStockObject(NULL_PEN));
-    POINT shieldOutline[] = {{S(33), Y(14)}, {S(47), Y(20)}, {S(47), Y(30)}, {S(44), Y(37)},
-                             {S(33), Y(45)}, {S(22), Y(37)}, {S(19), Y(30)}, {S(19), Y(20)}};
-    Polygon(hdc, shieldOutline, static_cast<int>(std::size(shieldOutline)));
-    HBRUSH status = CreateSolidBrush(g_app.state.serviceRunning ? kGreen : kSecondary);
-    SelectObject(hdc, status);
-    Ellipse(hdc, S(29), Y(72), S(39), Y(82));
-    HPEN check = CreatePen(PS_SOLID, S(2), white);
-    SelectObject(hdc, check);
-    POINT tick[] = {{S(26), Y(29)}, {S(31), Y(34)}, {S(40), Y(25)}};
-    Polyline(hdc, tick, static_cast<int>(std::size(tick)));
-
-    HPEN divider = CreatePen(PS_SOLID, 1, border);
-    SelectObject(hdc, divider);
-    if (g_app.state.serviceRunning && !g_app.state.serviceBackend.empty()) {
-        MoveToEx(hdc, S(284), Y(69), nullptr);
-        LineTo(hdc, S(284), Y(85));
+    const COLORREF statusColor = g_app.state.serviceRunning ? kGreen : kSecondary;
+    FillRoundedRect(hdc, {S(36), Y(86), S(42), Y(92)}, S(6), statusColor, statusColor);
+    HPEN divider = CreatePen(PS_SOLID, 1, kBorder);
+    auto oldPen = SelectObject(hdc, divider);
+    MoveToEx(hdc, S(36), Y(layout.stats + 126), nullptr);
+    LineTo(hdc, S(378), Y(layout.stats + 126));
+    for (int row : {54, 108}) {
+        FillRoundedRect(hdc, {S(36), Y(layout.apps + row), S(68), Y(layout.apps + row + 32)}, S(16), kBackground, kBackground);
+        DrawLineIcon(hdc, {S(43), Y(layout.apps + row + 7), S(61), Y(layout.apps + row + 25)},
+                     row == 54 ? ID_BTN_BROWSE_AG : ID_BTN_DETECT_ENV, kSecondary);
     }
-    for (int row : {34, 76, 118}) {
-        MoveToEx(hdc, S(28), Y(layout.apps + row), nullptr);
-        LineTo(hdc, S(386), Y(layout.apps + row));
-    }
-    HPEN icon = CreatePen(PS_SOLID, S(1), kSecondary);
-    SelectObject(hdc, icon);
-    SelectObject(hdc, GetStockObject(NULL_BRUSH));
-    int y = layout.apps;
-    RoundRect(hdc, S(29), Y(y + 47), S(46), Y(y + 59), S(4), S(4));
-    MoveToEx(hdc, S(37), Y(y + 59), nullptr);
-    LineTo(hdc, S(37), Y(y + 63));
-    MoveToEx(hdc, S(33), Y(y + 63), nullptr);
-    LineTo(hdc, S(42), Y(y + 63));
-    RoundRect(hdc, S(29), Y(y + 89), S(46), Y(y + 105), S(4), S(4));
-    POINT prompt[] = {{S(32), Y(y + 93)}, {S(35), Y(y + 97)}, {S(32), Y(y + 100)}};
-    Polyline(hdc, prompt, static_cast<int>(std::size(prompt)));
-    MoveToEx(hdc, S(38), Y(y + 100), nullptr);
-    LineTo(hdc, S(43), Y(y + 100));
-
-    SelectObject(hdc, oldBrush);
     SelectObject(hdc, oldPen);
-    DeleteObject(shield);
-    DeleteObject(status);
-    DeleteObject(check);
     DeleteObject(divider);
-    DeleteObject(icon);
+    RestoreDC(hdc, saved);
+
+    RECT header{0, 0, client.right, S(kHeaderHeight)};
+    FillRect(hdc, &header, g_app.brushBg);
+    // The brand keeps its colors; the tray icon continues to reflect runtime state.
+    DrawIconEx(hdc, S(20), S(20), g_app.iconNormalLarge, S(24), S(24), 0, nullptr, DI_NORMAL);
+}
+
+void PositionUpdatePopup() {
+    if (!g_app.updatePopup) return;
+    RECT owner{};
+    GetWindowRect(g_app.hwnd, &owner);
+    MONITORINFO monitor{sizeof(monitor)};
+    GetMonitorInfoW(MonitorFromWindow(g_app.hwnd, MONITOR_DEFAULTTONEAREST), &monitor);
+    const int width = Scale(g_app.hwnd, 360);
+    const int height = Scale(g_app.hwnd, 328);
+    const LONG x = std::clamp((owner.left + owner.right - width) / 2, monitor.rcWork.left,
+                              std::max(monitor.rcWork.left, monitor.rcWork.right - width));
+    const LONG y = std::clamp((owner.top + owner.bottom - height) / 2, monitor.rcWork.top,
+                              std::max(monitor.rcWork.top, monitor.rcWork.bottom - height));
+    SetWindowPos(g_app.updatePopup, nullptr, x, y, width, height, SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
+void SyncUpdatePopup() {
+    if (!g_app.updatePopup) return;
+    const auto notice = GetUpdateNotice();
+    auto place = [&](HWND control, HFONT font, int x, int y, int w, int h, bool visible = true) {
+        SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(font), FALSE);
+        SetWindowPos(control, nullptr, Scale(g_app.updatePopup, x), Scale(g_app.updatePopup, y),
+                     Scale(g_app.updatePopup, w), Scale(g_app.updatePopup, h),
+                     SWP_NOZORDER | SWP_NOACTIVATE | (visible ? SWP_SHOWWINDOW : SWP_HIDEWINDOW));
+    };
+    SetWindowTextW(g_app.updatePopup, notice.title.c_str());
+    SetWindowTextW(g_app.lblUpdatePopupTitle, notice.title.c_str());
+    SetWindowTextW(g_app.lblUpdatePopupBody, notice.body.c_str());
+    SetWindowTextW(g_app.lblUpdatePopupDetail, notice.detail.c_str());
+    SetWindowTextW(g_app.lblUpdatePopupCurrent, notice.currentVersion.c_str());
+    SetWindowTextW(g_app.lblUpdatePopupLatest, notice.latestVersion.c_str());
+    SetWindowTextW(g_app.btnUpdatePopupPrimary, notice.primaryLabel.c_str());
+    SetWindowTextW(g_app.btnUpdatePopupSecondary, g_app.updatePhase == UpdatePhase::Available ||
+        g_app.updatePhase == UpdatePhase::Ready ? L"稍后" : L"关闭");
+    EnableWindow(g_app.btnUpdatePopupPrimary, !notice.busy);
+    place(g_app.btnUpdatePopupClose, g_app.fontRegular, 312, 12, 32, 32);
+    place(g_app.lblUpdatePopupTitle, g_app.fontDialogTitle, 88, 26, 218, 28);
+    place(g_app.lblUpdatePopupBody, g_app.fontRegular, 24, 96, 312, 48);
+    place(g_app.lblUpdatePopupDetail, g_app.fontSmall, 24, 148, 312, 18, !notice.detail.empty());
+    place(g_app.lblUpdatePopupCurrent, g_app.fontSmall, 142, 184, 178, 20);
+    place(g_app.lblUpdatePopupLatest, g_app.fontSmall, 142, 212, 178, 20);
+    place(g_app.btnUpdatePopupSecondary, g_app.fontRegular, 24, 268, 104, 36, notice.showSecondary);
+    place(g_app.btnUpdatePopupPrimary, g_app.fontRegular, notice.showSecondary ? 136 : 24, 268,
+          notice.showSecondary ? 200 : 312, 36);
+    TOOLINFOW tool{sizeof(tool)};
+    tool.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
+    tool.hwnd = g_app.updatePopup;
+    tool.uId = reinterpret_cast<UINT_PTR>(g_app.lblUpdatePopupDetail);
+    tool.lpszText = const_cast<wchar_t*>(notice.detail.c_str());
+    SendMessageW(g_app.updatePopupTooltip, TTM_UPDATETIPTEXTW, 0, reinterpret_cast<LPARAM>(&tool));
+    InvalidateRect(g_app.updatePopup, nullptr, TRUE);
+}
+
+void PaintUpdatePopup(HWND hwnd, HDC hdc) {
+    RECT client{};
+    GetClientRect(hwnd, &client);
+    FillRect(hdc, &client, g_app.brushCard);
+    auto S = [&](int dip) { return Scale(hwnd, dip); };
+    const auto notice = GetUpdateNotice();
+    FillRoundedRect(hdc, client, S(24), RGB(255, 255, 255), kBorder);
+    const COLORREF badge = notice.accent == kRed ? RGB(254, 242, 242) :
+        notice.accent == kGreen ? RGB(236, 253, 245) : RGB(239, 243, 255);
+    FillRoundedRect(hdc, {S(24), S(24), S(72), S(72)}, S(24), badge, badge);
+    DrawLineIcon(hdc, {S(36), S(36), S(60), S(60)}, notice.icon, notice.accent);
+    FillRoundedRect(hdc, {S(24), S(176), S(336), S(240)}, S(16), kBackground, kBackground);
+    auto oldFont = SelectObject(hdc, g_app.fontSmall);
+    SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, kSecondary);
+    RECT brand{S(88), S(56), S(306), S(76)};
+    DrawTextW(hdc, L"Gravity Steward", -1, &brand, DT_SINGLELINE | DT_NOPREFIX);
+    RECT current{S(40), S(184), S(140), S(204)};
+    RECT latest{S(40), S(212), S(140), S(232)};
+    DrawTextW(hdc, L"当前版本", -1, &current, DT_SINGLELINE | DT_NOPREFIX);
+    DrawTextW(hdc, L"最新版本", -1, &latest, DT_SINGLELINE | DT_NOPREFIX);
+    SelectObject(hdc, oldFont);
+}
+
+LRESULT CALLBACK UpdatePopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+    case WM_CREATE: {
+        g_app.updatePopup = hwnd;
+        ConfigureFramelessWindow(hwnd);
+        auto label = [&](DWORD style = SS_LEFT) {
+            return CreateWindowExW(0, L"STATIC", L"", WS_CHILD | SS_NOPREFIX | SS_NOTIFY | style,
+                0, 0, 0, 0, hwnd, nullptr, g_app.hInst, nullptr);
+        };
+        auto button = [&](const wchar_t* text, int id) {
+            HWND control = CreateWindowExW(0, L"BUTTON", text, WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
+                0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), g_app.hInst, nullptr);
+            SetWindowSubclass(control, ControlSubclass, 1, 0);
+            return control;
+        };
+        g_app.lblUpdatePopupTitle = label();
+        g_app.lblUpdatePopupBody = label();
+        g_app.lblUpdatePopupDetail = label(SS_ENDELLIPSIS);
+        g_app.lblUpdatePopupCurrent = label(SS_RIGHT);
+        g_app.lblUpdatePopupLatest = label(SS_RIGHT);
+        g_app.btnUpdatePopupPrimary = button(L"", ID_UPDATE_PRIMARY);
+        g_app.btnUpdatePopupSecondary = button(L"关闭", ID_UPDATE_SECONDARY);
+        g_app.btnUpdatePopupClose = button(L"关闭更新提示", ID_UPDATE_CLOSE);
+        g_app.updatePopupTooltip = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr,
+            WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX, 0, 0, 0, 0, hwnd, nullptr, g_app.hInst, nullptr);
+        SendMessageW(g_app.updatePopupTooltip, TTM_SETMAXTIPWIDTH, 0, Scale(hwnd, 320));
+        for (HWND control : {g_app.lblUpdatePopupDetail, g_app.btnUpdatePopupClose}) {
+            TOOLINFOW tool{sizeof(tool)};
+            tool.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
+            tool.hwnd = hwnd;
+            tool.uId = reinterpret_cast<UINT_PTR>(control);
+            tool.lpszText = const_cast<wchar_t*>(L"关闭更新提示");
+            SendMessageW(g_app.updatePopupTooltip, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&tool));
+        }
+        SyncUpdatePopup();
+        return 0;
+    }
+    case WM_NCCALCSIZE:
+    case WM_NCPAINT:
+        return 0;
+    case WM_NCACTIVATE:
+        return TRUE;
+    case WM_NCHITTEST:
+        return HTCLIENT;
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_DPICHANGED: {
+        const auto* suggested = reinterpret_cast<const RECT*>(lParam);
+        SetWindowPos(hwnd, nullptr, suggested->left, suggested->top, suggested->right - suggested->left,
+                     suggested->bottom - suggested->top, SWP_NOZORDER | SWP_NOACTIVATE);
+        SyncUpdatePopup();
+        return 0;
+    }
+    case WM_PAINT: {
+        PAINTSTRUCT paint{};
+        HDC hdc = BeginPaint(hwnd, &paint);
+        PaintUpdatePopup(hwnd, hdc);
+        EndPaint(hwnd, &paint);
+        return 0;
+    }
+    case WM_PRINTCLIENT:
+        PaintUpdatePopup(hwnd, reinterpret_cast<HDC>(wParam));
+        return 0;
+    case WM_DRAWITEM:
+        DrawOwnerButton(*reinterpret_cast<const DRAWITEMSTRUCT*>(lParam));
+        return TRUE;
+    case WM_CTLCOLORSTATIC: {
+        HDC hdc = reinterpret_cast<HDC>(wParam);
+        HWND control = reinterpret_cast<HWND>(lParam);
+        SetBkMode(hdc, TRANSPARENT);
+        SetTextColor(hdc, control == g_app.lblUpdatePopupBody || control == g_app.lblUpdatePopupDetail ? kSecondary : kText);
+        return reinterpret_cast<LRESULT>(control == g_app.lblUpdatePopupCurrent || control == g_app.lblUpdatePopupLatest ?
+                                          g_app.brushBg : g_app.brushCard);
+    }
+    case WM_COMMAND:
+        switch (LOWORD(wParam)) {
+        case ID_UPDATE_CLOSE:
+        case ID_UPDATE_SECONDARY:
+        case IDCANCEL:
+            SendMessageW(hwnd, WM_CLOSE, 0, 0);
+            return 0;
+        case IDOK:
+        case ID_UPDATE_PRIMARY: {
+            const auto notice = GetUpdateNotice();
+            if (notice.busy) return 0;
+            switch (notice.action) {
+            case UpdateAction::Check: StartCheckUpdateWorker(false); break;
+            case UpdateAction::Download: StartDownloadAndApplyWorker(); break;
+            case UpdateAction::OpenDownloads:
+                OpenPathWithShell(L"https://github.com/CarlosZ16420/gravity-steward/releases/latest");
+                break;
+            case UpdateAction::Close: SendMessageW(hwnd, WM_CLOSE, 0, 0); break;
+            }
+            return 0;
+        }
+        }
+        break;
+    case WM_CLOSE:
+        DestroyWindow(hwnd);
+        return 0;
+    case WM_SYSKEYDOWN:
+        if (wParam == VK_F4) { SendMessageW(hwnd, WM_CLOSE, 0, 0); return 0; }
+        break;
+    case WM_DESTROY:
+        g_app.updatePopup = nullptr;
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+void ShowUpdatePopup(bool show) {
+    if (!g_app.updatePopup) {
+        static bool registered = false;
+        constexpr wchar_t popupClass[] = L"GravityStewardUpdatePopup";
+        if (!registered) {
+            WNDCLASSEXW windowClass{sizeof(windowClass)};
+            windowClass.lpfnWndProc = UpdatePopupProc;
+            windowClass.hInstance = g_app.hInst;
+            windowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+            windowClass.lpszClassName = popupClass;
+            registered = RegisterClassExW(&windowClass) != 0;
+        }
+        if (!registered) return;
+        CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_CONTROLPARENT, popupClass, L"应用更新",
+            kPanelStyle, 0, 0, Scale(g_app.hwnd, 360), Scale(g_app.hwnd, 328),
+            g_app.hwnd, nullptr, g_app.hInst, nullptr);
+    }
+    if (!g_app.updatePopup) return;
+    PositionUpdatePopup();
+    SyncUpdatePopup();
+    if (show) {
+        ShowWindow(g_app.updatePopup, SW_SHOWNORMAL);
+        SetForegroundWindow(g_app.updatePopup);
+        SetFocus(GetUpdateNotice().busy ? g_app.btnUpdatePopupSecondary : g_app.btnUpdatePopupPrimary);
+    }
 }
 
 std::wstring IsoDate(const SYSTEMTIME& time) {
@@ -1633,15 +2284,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
     case WM_CREATE: {
         g_app.hwnd = hwnd;
-        BOOL round = kDwmRound;
-        DwmSetWindowAttribute(hwnd, kDwmWindowCornerPreference, &round, sizeof(round));
-        g_app.brushBg = CreateSolidBrush(RGB(246, 248, 252));
+        ConfigureFramelessWindow(hwnd);
+        g_app.brushBg = CreateSolidBrush(kBackground);
         g_app.brushCard = CreateSolidBrush(RGB(255, 255, 255));
-        g_app.brushBanner = CreateSolidBrush(RGB(232, 242, 255));
-        g_app.iconGreen = CreateShieldBadgeIcon(RGB(22, 163, 74), 32);
-        g_app.iconBlue = CreateShieldBadgeIcon(RGB(37, 99, 235), 32);
-        g_app.iconAmber = CreateShieldBadgeIcon(RGB(217, 119, 6), 32);
-        g_app.iconRed = CreateShieldBadgeIcon(RGB(220, 38, 38), 32);
+        g_app.brushBanner = CreateSolidBrush(RGB(239, 246, 255));
+        if (!LoadPanelIcons(hwnd)) return -1;
 
         CreateChildControls(hwnd);
 
@@ -1649,7 +2296,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         g_app.nid.hWnd = hwnd;
         g_app.nid.uID = IDI_APP_ICON;
         g_app.nid.uCallbackMessage = WM_APP_TRAY;
-        g_app.nid.hIcon = g_app.iconGreen;
+        g_app.nid.hIcon = g_app.iconGray;
         g_app.nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
         wcsncpy_s(g_app.nid.szTip, L"Gravity Steward", _TRUNCATE);
         g_app.trayAdded = Shell_NotifyIconW(NIM_ADD, &g_app.nid) == TRUE;
@@ -1662,16 +2309,52 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
         return 0;
     }
+    case WM_NCCALCSIZE:
+        return 0;
+    case WM_NCPAINT:
+        return 0;
+    case WM_NCACTIVATE:
+        return TRUE;
+    case WM_MOVE:
+        PositionUpdatePopup();
+        return 0;
+    case WM_SYSKEYDOWN:
+        if (wParam == VK_F4) { SendMessageW(hwnd, WM_CLOSE, 0, 0); return 0; }
+        break;
+    case WM_NCHITTEST: {
+        POINT point{static_cast<short>(LOWORD(lParam)), static_cast<short>(HIWORD(lParam))};
+        ScreenToClient(hwnd, &point);
+        if (point.y >= 0 && point.y < Scale(hwnd, kHeaderHeight) &&
+            ChildWindowFromPointEx(hwnd, point, CWP_SKIPINVISIBLE | CWP_SKIPDISABLED) == hwnd) return HTCAPTION;
+        if (point.y >= 0 && point.y < Scale(hwnd, kHeaderHeight)) {
+            RECT title{};
+            GetWindowRect(g_app.lblTitle, &title);
+            MapWindowPoints(HWND_DESKTOP, hwnd, reinterpret_cast<POINT*>(&title), 2);
+            if (PtInRect(&title, point)) return HTCAPTION;
+        }
+        return HTCLIENT;
+    }
+    case WM_NCLBUTTONDBLCLK:
+        if (wParam == HTCAPTION) return 0;
+        break;
+    case WM_SYSCOMMAND:
+        if ((wParam & 0xfff0) == SC_MAXIMIZE || (wParam & 0xfff0) == SC_SIZE) return 0;
+        if ((wParam & 0xfff0) == SC_MINIMIZE) { ShowWindow(hwnd, SW_HIDE); return 0; }
+        break;
     case WM_ERASEBKGND:
         return 1;
     case WM_DPICHANGED: {
         const HFONT oldFonts[] = {g_app.fontTitle, g_app.fontHeading, g_app.fontBold,
-                                  g_app.fontRegular, g_app.fontSmall, g_app.fontMetric};
+                                  g_app.fontRegular, g_app.fontSmall, g_app.fontMetric, g_app.fontDialogTitle};
         auto suggested = reinterpret_cast<const RECT*>(lParam);
         SetWindowPos(hwnd, nullptr, suggested->left, suggested->top, 0, 0,
                      SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER);
         CreateFonts(hwnd);
         ResizePanelToContent();
+        LoadPanelIcons(hwnd);
+        PositionUpdatePopup();
+        SyncUpdatePopup();
+        SendMessageW(g_app.tooltip, TTM_SETMAXTIPWIDTH, 0, Scale(hwnd, 360));
         for (HFONT font : oldFonts) DeleteObject(font);
         return 0;
     }
@@ -1689,7 +2372,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case SB_THUMBTRACK:
         case SB_THUMBPOSITION: {
             SCROLLINFO info{sizeof(info), SIF_TRACKPOS};
-            GetScrollInfo(hwnd, SB_VERT, &info);
+            GetScrollInfo(g_app.scrollbar, SB_CTL, &info);
             y = info.nTrackPos;
             break;
         }
@@ -1699,7 +2382,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         return 0;
     }
     case WM_MOUSEWHEEL:
-        if (GetWindowLongPtrW(hwnd, GWL_STYLE) & WS_VSCROLL) {
+        if (g_app.needsScroll) {
             SetPanelScroll(g_app.scrollY - MulDiv(GET_WHEEL_DELTA_WPARAM(wParam), Scale(hwnd, 60), WHEEL_DELTA));
         }
         return 0;
@@ -1729,8 +2412,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         } else if (ctrl == g_app.lblStatus) {
             SetTextColor(hdc, g_app.state.serviceRunning ? kGreen : kSecondary);
         } else if (ctrl == g_app.lblStatsCost) {
-            SetTextColor(hdc, kGreen);
-        } else if (ctrl == g_app.lblBackend || ctrl == g_app.lblStatsSub || ctrl == g_app.lblStatsTokens || ctrl == g_app.lblPricingNote ||
+            SetTextColor(hdc, kSecondary);
+        } else if (ctrl == g_app.lblStatsSub || ctrl == g_app.lblStatsTokenDetail || ctrl == g_app.lblStatsInputTitle ||
+                   ctrl == g_app.lblStatsOutputTitle || ctrl == g_app.lblStatsCacheTitle || ctrl == g_app.lblPricingNote ||
                    ctrl == g_app.lblAgPath || ctrl == g_app.lblGuardianAuth || ctrl == g_app.lblVersionInfo) {
             SetTextColor(hdc, kSecondary);
         } else {
@@ -1744,7 +2428,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         return reinterpret_cast<LRESULT>(g_app.brushCard);
     case WM_APP_TRAY:
         if (LOWORD(lParam) == WM_LBUTTONUP || LOWORD(lParam) == WM_LBUTTONDBLCLK) {
-            if (IsWindowVisible(hwnd)) ShowWindow(hwnd, SW_HIDE);
+            if (IsWindowVisible(hwnd)) SendMessageW(hwnd, WM_CLOSE, 0, 0);
             else ShowPanelWindow();
         } else if (LOWORD(lParam) == WM_RBUTTONUP) {
             ShowTrayContextMenu();
@@ -1765,6 +2449,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         SyncStatsToUi();
         return 0;
     }
+    case WM_APP_UPDATE_PROGRESS:
+        if (g_app.busyUpdate) {
+            g_app.updatePhase = UpdatePhase::Downloading;
+            SyncUpdatePopup();
+        }
+        return 0;
     case WM_APP_WORK_DONE: {
         std::unique_ptr<WorkResult> res(reinterpret_cast<WorkResult*>(lParam));
         if (!res) return 0;
@@ -1788,16 +2478,31 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (res->ok) StartRefreshWorker(false, false, true);
             else MessageBoxW(hwnd, L"无法启动 Antigravity.exe，请检查文件路径和权限。", L"启动失败", MB_OK | MB_ICONERROR);
         } else if (res->kind == WorkKind::CheckAndMaybeUpdate || res->kind == WorkKind::DownloadUpdate) {
+            const bool downloading = g_app.updatePhase == UpdatePhase::Downloading;
+            g_app.busyUpdate = false;
             g_app.state.updateChecked = res->snapshot.updateChecked;
             g_app.state.updateAvailable = res->snapshot.updateAvailable;
             g_app.state.updateDownloaded = res->snapshot.updateDownloaded;
             g_app.state.waitingAntigravityExit = res->snapshot.waitingAntigravityExit;
             g_app.state.availableUpdate = res->snapshot.availableUpdate;
             g_app.state.downloadedZipPath = res->snapshot.downloadedZipPath;
+            g_app.updateError = res->ok ? L"" : res->message;
+            if (!res->ok) {
+                g_app.updatePhase = res->kind == WorkKind::DownloadUpdate || downloading ?
+                    UpdatePhase::DownloadFailed : UpdatePhase::CheckFailed;
+            } else if (g_app.state.waitingAntigravityExit) {
+                g_app.updatePhase = UpdatePhase::Waiting;
+            } else if (g_app.state.updateDownloaded) {
+                g_app.updatePhase = UpdatePhase::Ready;
+            } else {
+                g_app.updatePhase = g_app.state.updateAvailable ? UpdatePhase::Available : UpdatePhase::Current;
+            }
             SyncControlsToUi();
             if (res->triggerImmediateApply) {
                 if (g_app.uninstallPromptOpen) {
                     g_app.state.waitingAntigravityExit = true;
+                    g_app.updatePhase = UpdatePhase::Waiting;
+                    SyncUpdatePopup();
                     SetTimer(hwnd, ID_TIMER_DEFERRED_UPDATE, 5000, nullptr);
                     return 0;
                 }
@@ -1806,14 +2511,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             }
             if (g_app.state.waitingAntigravityExit) {
                 SetTimer(hwnd, ID_TIMER_DEFERRED_UPDATE, 5000, nullptr);
-            }
-            if (!res->ok && !res->message.empty()) {
-                if (res->kind == WorkKind::DownloadUpdate || IsWindowVisible(hwnd)) {
-                    MessageBoxW(hwnd, res->message.c_str(), L"检查/下载更新", MB_OK | MB_ICONWARNING);
-                }
-            } else if (res->kind == WorkKind::CheckAndMaybeUpdate && !res->snapshot.updateAvailable && IsWindowVisible(hwnd) && !res->message.empty()) {
-                // Only show "already up to date" when user explicitly triggered check? Let's show unobtrusive title or message only on explicit check via status text
-                SetWindowTextW(g_app.lblVersionInfo, L"面板 v" PANEL_VERSION_WIDE L"（已是最新）");
             }
         } else {
             // Preserve update state across stats/service refreshes
@@ -1881,6 +2578,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             break;
         case ID_BTN_STATS_DATE:
             ShowStatsPeriodMenu(hwnd);
+            break;
+        case ID_BTN_GITHUB:
+            OpenPathWithShell(L"https://github.com/CarlosZ16420/gravity-steward");
+            break;
+        case ID_BTN_HIDE:
+        case IDCANCEL:
+            SendMessageW(hwnd, WM_CLOSE, 0, 0);
             break;
         case ID_BTN_PREFERENCES:
             g_app.preferencesOpen = !g_app.preferencesOpen;
@@ -1979,20 +2683,22 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         return 0;
     }
     case WM_CLOSE:
+        if (g_app.updatePopup) DestroyWindow(g_app.updatePopup);
         ShowWindow(hwnd, SW_HIDE);
         return 0;
     case WM_DESTROY:
+        if (g_app.updatePopup) DestroyWindow(g_app.updatePopup);
         if (g_app.trayAdded) {
             Shell_NotifyIconW(NIM_DELETE, &g_app.nid);
             g_app.trayAdded = false;
         }
-        for (HFONT f : {g_app.fontTitle, g_app.fontHeading, g_app.fontBold, g_app.fontRegular, g_app.fontSmall, g_app.fontMetric}) {
+        for (HFONT f : {g_app.fontTitle, g_app.fontHeading, g_app.fontBold, g_app.fontRegular, g_app.fontSmall, g_app.fontMetric, g_app.fontDialogTitle}) {
             if (f) DeleteObject(f);
         }
         for (HBRUSH b : {g_app.brushBg, g_app.brushCard, g_app.brushBanner}) {
             if (b) DeleteObject(b);
         }
-        for (HICON ic : {g_app.iconGreen, g_app.iconBlue, g_app.iconAmber, g_app.iconRed}) {
+        for (HICON ic : {g_app.iconNormal, g_app.iconNormalLarge, g_app.iconGray, g_app.iconGrayLarge}) {
             if (ic) DestroyIcon(ic);
         }
         PostQuitMessage(0);
@@ -2094,6 +2800,7 @@ int RunSelfTest(const std::wstring& localFeedDir) {
 
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
     using namespace panel;
+    SetCurrentProcessExplicitAppUserModelID(L"GravitySteward.Panel");
 
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
@@ -2159,7 +2866,6 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
     int winW = MulDiv(kPanelWidth, static_cast<int>(dpi), 96);
     int winH = MulDiv(kCompactHeight, static_cast<int>(dpi), 96);
     RECT adj{0, 0, winW, winH};
-    AdjustWindowRectExForDpi(&adj, kPanelStyle, FALSE, kPanelExStyle, dpi);
     int fullW = adj.right - adj.left;
     int fullH = adj.bottom - adj.top;
 
@@ -2170,11 +2876,18 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
     if (x < wa.left) x = wa.left + 20;
     if (y < wa.top) y = wa.top + 20;
 
+    Gdiplus::GdiplusStartupInput graphicsInput;
+    ULONG_PTR graphicsToken = 0;
+    if (Gdiplus::GdiplusStartup(&graphicsToken, &graphicsInput, nullptr) != Gdiplus::Ok) {
+        if (hMutex) CloseHandle(hMutex);
+        return 1;
+    }
     HWND hwnd = CreateWindowExW(
         kPanelExStyle, kWindowClass, L"Gravity Steward",
         kPanelStyle, x, y, fullW, fullH,
         nullptr, nullptr, hInst, nullptr);
     if (!hwnd) {
+        Gdiplus::GdiplusShutdown(graphicsToken);
         if (hMutex) CloseHandle(hMutex);
         return 1;
     }
@@ -2186,7 +2899,9 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
 
     MSG msg{};
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
-        if (IsDialogMessageW(hwnd, &msg)) {
+        if (g_app.updatePopup && IsDialogMessageW(g_app.updatePopup, &msg)) {
+            continue;
+        } else if (IsDialogMessageW(hwnd, &msg)) {
             if (msg.message == WM_KEYDOWN && msg.wParam == VK_TAB) ScrollFocusIntoView(hwnd);
         } else {
             TranslateMessage(&msg);
@@ -2194,6 +2909,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
         }
     }
 
+    Gdiplus::GdiplusShutdown(graphicsToken);
     if (hMutex) CloseHandle(hMutex);
     return static_cast<int>(msg.wParam);
 }

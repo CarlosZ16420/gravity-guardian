@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [string]$GeminiRoot = (Join-Path $env:USERPROFILE '.gemini'),
     [string]$DataDirectory = '',
@@ -9,9 +9,28 @@ param(
     [switch]$EnableDetailedLogs,
     [switch]$PlanOnly,
     [switch]$NoStart,
-    [switch]$UseVerifiedCopyCommit
+    [switch]$UseVerifiedCopyCommit,
+    [string]$BundlePath = '',
+    [int]$WaitPid = 0,
+    [switch]$RelaunchPanel,
+    [switch]$ShowResult,
+    [switch]$CleanupBundlePath
 )
 $ErrorActionPreference = 'Stop'
+
+function Show-InstallResult([string]$Message, [bool]$Succeeded) {
+    if (!$ShowResult) { return }
+    Add-Type -AssemblyName System.Windows.Forms
+    $icon = if ($Succeeded) { 'Information' } else { 'Error' }
+    [void][System.Windows.Forms.MessageBox]::Show($Message, 'Gravity Steward', 'OK', $icon)
+}
+
+trap {
+    if (!$ShowResult) { break }
+    Show-InstallResult ("Install or repair did not finish." + [Environment]::NewLine + $_.Exception.Message) $false
+    exit 1
+}
+
 . (Join-Path $PSScriptRoot 'Review-Mode.ps1')
 
 if ([string]::IsNullOrWhiteSpace($DataDirectory)) {
@@ -19,9 +38,36 @@ if ([string]::IsNullOrWhiteSpace($DataDirectory)) {
 }
 
 $taskRoot = Split-Path $PSScriptRoot -Parent
-$taskBundle = Join-Path $taskRoot 'artifacts/codex-approval'
-if (!(Test-Path -LiteralPath (Join-Path $taskBundle 'scripts/ag-approval.dll')) -and (Test-Path -LiteralPath (Join-Path $taskRoot 'scripts/ag-approval.dll'))) {
-    $taskBundle = $taskRoot
+$taskBundle = if (![string]::IsNullOrWhiteSpace($BundlePath)) {
+    [IO.Path]::GetFullPath($BundlePath)
+} else {
+    $candidate = Join-Path $taskRoot 'artifacts/codex-approval'
+    if (!(Test-Path -LiteralPath (Join-Path $candidate 'scripts/ag-approval.dll')) -and (Test-Path -LiteralPath (Join-Path $taskRoot 'scripts/ag-approval.dll'))) {
+        $taskRoot
+    } else {
+        $candidate
+    }
+}
+$taskData = [IO.Path]::GetFullPath($DataDirectory)
+$taskCleanupBundle = $false
+if ($CleanupBundlePath -and ![string]::IsNullOrWhiteSpace($BundlePath)) {
+    $taskRepairPrefix = [IO.Path]::GetFullPath((Join-Path $taskData 'updates')) + [IO.Path]::DirectorySeparatorChar
+    if ($taskBundle.StartsWith($taskRepairPrefix, [StringComparison]::OrdinalIgnoreCase) -and (Split-Path $taskBundle -Leaf) -like 'repair-*') {
+        $taskCleanupBundle = $true
+    }
+}
+
+try {
+if ($WaitPid -gt 0) {
+    $taskWaitProc = $null
+    try { $taskWaitProc = [Diagnostics.Process]::GetProcessById($WaitPid) } catch [ArgumentException] {}
+    if ($taskWaitProc) {
+        try {
+            if (!$taskWaitProc.WaitForExit(15000)) {
+                throw 'Timed out waiting for CodexApprovalPanel to exit before repairing.'
+            }
+        } finally { $taskWaitProc.Dispose() }
+    }
 }
 $taskDistribution = Get-ApprovalDistribution $taskBundle
 $taskBundleAssembly = Join-Path $taskBundle 'scripts/ag-approval.dll'
@@ -83,12 +129,16 @@ if ($PlanOnly) { $taskPlan | ConvertTo-Json -Depth 8; return }
 if (!(Test-Path -LiteralPath (Join-Path $taskBundle 'native/ag-guardian-host.exe'))) {
     throw 'Native Guardian executable is missing; build the complete package first'
 }
-if (![string]::IsNullOrWhiteSpace($AntigravityPath) -and [IO.Path]::GetFileName($AntigravityPath) -ieq 'Antigravity.exe') {
-    $taskRunningApps = @(Get-Process -Name 'Antigravity' -ErrorAction SilentlyContinue | Where-Object { $_.Path -and [IO.Path]::GetFullPath($_.Path) -eq [IO.Path]::GetFullPath($AntigravityPath) })
-    if ($taskRunningApps.Count) { throw 'Antigravity is still running. Finish active tasks and fully exit before upgrading; no files were replaced.' }
-}
+$taskDefaultConfig = Join-Path $env:USERPROFILE '.gemini/config'
+$taskRunningApps = @(Get-Process -Name 'Antigravity' -ErrorAction SilentlyContinue | Where-Object {
+    if (![string]::IsNullOrWhiteSpace($AntigravityPath)) {
+        [IO.Path]::GetFileName($AntigravityPath) -ieq 'Antigravity.exe' -and $_.Path -and [IO.Path]::GetFullPath($_.Path) -eq [IO.Path]::GetFullPath($AntigravityPath)
+    } else {
+        $taskConfigRoot -ieq $taskDefaultConfig
+    }
+})
+if ($taskRunningApps.Count) { throw 'Antigravity is still running. Finish active tasks and fully exit before upgrading; no files were replaced.' }
 
-$taskData = [IO.Path]::GetFullPath($DataDirectory)
 New-Item -ItemType Directory -Path $taskData -Force | Out-Null
 $taskPreviousManifestPath = Join-Path $taskData 'installation.json'
 $taskPreviousManifest = if (Test-Path -LiteralPath $taskPreviousManifestPath) { Get-Content -Encoding UTF8 -LiteralPath $taskPreviousManifestPath -Raw | ConvertFrom-JsonHashtable } else { $null }
@@ -114,7 +164,7 @@ $taskApproval = @{
     codexHome = $taskCodexHome; dataDirectory = $taskData
     antigravityConfigDirectory = $taskConfigRoot; policyDirectory = (Join-Path $taskPlugin 'policy/effective-codex')
     transcriptRoots = @((Join-Path $GeminiRoot 'antigravity/brain'), (Join-Path $GeminiRoot 'antigravity-cli/brain'), (Join-Path $GeminiRoot 'antigravity-ide/brain'))
-    reviewTimeoutSeconds = 90; hookTimeoutSeconds = 100; maxInputBytes = 524288; maxQueue = 8
+    reviewTimeoutSeconds = 90; hookTimeoutSeconds = 100; maxInputBytes = 1048576; maxQueue = 8
     enableNativeRouting = ($ReviewRouting -eq 'Conservative')
     enableNativeState = $true; nativeStateLogPath = (Join-Path $env:APPDATA 'Antigravity/logs/main.log'); nativeStateTimeoutMilliseconds = 4000; maxNativeHistoryBytes = 8388608
     enableNativeAskHandoff = $false
@@ -162,7 +212,7 @@ if ($taskHadPrevious) {
         if ($taskOldProcess) { try { if (!$taskOldProcess.WaitForExit(10000)) { throw 'Approval host is still shutting down; no plugin files were replaced' } } finally { $taskOldProcess.Dispose() } }
     }
     # Stop any running tray panel from the plugin folder before replacing files.
-    Get-Process -Name 'CodexApprovalPanel' -ErrorAction SilentlyContinue | Where-Object {
+    Get-Process -Name 'CodexApprovalPanel','GravitySteward' -ErrorAction SilentlyContinue | Where-Object {
         $_.Path -and [IO.Path]::GetFullPath($_.Path).StartsWith($taskPlugin + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)
     } | ForEach-Object {
         try { $_.Kill(); $_.WaitForExit(5000) } catch {}
@@ -260,7 +310,7 @@ if (!$NoStart) {
     $taskStartupArgs = @(('"' + $taskAssembly + '"'), 'ensure', '--config', ('"' + $taskReviewConfig + '"'))
     $taskStartup = Start-Process -FilePath $taskRuntime -ArgumentList $taskStartupArgs -WorkingDirectory $taskPlugin -WindowStyle Hidden -RedirectStandardOutput (Join-Path $taskServiceLogs ($taskStartupId + '.stdout.log')) -RedirectStandardError (Join-Path $taskServiceLogs ($taskStartupId + '.stderr.log')) -PassThru
     try {
-        if (!$taskStartup.WaitForExit(20000)) { throw 'Installed, but approval service startup timed out; run Doctor.ps1' }
+        if (!$taskStartup.WaitForExit(30000)) { try { $taskStartup.Kill() } catch {}; throw 'Installed, but approval service startup timed out; run Doctor.ps1' }
         if ($null -ne $taskStartup.ExitCode -and $taskStartup.ExitCode -ne 0) { throw 'Installed, but approval service could not start; run Doctor.ps1' }
     } finally { $taskStartup.Dispose() }
     $taskPrevError = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
@@ -268,6 +318,20 @@ if (!$NoStart) {
     if ($LASTEXITCODE -ne 0) { throw 'Installed, but approval service could not start; run Doctor.ps1' }
 }
 
+if ($RelaunchPanel) {
+    $panelExe = Join-Path $taskPlugin 'app/CodexApprovalPanel.exe'
+    if (Test-Path -LiteralPath $panelExe -PathType Leaf) {
+        Start-Process -FilePath $panelExe -WorkingDirectory (Split-Path $panelExe -Parent) -ArgumentList @('--plugin-dir', ('"' + $taskPlugin + '"'), '--data-dir', ('"' + $taskData + '"'), '--gemini-root', ('"' + [IO.Path]::GetFullPath($GeminiRoot) + '"')) | Out-Null
+    }
+} elseif ($ShowResult) {
+    Show-InstallResult 'Gravity Steward 已完成安装并启用审批服务。' $true
+}
+
 $taskPlan | ConvertTo-Json -Depth 8
 Write-Host "Installed. Backup: $taskBackup"
 $global:LASTEXITCODE = 0
+} finally {
+    if ($taskCleanupBundle -and (Test-Path -LiteralPath $taskBundle)) {
+        Remove-Item -LiteralPath $taskBundle -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}

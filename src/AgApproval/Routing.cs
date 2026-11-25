@@ -41,6 +41,8 @@ public static class ReviewRouting
             return ReviewRoute.Model("Requested or ambiguous sandbox bypass.");
         if(tool=="manage_task")
         {
+            if(args.Count==1&&Json.Text(args,"Action")=="list")
+                return ReviewRoute.Native("current_conversation_task_list");
             if(args.Any(p=>p.Key is not ("Action" or "TaskId")) || Json.Text(args,"Action")!="status")
                 return ReviewRoute.Model("Task mutation or unsupported task arguments.");
             var target=Json.Text(args,"TaskId")??"";
@@ -58,6 +60,30 @@ public static class ReviewRouting
             return args.Count==0
                 ? ReviewRoute.Native("plugin_account_status_read")
                 : ReviewRoute.Model("Unsupported plugin account arguments.");
+        }
+        if(tool=="enter_plan_mode")
+        {
+            return args.Count==0
+                ? ReviewRoute.Native("current_conversation_enter_plan")
+                : ReviewRoute.Model("Unsupported enter_plan_mode arguments.");
+        }
+        if(tool=="update_focus")
+        {
+            if(args.Count!=1||args["focus"] is not JsonValue fv||!fv.TryGetValue<string>(out var focus)||string.IsNullOrWhiteSpace(focus)||focus.Length>512)
+                return ReviewRoute.Model("Invalid update_focus arguments.");
+            return ReviewRoute.Native("current_conversation_update_focus");
+        }
+        if(tool=="update_steps")
+        {
+            if(args.Count!=1||args["steps"] is not JsonArray steps||steps.Count is <1 or >12)
+                return ReviewRoute.Model("Unsupported update_steps contract.");
+            foreach(var step in steps)
+                if(step is not JsonObject s||s.Count!=2||s.Any(p=>p.Key is not ("title" or "status"))||
+                    s["title"] is not JsonValue tv||!tv.TryGetValue<string>(out var title)||string.IsNullOrWhiteSpace(title)||title.Length>256||
+                    s["status"] is not JsonValue sv||!sv.TryGetValue<string>(out var status)||
+                    status is not ("pending" or "in_progress" or "done" or "skipped" or "failed"))
+                    return ReviewRoute.Model("Invalid update_steps item.");
+            return ReviewRoute.Native("current_conversation_update_steps");
         }
         if(tool=="exit_plan_mode")
         {

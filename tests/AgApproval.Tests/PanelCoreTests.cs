@@ -10,21 +10,21 @@ public static class PanelCoreTests
     {
         void Check(bool cond, string msg) { if (!cond) throw new Exception(msg); }
 
-        await test("pricing estimation applies GPT-6 Luna 2x rates with and without cached input", () =>
+        await test("pricing estimation applies GPT-6 Luna 1.5x rates with and without cached input", () =>
         {
             var p = PricingProfile.Default;
-            Check(p.Multiplier == 2.0m && p.InputPerMillionUsd == 0.10m && p.CachedInputPerMillionUsd == 0.01m && p.OutputPerMillionUsd == 0.50m,
-                "default GPT-6 Luna 2x rates mismatch");
+            Check(p.Multiplier == 1.5m && p.InputPerMillionUsd == 0.10m && p.CachedInputPerMillionUsd == 0.01m && p.OutputPerMillionUsd == 0.50m,
+                "default GPT-6 Luna 1.5x rates mismatch");
 
             // 1,000,000 input (800,000 cached + 200,000 uncached) + 100,000 output:
-            // base = 0.2 * 0.10 + 0.8 * 0.01 + 0.1 * 0.50 = 0.02 + 0.008 + 0.05 = 0.078 -> x2 = 0.156
+            // base = 0.2 * 0.10 + 0.8 * 0.01 + 0.1 * 0.50 = 0.02 + 0.008 + 0.05 = 0.078 -> x1.5 = 0.117
             var withCache = p.EstimateUsd(1_000_000, 800_000, 100_000);
-            Check(withCache == 0.156000m, $"unexpected cached cost: {withCache}");
+            Check(withCache == 0.117000m, $"unexpected cached cost: {withCache}");
 
             // Without cachedInputTokens (conservative uncached pricing):
-            // base = 1.0 * 0.10 + 0.1 * 0.50 = 0.15 -> x2 = 0.30
+            // base = 1.0 * 0.10 + 0.1 * 0.50 = 0.15 -> x1.5 = 0.225
             var noCache = p.EstimateUsd(1_000_000, null, 100_000);
-            Check(noCache == 0.300000m, $"unexpected uncached cost: {noCache}");
+            Check(noCache == 0.225000m, $"unexpected uncached cost: {noCache}");
             return Task.CompletedTask;
         });
 
@@ -66,19 +66,19 @@ public static class PanelCoreTests
             var report = UsageStats.Compute(dataDir, null, now);
             Check(report.Today.TotalRequests == 1 && report.Today.Approved == 1, $"today requests mismatch: {Json.Encode(report.Today)}");
             Check(report.Today.TotalTokens == 110000 && report.Today.CachedInputTokens == 80000, $"today tokens mismatch: {Json.Encode(report.Today)}");
-            // Today cost: (20k*0.10 + 80k*0.01 + 10k*0.50)/1M * 2 = (2000 + 800 + 5000)/1M * 2 = 0.0156
-            Check(report.Today.EstimatedCostUsd == 0.015600m, $"today cost mismatch: {report.Today.EstimatedCostUsd}");
+            // Today cost: (20k*0.10 + 80k*0.01 + 10k*0.50)/1M * 1.5 = 0.0117
+            Check(report.Today.EstimatedCostUsd == 0.011700m, $"today cost mismatch: {report.Today.EstimatedCostUsd}");
 
             Check(report.Last7Days.TotalRequests == 3 && report.Last7Days.Approved == 1 && report.Last7Days.Failed == 1 && report.Last7Days.Delegated == 1,
                 $"last7 breakdown mismatch: {Json.Encode(report.Last7Days)}");
             Check(report.Last7Days.TotalTokens == 165000, $"last7 tokens mismatch: {report.Last7Days.TotalTokens}");
-            // r-inv has null cachedInputTokens -> (50k*0.10 + 5k*0.50)/1M * 2 = (5000+2500)/1M*2 = 0.0150; total = 0.0306
-            Check(report.Last7Days.EstimatedCostUsd == 0.030600m, $"last7 cost mismatch: {report.Last7Days.EstimatedCostUsd}");
+            // r-inv has null cachedInputTokens -> (50k*0.10 + 5k*0.50)/1M * 1.5 = 0.01125; total = 0.02295
+            Check(report.Last7Days.EstimatedCostUsd == 0.022950m, $"last7 cost mismatch: {report.Last7Days.EstimatedCostUsd}");
             Check(report.CustomRange is null, "legacy stats call included a custom range");
 
             var olderDates = new LocalDateRange(new DateOnly(2026, 11, 13), new DateOnly(2026, 11, 17));
             var older = UsageStats.Compute(dataDir, nowOverride: now, customRange: olderDates);
-            Check(older.CustomRange is { TotalRequests: 3, Approved: 1, Failed: 1, Delegated: 1, TotalTokens: 605000, EstimatedCostUsd: 0.165000m },
+            Check(older.CustomRange is { TotalRequests: 3, Approved: 1, Failed: 1, Delegated: 1, TotalTokens: 605000, EstimatedCostUsd: 0.123750m },
                 $"custom range did not include both endpoints and historical usage: {Json.Encode(older)}");
             Check(older.Today.TotalRequests == 1 && older.Last7Days.TotalRequests == 3, "custom range changed preset totals");
 
@@ -274,6 +274,34 @@ public static class PanelCoreTests
             var compact = LogCompactor.Compact(compactData);
             Check(compact.DroppedVerboseDumps == 2 && compact.KeptEvents == 2 && compact.AfterBytes < compact.BeforeBytes,
                 $"compactor unexpected result: {Json.Encode(compact)}");
+
+            // Today's active UTC segment and externally locked files must be skipped safely without creating .compacted duplicates.
+            var activeTodayName = DateTime.UtcNow.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture) + ".000.jsonl";
+            var lockedOldName = "2026-11-20.000.jsonl";
+            File.WriteAllLines(Path.Combine(compactLogs, activeTodayName), [
+                Json.Encode(new { at = DateTimeOffset.UtcNow, @event = "review_context", data = bigPayload }),
+                Json.Encode(new { at = DateTimeOffset.UtcNow, @event = "review_completed", requestId = "today-1", status = "approved" })
+            ]);
+            File.WriteAllLines(Path.Combine(compactLogs, lockedOldName), [
+                Json.Encode(new { at = "2026-11-20T01:00:00Z", @event = "review_context", data = bigPayload }),
+                Json.Encode(new { at = "2026-11-20T01:00:01Z", @event = "review_completed", requestId = "old-1", status = "approved" })
+            ]);
+            using (var lockHolder = new FileStream(Path.Combine(compactLogs, lockedOldName), FileMode.Open, FileAccess.ReadWrite, FileShare.Read))
+            {
+                var safeCompact = LogCompactor.Compact(compactData);
+                Check(safeCompact.SkippedActiveOrLockedFiles == 2, $"expected active and locked files skipped: {Json.Encode(safeCompact)}");
+                Check(!Directory.GetFiles(compactLogs, "*.compacted.jsonl").Any(), "compactor created duplicate .compacted.jsonl file");
+            }
+        });
+
+        await test("EnvironmentDiscovery strips CODEX_ACCESS_TOKEN and falls back to bundled guardian", () =>
+        {
+            Check(NativeGuardianReviewer.StrippedAuthEnvironmentVariables.Contains("CODEX_ACCESS_TOKEN", StringComparer.Ordinal),
+                "CODEX_ACCESS_TOKEN missing from stripped env list");
+            var isolatedRoot = Path.Combine(scratchRoot, "detect-uninstalled");
+            var report = EnvironmentDiscovery.DetectAll(geminiRoot: isolatedRoot, dataDirectory: Path.Combine(isolatedRoot, "data"), skipLoginCheck: true);
+            Check(!report.PluginInstalled && report.NativeAuth is null, "unexpected uninstalled detect state");
+            return Task.CompletedTask;
         });
     }
 }

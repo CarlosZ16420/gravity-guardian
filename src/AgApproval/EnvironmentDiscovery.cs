@@ -53,6 +53,11 @@ public static class EnvironmentDiscovery
         var executable = Json.Text(config, "guardianPath");
         if (string.IsNullOrWhiteSpace(executable))
             executable = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(configPath))!, "native", "ag-guardian-host.exe");
+        if (!File.Exists(executable))
+        {
+            var bundled = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "native", "ag-guardian-host.exe"));
+            if (File.Exists(bundled)) executable = bundled;
+        }
         var nativeAuth = skipLoginCheck ? null
             : ProbeNativeAuth(executable, codexHome, Path.Combine(resolvedData, "guardian-workspace"));
         return new EnvironmentDetectionReport(ag, resolvedGemini, resolvedData, installed, pluginDir) { NativeAuth = nativeAuth };
@@ -63,8 +68,9 @@ public static class EnvironmentDiscovery
         try
         {
             NativeGuardianReviewer.VerifyBinary(executable);
-            var probe = RunQuick(executable, ["--check-auth"], 5000,
-                new Dictionary<string, string> { ["CODEX_HOME"] = codexHome }, Directory.Exists(workspace) ? workspace : null);
+            var probe = RunQuick(executable, ["--check-auth"], 12000,
+                new Dictionary<string, string> { ["CODEX_HOME"] = codexHome }, Directory.Exists(workspace) ? workspace : null,
+                NativeGuardianReviewer.StrippedAuthEnvironmentVariables);
             if (JsonNode.Parse(probe.Output) is JsonObject reply && (probe.ExitCode, Json.Text(reply, "status")) is
                 (0, "credentials_found") or (1, "credentials_missing") or (2, "store_unavailable"))
                 return reply;
@@ -186,7 +192,7 @@ public static class EnvironmentDiscovery
     }
 
     private static (int? ExitCode, string Output, string Error) RunQuick(string exe, string[] args, int timeoutMs,
-        Dictionary<string, string>? env = null, string? workingDirectory = null)
+        Dictionary<string, string>? env = null, string? workingDirectory = null, IEnumerable<string>? removeEnv = null)
     {
         try
         {
@@ -199,6 +205,10 @@ public static class EnvironmentDiscovery
                 RedirectStandardError = true
             };
             foreach (var a in args) psi.ArgumentList.Add(a);
+            if (removeEnv != null)
+            {
+                foreach (var key in removeEnv) psi.Environment.Remove(key);
+            }
             if (env != null)
             {
                 foreach (var kv in env) psi.Environment[kv.Key] = kv.Value;

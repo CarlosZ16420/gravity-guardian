@@ -40,10 +40,14 @@ $taskNugetScratch = Join-Path $taskBuildTemp 'NuGetScratch'
 $taskReleaseVersion = (Get-Content -Encoding UTF8 -LiteralPath (Join-Path $taskRoot 'plugin/plugin.json') -Raw | ConvertFrom-Json).version
 $taskCoreProject = [xml](Get-Content -Encoding UTF8 -LiteralPath (Join-Path $taskRoot 'src/AgApproval/AgApproval.csproj') -Raw)
 $taskPanelVersion = Get-Content -Encoding UTF8 -LiteralPath (Join-Path $taskRoot 'src/AgApproval.Panel/version.h') -Raw
+$taskPanelManifest = [xml](Get-Content -Encoding UTF8 -LiteralPath (Join-Path $taskRoot 'src/AgApproval.Panel/panel.manifest') -Raw)
+$taskGuardianCargo = Get-Content -Encoding UTF8 -LiteralPath (Join-Path $taskRoot 'native/guardian-host/Cargo.toml') -Raw
 if ($taskReleaseVersion -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$' -or
     $taskCoreProject.Project.PropertyGroup.Version -cne $taskReleaseVersion -or
-    $taskPanelVersion -notmatch ('(?m)^#define PANEL_VERSION_WIDE L"' + [regex]::Escape($taskReleaseVersion) + '"\s*$')) {
-    throw 'Release versions disagree between plugin.json, AgApproval.csproj, and panel version.h'
+    $taskPanelVersion -notmatch ('(?m)^#define PANEL_VERSION_WIDE L"' + [regex]::Escape($taskReleaseVersion) + '"\s*$') -or
+    $taskPanelManifest.assembly.assemblyIdentity.version -cne "$taskReleaseVersion.0" -or
+    $taskGuardianCargo -notmatch ('(?m)^version\s*=\s*"' + [regex]::Escape($taskReleaseVersion) + '"\s*$')) {
+    throw 'Release versions disagree between plugin.json, AgApproval.csproj, panel version.h/manifest, and native guardian-host Cargo.toml'
 }
 
 $taskToolsDir = if (Test-Path -LiteralPath (Join-Path $taskRoot '.tools/dotnet/dotnet.exe')) {

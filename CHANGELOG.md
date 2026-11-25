@@ -1,86 +1,62 @@
 # 变更记录
 
-## 0.6.5 · 2026-11-25 · 本机修订
+## 0.6.5 · 2026-11-25
 
-本次修订修复升级 Guardian 后的长会话审核故障。版本已在 E 盘工作目录构建并直接安装到本机，Antigravity 已重新打开。发布到 GitHub 的工作仍待单独执行。
+本次发布在 Codex `0.172.0` 原生 Guardian 架构（保留完整上游内核与 `rusty_v8`，不裁剪内核 crate）的基础上，完成 `0.6.5` 长会话授权修复、端到端隐性缺陷治理、全仓版本统一与发布包构建。GitHub 公开发布需待下列人工实机复验确认后执行。
 
-### 故障与具体修复
+### 故障根因与综合修复
 
-- 本次故障使用 Codex 0.172.0 的弹性预算。进入弹性分配前，上游历史保留层仍有每类最多 8 条记录、单条 16,384 字节、每类 65,536 字节的存储限制。
-- 旧桥接把项目 AGENTS.md 包成一条用户消息。故障会话的 7 条用户消息加项目规则已占满 8 个名额，新增一条正文仅 65 字节的用户消息后触发淘汰。插件检测到授权缺失，返回 `review_authorization_budget_exceeded`。两次失败的推理提交数均为 0。
-- 当前请求的完整用户原文改由独立的授权证据字段传递，保留来源位置和先后顺序。审核输入的预检、弹性分配预留和最终请求检查都计入完整证据的成本。
-- 项目规则、项目长期授权和真实用户消息分别保留来源。助手内容与工具结果继续作为会话背景进入审核。
-- 授权修订进入审核会话作用域。新增限制或撤销授权会使用对应的新作用域进行审核。
-- 待审动作本身超限、完整授权与动作合计超限分别保留对应错误。确实超限时在推理提交前停止。
-- 桥接协议推进到 `ag-guardian-v4`，同步更新输入 JSON Schema，并保留旧协议记录的规范兼容。插件、服务、面板的文本版本和 Windows 数字资源版本统一为 0.6.5。
+- **长会话授权与预算归因**：
+  - 修复 Codex `0.172.0` 弹性预算前上游保留层（每类 8 条 / 单条 16 KiB / 总 64 KiB）挤掉早期真实用户授权导致的 `review_authorization_budget_exceeded`。改为独立传递完整用户原文与撤销记录，并将 `AGENTS.md` 项目规则与项目长期授权分源纳入审核。
+  - 修复桥接层（`GuardianFacts.cs`）与 Codex 补丁（`input_budget.rs`）在大动作场景下误归因为 `review_authorization_budget_exceeded` 的问题，确保动作本身超限稳定归类为 `native_action_budget_exceeded` 并零推理停止。
+  - 默认 `MaxInputBytes`（及 `Install.ps1` / `Review-Mode.ps1` 新旧配置默认值）提升至 `1,048,576` 字节（1 MiB）；`IsOversizedSingleRequest` 扩展支持 `write_to_file`、`replace_file_content`、`multi_replace_file_content`。
+- **工具路由与故障恢复**：
+  - `Routing.cs`、`ReviewAdapter.cs` 与 `schemas/review-input.schema.json` 新增 `update_focus`、`update_steps`、`enter_plan_mode`（无参）及 `manage_task`（仅 `Action="list"`）的严格模式本地判定委派。
+  - 修复 `Codex.cs` 在超时/取消路径中复用了已取消 `ct` 导致 `DenialGuard` 清理与 `review_completed` 审计失败的问题，改为独立 500ms CTS。
+  - `NativeGuardian.cs` 在未提交到原生宿主前的预检失败分支避免误杀健康宿主进程；`main.rs` 补充可选 `conversation_id` 以随跨会话轮换回收旧作用域槽位，并在 `account_changed` / `store_unavailable`（`to_ascii_lowercase().contains("account changed")` 大小写无关判定）时递增所有权代数并排空所有活跃父会话。
+- **凭据探测、零 CLI 与日志压缩**：
+  - `EnvironmentDiscovery.cs` 在 `approval.json` 尚未安装时回退至同级 `..\native\ag-guardian-host.exe`；`ProbeNativeAuth` 与 `NativeGuardian` 一并剥离 `CODEX_ACCESS_TOKEN`、`OPENAI_API_KEY`、`CODEX_API_KEY`、`CODEX_AUTH_TOKEN` 及测试重放变量；Windows 探测超时放宽至 12s（C#）/ 18s（Panel）。
+  - `native/guardian-host/src/main.rs` 在 `arg0_dispatch_or_else` 之前同步处理 `--version` 与轻量 `--check-auth`，消除沙箱受限环境下的 `os error 5` stderr 噪音。
+  - `UsageStats.cs` 重写 `LogCompactor.Compact`：增加跨进程 `.compact.lock` 排他锁、清理中断残留临时文件、跳过当天 UTC 活跃日志段、对锁定分组整组跳过并支持回滚，消除 `.compacted.jsonl` 重复累加。
+- **面板自修复、安装更新与冷启动回滚稳定性**：
+  - `AgApproval.Panel` 在内部运行「安装 / 修复插件」时先将 bundle 暂存至 `updates\repair-*` 并以系统目录脱离启动 `Install.ps1` 后退出，避免目录替换自锁；修复外置启动时工作目录占用；`Install.ps1` 空 `AntigravityPath` 回退检查默认配置路径下运行中的 Antigravity 并同步停止 `GravitySteward`；`Apply-Update.ps1` 在重启面板时透传 `--gemini-root`。
+  - 修复高负载冷启动下回滚校验超前失败：`Program.cs` `EnsureAsync` 等待上限提升至 40 次轮询，`Install.ps1` / `Apply-Update.ps1` 启动与回滚 `WaitForExit` 放宽至 30s、补全超时终止清理与 `$null -ne ExitCode` 保护及日志换行。
+  - `Review-Mode.ps1` 修复存量配置升级缺失字段回填；`Package.ps1` 补齐顶层 `Resolve-Runtime.ps1` 并将临时 stage 清理移至外层 `finally`。
+- **全仓版本统一与体积优化**：
+  - 统一 `plugin/plugin.json`、`src/AgApproval/AgApproval.csproj`、`src/AgApproval.Panel/version.h`、`src/AgApproval.Panel/panel.manifest`（`0.6.5.0`）与 `native/guardian-host/Cargo.toml`（`0.6.5`），并在 `Build.ps1` 与 `Update-Local.ps1` 强制五方校验。
+  - `native/SOURCE.json` Release 默认调优切换为 `ThinSize`（`OPT_LEVEL="s"`、`CODEGEN_UNITS="16"`、`LTO="thin"`、`STRIP="symbols"`、`DEBUG="0"`、`PANIC="unwind"`）。
 
-这项修复属于内核升级的兼容与正确性维护。长会话持续可用是产品原有的使用预期，应把修复费用计入此次升级的维护成本。
+### 自动化验证与构建产物（ThinSize Release）
 
-### 验证与本机更新
-
-- 89 项桥接测试通过，覆盖原文来源、顺序、窗口缩减、撤销授权、工具参数完整性、故障分类和 Hook 决策。
-- 8 项 Rust 测试通过，覆盖授权来源顺序、桥接输入验证和最终原生请求。
-- 本机模拟服务收到两份最终 Responses 请求。12 条用户记录、单条长指令、项目规则、长期授权及 212,029 字节的完整工具正文逐字匹配，工具定义数为 0。模拟的允许和拒绝结果均正确透传。
-- 合成超长授权触发预算错误，推理提交数为 0。已编译的生产宿主也单独通过此项检查。
-- 6 个真实模型用例全部通过，覆盖十条以上用户消息、只读操作、明确禁止写入、伪造授权、限定目标和撤销授权。用例只获取审核结论。
-- 隔离安装、修复、凭据探测、四类 Hook、卸载和配置恢复检查通过。输入规范及伪造角色检查通过。
-- 本机安装后，插件和运行中的审批服务均为 0.6.5。已安装 Guardian 与 E 盘构建产物的 SHA-256 一致，登录探测通过。
-- 采用已有安装脚本直接更新，本轮生成的发行 ZIP 数为 0。
-
-生产 Guardian 的 SHA-256 为 `92a3765647bb788fa40840bc889a6e3603f8fd9057ce83948890a3c0355fbe98`。
-
-### 本轮耗时与流程问题
-
-| 阶段 | 实测 | 说明 |
-| --- | --- | --- |
-| Rust 生产宿主 Release 构建 | 36 分 35 秒 | 修改了 Rust 宿主与 Codex 入口补丁，使用 ThinLTO、单代码生成单元和发布优化 |
-| Rust 测试程序构建 | 14 分 08 秒 | 对独立的测试可执行文件进行发布优化和链接 |
-| 上述 8 项 Rust 测试执行 | 0.38 秒 | 主要等待发生在编译和链接阶段 |
-| 修改 C# 后的一次服务构建 | 3.41 秒 | 已有依赖条件下的编译输出记录 |
-| 后续无源码变化的 C# 热构建复查 | 0.78 秒 | 包括启动 dotnet 的测量值，编译器报告 0.53 秒 |
-
-这些数值对应各自阶段。复制文件、测试、安装和重启另有耗时，C# 编译时间不能作为整个更新流程的完成时间。
-
-本轮使用了面向发行的构建路径，又为请求正文验证单独链接了发布优化的测试程序。其间重复调用完整构建与完整测试，还遇到输入 Schema 未同步而需要补验。这些流程带来了额外成本，应在后续本地迭代中减少。
-
-缓存复查还确认一个具体问题。`Build-Guardian.ps1` 将 `CARGO_TARGET_DIR` 纳入缓存键，却在计算键之后才设置并归一化默认目录。因此，相同目录的默认选择和显式设置可能生成不同的键。本轮出现过额外进入 Cargo 及等待构建锁的情况。文件校验与 Cargo 缓存随后复用了产物，没有证据把初次 36 分 35 秒全部归因于此问题。
-
-在并行优化链接期间，一次 600 毫秒的传输超时测试提前到期。后续完整 89 项测试通过。该测试的提交同步仍有改进空间。
+- **桥接与核心测试（`Build.ps1`）**：**92/92 项** C# 单元测试全部通过（含超时清理、UI/规划委派、预算归因、`conversationId`、日志锁、凭据变量剥离与旁路探测）。
+- **Schema 与统计（`Build.ps1`）**：`Validate-Schema.mjs`（实际契约与伪造角色拒绝）及 `Test-LogStatistics.ps1` 全部通过；`Check-PublicHygiene.ps1` 扫描 120 份源文件 **0 违规**。
+- **Win32 面板（`Build-Panel.ps1`）**：`/W4 /WX` 零警告通过，仅依赖系统 DLL，`539,648` 字节（`527 KB`），4 项面板自测全部通过。
+- **Rust 原生宿主离线测试（`Test-NativePrompt.mjs --release`）**：**9/9 项** Release 单元测试通过（用时 `0.80s`），覆盖两轮 `TrunkNew` → `TrunkReused`、12 条用户记录 + 长正文 + `toolDefinitions: 0`（四轮延迟 `75.8–142.5 ms`）、以及超大动作 + 小授权仅归因 `native_action_budget_exceeded` 且零推理提交。
+- **安装、分发与无 CLI 追踪**：`Test-Distributions.ps1` 全部通过（Standalone/Lite 洁净安装、缺失运行时拦截、双向切换、Lite 修复、损坏 Guardian 预检拦截、健康检查失败自动回滚并保留日志与长期授权）；`Test-NoCli.ps1` 捕获 **99 次**子进程启动（含 Guardian 8 次、Panel 2 次），**0 次** `codex.exe` 启动。
+- **产物校验**：
+  - `ag-guardian-host.exe`：`143,182,336` 字节（约 `136.55 MiB`），SHA-256 `51ab9d27ce6c6bc4cf4255cf61dda3a84600e139af333011f534f5414261bb86`（`ThinSize`）。
+  - 分发包为 `gravity-steward-0.6.5-windows-x64.zip`（Standalone）与 `gravity-steward-0.6.5-lite-windows-x64.zip`（Lite），精确哈希见发布目录 `checksums.sha256` 与 `release-manifest.json`。
 
 ### 与本地保留的 0.6.0 基线比较
 
-比较依据为本地 0.6.0 发行快照、`public-edition` 初始提交 `86cfb3a`、当前源码和已验证产物。各版包号与内部 Guardian 宿主的 crate 版本号分别维护。
-
 | 项目 | 0.6.0 基线 | 0.6.5 当前状态 |
 | --- | --- | --- |
-| 基础产品功能 | 已有原生审核、面板、托盘、统计、日志开关与事务升级 | 在此基础上维护与扩展 |
-| Codex 内核 | 0.166.0 | 0.172.0，启用同步弹性预算 |
+| 基础产品功能 | 已有原生审核、面板、托盘、统计、日志开关与事务升级 | 在此基础上修复长会话、压缩锁、回滚与界面自修复 |
+| Codex 内核 | 0.166.0 | 0.172.0（完整保留上游 crate 与 `rusty_v8`，启用弹性预算） |
 | 项目长期授权 | 该基线未包含后续的长期授权管理功能 | 支持跨聊天保存、查看和撤销已确认范围 |
 | 安装与登录流程 | 探测和配置中包含 Codex CLI | 统一使用 Native Guardian，运行插件无需安装 CLI |
-| 面板操作 | 已有安装、统计和更新 | 增加完整卸载与插件接管热开关 |
-| 发行类型 | 单一 Windows ZIP | 提供 Standalone 和 Lite 的发行能力 |
-| 原生宿主 EXE | 220,675,072 字节，约 210.45 MiB | 175,176,192 字节，约 167.06 MiB，减少约 20.6% |
-| 发布优化 | opt-level=2，LTO=false，16 单元 | opt-level=2，ThinLTO，1 单元 |
-| 开发构建 | 已有原生宿主缓存 | 保留缓存，新增更多来源和构建参数校验，仍缺统一的快速本地更新入口 |
+| 面板操作 | 已有安装、统计和更新 | 增加完整卸载、插件接管热开关与内部自修复暂存重启 |
+| 发行类型 | 单一 Windows ZIP | 提供 Standalone 和 Lite 双资产发行与互换 |
+| 原生宿主 EXE | 220,675,072 字节（约 210.45 MiB） | 143,182,336 字节（约 136.55 MiB），减少约 35.1% |
+| 发布优化 | `opt-level=2`、`LTO=false`、`16` 单元 | `ThinSize`（`opt-level=s`、`ThinLTO`、`16` 单元、剥离符号） |
 
-可以确认新增功能、分发选项和宿主体积方面的收益。当前未进行 0.6.0 与 0.6.5 在相同会话、账号和网络条件下的审核延迟、内存、CPU 或判断质量对照。现有证据不足以给出这些运行指标的净收益结论。
+### 待发布前人工实机复验清单
 
-这轮第 9 条记录故障直接在升级后的版本上复现并修复。当前没有使用 0.6.0 二进制完成同一历史会话的全链路对照，旧版在该案例上的表现仍待验证。
-
-### 日常本地迭代的现状与待改进项
-
-| 修改范围 | 适用的本地验证范围 | 现状 |
-| --- | --- | --- |
-| C# 审批逻辑、统计、配置处理 | 编译服务，运行受影响测试，更新本地服务 | `Update-Local.ps1 -Components Service` 仅编译 C# 并直接更新本机，自动复用已验证的 Guardian |
-| C++ 面板 | 编译面板，运行面板自检，更新本地面板 | `Update-Local.ps1 -Components Panel`（或 `Build-Panel.ps1`）单独编译面板并更新本机 |
-| Rust 宿主或 Codex 补丁 | 编译对应原生目标，验证请求正文和相关边界 | 开发迭代与正式发布已分离：Dev 走 `.local/native-build-target` 与 `.local/guardian-host-dev`（`opt-level=0`、无 LTO、256 单元、增量编译）；Release 保留 ThinLTO 与单单元参数，且 `Package.ps1` 禁止打包非 Release 产物 |
-| 对外发布 | 发布优化、安装升级验收、ZIP 与校验清单 | 由 `Build.ps1` + `Package.ps1` 等发布流程承担 |
-
-本地看到修改效果可以直接使用构建目录安装，0.6.5 已验证这条路径。日常迭代可直接使用 `.\scripts\Update-Local.ps1` 按改动组件增量构建并更新本机，无需生成发行 ZIP；所有编译、缓存与临时目录（`TMP`、`TEMP`、`NUGET_SCRATCH`、`CARGO_TARGET_DIR`）均约束在工作目录下。
-
-已同步修复 `Build-Guardian.ps1` 缓存键问题：在计算键前先对 `CARGO_TARGET_DIR` 做规范化并从跨路径/跨 profile 环境变量中剔除，将仅用于测试的 `offline_prompt_tests.rs` 从生产宿主失效条件中分离，并稳定复用 `rusty_v8` 解压目录与未变更源文件时间戳。`Test-NativePrompt.mjs` 新增 `--dev` 入口以支持日常 Rust 测试快速迭代。
-
-相关记录见 [Guardian 升级验收](docs/guardian-0.172.0-validation.md)、[0.6.4 编译参数对照](docs/guardian-build-and-distributions-0.6.4.md)和[0.6.5 发布说明](docs/release-0.6.5.md)。
+本轮 `ThinSize` 修复构建尚未在联网真机或 GUI 界面中手动执行以下 4 项验证，建议发布至 GitHub 前逐一确认：
+1. 运行 1 次真实在线 `ThinSize` 模型审核，确认联网推理与响应解析端到端正常；
+2. 在未安装 Codex CLI 的干净 Windows 用户账户下通过 Codex Desktop 登录并复测 Keyring 凭据探测；
+3. 实机验证多账号切换（`A → B → A`）及审核中途换号时原生宿主会话隔离与清理；
+4. 在已安装的 `GravitySteward.exe` 面板界面内实际点击「安装 / 修复插件」，确认暂存重启动作顺畅完成。
 
 ## 0.6.4
 

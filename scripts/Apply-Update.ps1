@@ -294,7 +294,7 @@ try {
         $taskNewStartAttempted = $true
         $taskStartup = Start-Process -FilePath $taskNewRuntime -ArgumentList $taskStartupArgs -WorkingDirectory $taskPlugin -WindowStyle Hidden -RedirectStandardOutput (Join-Path $taskServiceLogs ($taskStartupId + '.stdout.log')) -RedirectStandardError (Join-Path $taskServiceLogs ($taskStartupId + '.stderr.log')) -PassThru
         try {
-            if (!$taskStartup.WaitForExit(20000)) {
+            if (!$taskStartup.WaitForExit(30000)) {
                 $taskStartup.Kill()
                 throw 'Updated approval host startup timed out'
             }
@@ -329,7 +329,7 @@ try {
         }
     } catch {
         $errMsg = $_.Exception.Message
-        Write-Utf8NoBom $taskErrorLog ("[" + [DateTime]::UtcNow.ToString('O') + "] Update failed, rolling back: " + $errMsg)
+        Write-Utf8NoBom $taskErrorLog ("[" + [DateTime]::UtcNow.ToString('O') + "] Update failed, rolling back: " + $errMsg + [Environment]::NewLine)
         try {
             if ($taskNewStartAttempted) {
                 Write-Utf8NoBom $taskStopMarker 'rollback in progress'
@@ -358,7 +358,11 @@ try {
             $rbArgs = @(('"' + $taskOldAssembly + '"'), 'ensure', '--config', ('"' + $taskOldApprovalPath + '"'))
             $rbProc = Start-Process -FilePath $taskOldRuntime -ArgumentList $rbArgs -WorkingDirectory $taskPlugin -WindowStyle Hidden -RedirectStandardOutput (Join-Path $taskServiceLogs 'rollback.stdout.log') -RedirectStandardError (Join-Path $taskServiceLogs 'rollback.stderr.log') -PassThru
             try {
-                if (!$rbProc.WaitForExit(15000) -or $rbProc.ExitCode -ne 0) { throw 'Previous approval service could not restart' }
+                if (!$rbProc.WaitForExit(30000)) {
+                    try { $rbProc.Kill() } catch {}
+                    throw 'Previous approval service startup timed out'
+                }
+                if ($null -ne $rbProc.ExitCode -and $rbProc.ExitCode -ne 0) { throw 'Previous approval service could not restart' }
             } finally { $rbProc.Dispose() }
             $rollbackHealth = & $taskOldRuntime $taskOldAssembly status --config $taskOldApprovalPath | ConvertFrom-Json
             if ($LASTEXITCODE -ne 0 -or $rollbackHealth.status -ne 'running') { throw 'Previous approval service failed its rollback health check' }
@@ -374,7 +378,11 @@ try {
     if ($RelaunchPanel) {
         $panelExe = Join-Path $taskPlugin 'app/CodexApprovalPanel.exe'
         if (Test-Path -LiteralPath $panelExe -PathType Leaf) {
-            Start-Process -FilePath $panelExe -WorkingDirectory (Split-Path $panelExe -Parent) -ArgumentList @('--plugin-dir', ('"' + $taskPlugin + '"'), '--data-dir', ('"' + $taskData + '"')) | Out-Null
+            $panelArgs = @('--plugin-dir', ('"' + $taskPlugin + '"'), '--data-dir', ('"' + $taskData + '"'))
+            if ($taskInst -and $taskInst.ContainsKey('geminiRoot') -and ![string]::IsNullOrWhiteSpace([string]$taskInst.geminiRoot)) {
+                $panelArgs += @('--gemini-root', ('"' + [string]$taskInst.geminiRoot + '"'))
+            }
+            Start-Process -FilePath $panelExe -WorkingDirectory (Split-Path $panelExe -Parent) -ArgumentList $panelArgs | Out-Null
         }
     }
 

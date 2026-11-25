@@ -7,7 +7,7 @@
 ## 1. 准备版本与构建环境
 
 1. 在 Windows x64 上准备 PowerShell 7、Git、Node.js 22+、.NET 10 SDK、Rust stable 和带 x64 C++ 工具的 Visual Studio 2022 Build Tools。首次构建需要访问已锁定的上游源码、依赖与运行时下载站。
-2. 将 `plugin/plugin.json`、`src/AgApproval/AgApproval.csproj` 和 `src/AgApproval.Panel/version.h` 更新为同一个三段版本号。在 `docs/release-<版本>.md` 写入发布说明。构建脚本会核对三处版本和面板 EXE 的产品版本。
+2. 将 `plugin/plugin.json`、`src/AgApproval/AgApproval.csproj`、`src/AgApproval.Panel/version.h`、`src/AgApproval.Panel/panel.manifest` 和 `native/guardian-host/Cargo.toml` 更新为同一个三段（manifest 为四段 `.0`）版本号。在 `docs/release-<版本>.md` 写入发布说明。构建脚本会核对这五处版本和面板 EXE 的产品版本。
 3. 记录准备发布的提交 SHA。保留上一可用版本的 ZIP 和校验值，供测试升级与回退。构建目录与验收目录使用较短的路径并留足磁盘空间。
 4. 升级 Codex 时，按 `native/SOURCE.json` 更新锁定的上游来源并核对现有 Guardian 入口补丁。更换内置 .NET 时，在 `scripts/dotnet-runtime.lock.json` 同步更新微软 Windows x64 运行时的版本、下载 URL 和 SHA-256。
 
