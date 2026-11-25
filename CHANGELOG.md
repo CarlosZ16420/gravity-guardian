@@ -2,6 +2,7 @@
 
 ## 0.6.6 · 2026-11-26
 
+- **新增本机免安装包**：Portable 将程序、插件配置和审批日志集中在解压文件夹中，复用既有登录、Guardian 和 .NET；支持连接、旧安装数据迁移、断开保留数据及更新回滚。发行包去重面板和脚本，并与 Standalone 比较体积。
 - **品牌与底层标识统一更名为 Gravity Guardian**：
   - 将对外品牌、GitHub 仓库引用、插件 ID 与安装目录（`plugins/gravity-guardian`）、数据目录（`gravity-guardian-data`）、Win32 面板（`GravityGuardian.exe`）、核心服务程序集（`gravity-guardian.dll`）、命名管道前缀（`gravity-guardian-*`）及开机自启注册表项（`GravityGuardian`）统一为 **Gravity Guardian**。
 - **审核缓存与会话续接修复**：当前授权紧随开发者指令、先于持久历史，当前动作事实独立置于末尾；检查点按每次推理输入相对基线的增量触发，避免大基础提示和重试累计输入造成每轮重建。

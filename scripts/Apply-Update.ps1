@@ -1,12 +1,13 @@
 [CmdletBinding()]
 param(
     [int]$WaitPid = 0,
-    [Parameter(Mandatory)][string]$PackageZip,
-    [Parameter(Mandatory)][string]$ExpectedSha256,
+    [string]$PackageZip,
+    [string]$ExpectedSha256,
     [Parameter(Mandatory)][string]$PluginDirectory,
     [Parameter(Mandatory)][string]$DataDirectory,
     [switch]$RelaunchPanel,
-    [switch]$SkipProcessCheck
+    [switch]$SkipProcessCheck,
+    [switch]$RecoverPortable
 )
 $ErrorActionPreference = 'Stop'
 $taskHelpers = Join-Path $PSScriptRoot 'Review-Mode.ps1'
@@ -14,6 +15,30 @@ if (!(Test-Path -LiteralPath $taskHelpers -PathType Leaf)) {
     $taskHelpers = Join-Path $PluginDirectory 'scripts/Review-Mode.ps1'
 }
 . $taskHelpers
+$taskPortableHelpers = Join-Path (Split-Path $taskHelpers -Parent) 'Portable.ps1'
+if (!(Test-Path -LiteralPath $taskPortableHelpers)) { $taskPortableHelpers=Join-Path $PluginDirectory 'scripts/Portable.ps1' }
+. $taskPortableHelpers
+$taskPortable = Get-PortableLayout (Split-Path ([IO.Path]::GetFullPath($PluginDirectory)) -Parent)
+if ($taskPortable) {
+    New-Item -ItemType Directory -Path $taskPortable.data -Force | Out-Null
+    $taskMaintenanceLock=[IO.File]::Open((Join-Path $taskPortable.data 'maintenance.lock'),[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
+    try {
+        if ($RecoverPortable) {
+            if ($WaitPid -gt 0) {
+                $waiting=Get-Process -Id $WaitPid -ErrorAction SilentlyContinue
+                if ($waiting -and !$waiting.WaitForExit(15000)) { throw 'Panel did not exit before recovery' }
+            }
+            $taskSaved = Read-PortableJson $taskPortable.manifest
+            Assert-PortableHostStopped $taskSaved.antigravityPath $taskSaved.configRoot
+            Restore-PortableUpdate $taskPortable
+            if ($RelaunchPanel) { Start-Process -FilePath (Join-Path $taskPortable.root 'GravityGuardian.exe') -WorkingDirectory $taskPortable.root }
+        }
+        else { Update-Portable $taskPortable $PackageZip $ExpectedSha256 $WaitPid -RelaunchPanel:$RelaunchPanel -SkipProcessCheck:$SkipProcessCheck }
+    } finally { $taskMaintenanceLock.Dispose() }
+    return
+}
+if ($RecoverPortable) { throw 'Portable layout was not found' }
+if (!$PackageZip -or !$ExpectedSha256) { throw 'PackageZip and ExpectedSha256 are required' }
 
 function Write-Utf8NoBom([string]$Path, [string]$Text) {
     [IO.File]::WriteAllText($Path, $Text, [Text.UTF8Encoding]::new($false))

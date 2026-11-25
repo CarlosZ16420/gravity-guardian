@@ -36,7 +36,9 @@ public static class EnvironmentDiscovery
                          File.Exists(Path.Combine(pluginDir, "approval.json"));
 
         var ag = DetectAntigravity(configuredAntigravityPath);
-        var configPath = approvalConfig ?? Path.Combine(pluginDir, "approval.json");
+        var defaultConfig = StorageLayout.DefaultConfigPath();
+        var configPath = approvalConfig ?? (StorageLayout.FromConfig(defaultConfig) != null ? defaultConfig : Path.Combine(pluginDir, "approval.json"));
+        var portable = StorageLayout.FromConfig(configPath);
         var defaultHome = Environment.GetEnvironmentVariable("CODEX_HOME");
         if (string.IsNullOrWhiteSpace(defaultHome)) defaultHome = Path.Combine(userProfile, ".codex");
         JsonObject? config = null;
@@ -51,6 +53,15 @@ public static class EnvironmentDiscovery
             ? Path.Combine(resolvedGemini, "gravity-guardian-data")
             : Path.GetFullPath(configuredData);
         var executable = Json.Text(config, "guardianPath");
+        if (portable != null)
+        {
+            var settings = File.Exists(configPath) ? Settings.Read(configPath) : new Settings();
+            portable.Resolve(settings);
+            codexHome = settings.CodexHome;
+            resolvedData = settings.DataDirectory;
+            executable = settings.GuardianPath;
+            installed = portable.IsConnected(Path.Combine(resolvedGemini, "config"));
+        }
         if (string.IsNullOrWhiteSpace(executable))
             executable = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(configPath))!, "native", "ag-guardian-host.exe");
         if (!File.Exists(executable))
@@ -68,8 +79,9 @@ public static class EnvironmentDiscovery
         try
         {
             NativeGuardianReviewer.VerifyBinary(executable);
+            Directory.CreateDirectory(workspace);
             var probe = RunQuick(executable, ["--check-auth"], 12000,
-                new Dictionary<string, string> { ["CODEX_HOME"] = codexHome }, Directory.Exists(workspace) ? workspace : null,
+                new Dictionary<string, string> { ["CODEX_HOME"] = codexHome }, workspace,
                 NativeGuardianReviewer.StrippedAuthEnvironmentVariables);
             if (JsonNode.Parse(probe.Output) is JsonObject reply && (probe.ExitCode, Json.Text(reply, "status")) is
                 (0, "credentials_found") or (1, "credentials_missing") or (2, "store_unavailable"))

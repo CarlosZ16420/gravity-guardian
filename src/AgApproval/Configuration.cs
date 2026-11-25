@@ -37,11 +37,21 @@ public sealed class Settings
     public bool EnableDetailedLogs { get => enableDetailedLogs; set => enableDetailedLogs = value; }
     public int MaxLogSegmentBytes { get; set; } = 16 * 1024 * 1024;
     public string PipeName { get; set; } = "";
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string? PortableRoot { get; internal set; }
     public bool DetailedLogsActive => enableDetailedLogs || string.Equals(Environment.GetEnvironmentVariable("AG_APPROVAL_DETAILED_LOGS"), "1", StringComparison.Ordinal);
 
-    internal static Settings Read(string path) =>
-        JsonSerializer.Deserialize<Settings>(File.ReadAllText(path), Json.Options)
-        ?? throw new InvalidDataException("Empty configuration");
+    internal static Settings Read(string path)
+    {
+        var text = File.ReadAllText(path);
+        var settings = JsonSerializer.Deserialize<Settings>(text, Json.Options)
+            ?? throw new InvalidDataException("Empty configuration");
+        var layout = StorageLayout.FromConfig(path);
+        if (layout != null) layout.Resolve(settings);
+        else if (JsonNode.Parse(text)?["schemaVersion"]?.GetValue<int>() == 2)
+            throw new InvalidDataException("Portable configuration requires portable.json");
+        return settings;
+    }
 
     public static Settings Load(string path)
     {
@@ -52,6 +62,8 @@ public sealed class Settings
 
     internal void Validate(string path)
     {
+        if (PortableRoot != null && !new StorageLayout(PortableRoot).IsConnected(AntigravityConfigDirectory))
+            throw new InvalidDataException("Portable application is not connected to Antigravity");
         if (Model != "codex-auto-review" || Effort != "low")
             throw new InvalidDataException("This release is validated only for codex-auto-review / low");
         foreach (var p in new[] { DataDirectory, PolicyDirectory, CodexHome, AntigravityConfigDirectory })

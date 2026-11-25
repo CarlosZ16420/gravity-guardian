@@ -394,11 +394,11 @@ UpdateCheckResult CheckForUpdate(const UpdateConfig& config, const std::wstring&
     res.manifest.minAntigravityVersion = doc.GetWide("minAntigravityVersion");
     res.manifest.releaseNotes = doc.GetWide("releaseNotes");
 
-    if (distribution == L"lite") {
+    if (distribution == L"lite" || distribution == L"portable") {
         const auto* choices = doc.Get("distributions");
-        const auto* asset = choices ? choices->Get("lite") : nullptr;
+        const auto* asset = choices ? choices->Get(distribution == L"portable" ? "portable" : "lite") : nullptr;
         if (!asset || asset->kind != JsonValue::Kind::Object) {
-            res.error = L"此版本的更新源未提供 Lite 安装包";
+            res.error = L"此版本的更新源未提供当前类型的安装包";
             return res;
         }
         res.manifest.assetName = TrimWide(asset->GetWide("assetName"));
@@ -511,6 +511,13 @@ bool LaunchApplyUpdate(
     if (!CopyFileW(applyScriptSource.c_str(), stagedScript.c_str(), FALSE)) {
         outError = L"无法复制更新事务脚本";
         return false;
+    }
+    {
+        const auto helper = L"Portable.ps1";
+        if (!CopyFileW(JoinPath(GetDirectoryName(applyScriptSource), helper).c_str(), JoinPath(updatesDir, helper).c_str(), FALSE)) {
+            outError = L"无法复制免安装版更新脚本";
+            return false;
+        }
     }
 
     wchar_t sysDir[MAX_PATH]{};

@@ -18,7 +18,9 @@ Standalone keeps the original ZIP name and bundles the x64 .NET 10 runtime. Lite
 
 Use the tray panel's takeover switch to pause Gravity Guardian for new requests and let Antigravity apply its native permission rules. Repairs and updates preserve the switch setting.
 
-To uninstall, fully exit Antigravity and choose 「完整卸载」 in the panel. This removes the installed plugin and its startup entry and permanently deletes local logs, statistics, settings, caches, and backups. You can also run `scripts/Uninstall.ps1 -PurgeData` from the package. You can delete the downloaded ZIP and extracted folder separately.
+Portable ZIPs contain `-portable-` in their names and keep the program, plugin settings, and approval logs together in the extracted folder. Open the panel and choose 「连接 / 修复连接」 after exiting Antigravity. See the [portable guide](docs/portable.md).
+
+For an installed edition, fully exit Antigravity and choose 「完整卸载」 in the panel to remove the plugin and local data. In Portable, 「断开连接」 removes the Antigravity registration and preserves settings and logs. You can delete the extracted folder after all related processes exit.
 
 ## Build from source
 

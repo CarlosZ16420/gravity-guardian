@@ -14,7 +14,7 @@ public static class Program
         var command = args.FirstOrDefault() ?? "help";
         Settings? failureSettings=null;
         JsonNode? failurePayload=null;
-        string config = Option(args, "--config") ?? Path.Combine(AppContext.BaseDirectory, "approval.json");
+        string config = Option(args, "--config") ?? StorageLayout.DefaultConfigPath();
         try
         {
             if (command == "detect")
@@ -284,11 +284,16 @@ public static class Program
             if(Json.Text(running,"version")!=typeof(Program).Assembly.GetName().Version!.ToString(3)||Json.Text(running,"adapterInstructionHash")!=ReviewAdapter.Hash||
                 Json.Text(running,"reviewerBackend")!="NativeGuardian"||Json.Text(running,"nativeBridgePolicyHash")!=Json.Hash(GuardianFacts.BridgePolicy))
                 throw new InvalidDataException("Running approval service differs from the installed package; fully exit Antigravity and restart");
+            if (settings.PortableRoot != null && !string.Equals(Json.Text(running, "portableRoot"), settings.PortableRoot, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException("Running approval service belongs to another portable directory");
             ProtectedPathDelegation.TrySync(settings, hostActive: true, config);
             return;
         }
         catch (Exception e) when (e is IOException or TimeoutException or OperationCanceledException) { }
-        var start = new ProcessStartInfo(Environment.ProcessPath!) { UseShellExecute = false, CreateNoWindow = true, WorkingDirectory = AppContext.BaseDirectory };
+        // ShellExecute detaches the Windows host from a calling PowerShell pipeline's
+        // inherited handles; otherwise invoking Install.ps1 via -File can wait forever.
+        var start = new ProcessStartInfo(Environment.ProcessPath!) { UseShellExecute = OperatingSystem.IsWindows(), CreateNoWindow = true,
+            WindowStyle = ProcessWindowStyle.Hidden, WorkingDirectory = AppContext.BaseDirectory };
         if (string.Equals(Path.GetFileNameWithoutExtension(Environment.ProcessPath), "dotnet", StringComparison.OrdinalIgnoreCase))
             start.ArgumentList.Add(typeof(Program).Assembly.Location);
         foreach (var arg in new[] { "host", "--config", Path.GetFullPath(config) }) start.ArgumentList.Add(arg);
@@ -401,6 +406,8 @@ public static class Program
     }
     private static string ResolveDataDir(string[] args, string config)
     {
+        var portable = StorageLayout.FromConfig(config);
+        if (portable != null) return portable.DataDirectory;
         var explicitDir = Option(args, "--data-dir");
         if (!string.IsNullOrWhiteSpace(explicitDir)) return Path.GetFullPath(explicitDir);
         if (File.Exists(config))
@@ -424,6 +431,8 @@ public static class Program
             var candidate = Path.Combine(configDir, "pricing.json");
             if (File.Exists(candidate)) return candidate;
         }
+        var portable = StorageLayout.FromConfig(config);
+        if (portable != null) return Path.Combine(portable.ProgramDirectory, "pricing.json");
         return ResolvePricingPathFromMessage(null);
     }
     private static string? ResolvePricingPathFromMessage(string? requested)
@@ -435,6 +444,7 @@ public static class Program
     private static string? ToolIdentity(JsonNode? payload)=>payload?["toolCall"] is JsonObject call?
         Json.Hash(ReviewAdapter.Canonical(NativeTranscript.NormalizeToolCall(call))):null;
     private static object Capabilities(Settings settings,string policyHash)=>new{status="running",version=typeof(Program).Assembly.GetName().Version!.ToString(3),nativeRouting=settings.EnableNativeRouting,
+        storageMode=settings.PortableRoot==null?"installed":"portable",portableRoot=settings.PortableRoot,
         ruleVersion=ReviewRoute.Version,inputVersion=ReviewAdapter.InputVersion,adapterVersion=ReviewAdapter.Version,adapterInstructionHash=ReviewAdapter.Hash,transportVersion=ReviewAdapter.TransportVersion,
         policyHash,
         guardVersion=DenialGuard.Version,guardScope="bound_request",guardStateDirectory=Path.Combine(settings.DataDirectory,"denial-guard"),guardState=DenialGuard.Diagnostics(settings),

@@ -5,6 +5,9 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'Review-Mode.ps1')
+. (Join-Path $PSScriptRoot 'Portable.ps1')
+$taskPortable=Get-PortableLayout
+if ($taskPortable -and !$PSBoundParameters.ContainsKey('DataDirectory')) { $DataDirectory=$taskPortable.data }
 
 $taskLogs = [IO.Path]::GetFullPath((Join-Path $DataDirectory 'logs'))
 if (!(Test-Path -LiteralPath $taskLogs -PathType Container)) {

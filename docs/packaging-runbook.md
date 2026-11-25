@@ -1,6 +1,6 @@
 # Gravity Guardian Windows 打包与验收手册
 
-从仓库根目录执行。每次发布用同一提交生成 Standalone 和 Lite，核对两个 ZIP 后再准备发布草稿。常规版本沿用已验收的 Rust 参数和锁定的 .NET 运行时。
+从仓库根目录执行。每次发布用同一提交生成 Standalone、Lite 和 Portable，核对三个 ZIP 后再准备发布草稿。常规版本沿用已验收的 Rust 参数和锁定的 .NET 运行时。
 
 > 日常本地开发与验证无需打包 ZIP，请使用 `.\scripts\Update-Local.ps1`（自动复用 Guardian 并按改动组件构建后直接更新本机；涉及 Rust 调试可使用 `-Components Guardian -GuardianProfile Dev` 与 `node .\scripts\Test-NativePrompt.mjs .local\prompt-dev --dev`）。`Package.ps1` 会校验 `artifacts/gravity-guardian/native/SOURCE.json` 必须为 `Release` 构建，防止误将 Dev 产物打包发布。
 
@@ -22,6 +22,8 @@ $ErrorActionPreference = 'Stop'
 .\scripts\Package.ps1
 .\scripts\Test-Update.ps1
 .\scripts\Test-Distributions.ps1
+$manifest = Get-Content artifacts/release-manifest.json -Raw | ConvertFrom-Json
+.\scripts\Test-Portable.ps1 -PackageZip (Join-Path artifacts $manifest.distributions.portable.assetName)
 ```
 
 有上一版可用包时，把最后一条替换为以下命令。测试会先安装上一版，再用**本次新版更新器**升级并验证服务与 Hook。
@@ -39,11 +41,12 @@ $previous = 'C:\release-inputs\gravity-guardian-0.6.5-windows-x64.zip'
 | --- | --- |
 | `gravity-guardian-<版本>-windows-x64.zip` | Standalone。带 `runtime/dotnet.exe` 和锁定的单一 x64 .NET 10.0.x。 |
 | `gravity-guardian-<版本>-lite-windows-x64.zip` | Lite。包内没有 `runtime/`。安装器会运行系统 x64 `dotnet.exe`，确认有可用的 .NET 10。 |
+| `gravity-guardian-<版本>-portable-windows-x64.zip` | Portable。自带同一 .NET 和 Guardian，根面板与脚本各一份；使用中在根目录生成 `config/` 和 `data/`，宿主仅登记入口。 |
 | `release-manifest.json` | 顶层资产指向 Standalone。`distributions` 分别记录两包的文件名、URL、字节数和 SHA-256。 |
 | `checksums.sha256` | 两条 ZIP 校验值与发布清单一致。 |
 | `release-build-info.json` | 审计留档。记录两包的文件清单、总大小、运行时版本和 Guardian 哈希。 |
 
-`Package.ps1` 会重新读取两个 ZIP 并逐文件校验，检查无 PDB、ZIP 不超过 120 MiB、解压不超过 310 MiB，以及两包的 Guardian 哈希一致。下载后可用 `Get-FileHash -Algorithm SHA256` 再核对。保留包清单、校验值和对应的验收日志。
+`Package.ps1` 会重新读取三个 ZIP 并逐文件校验，检查无 PDB、ZIP 不超过 120 MiB、解压不超过 310 MiB，以及三包的 Guardian 哈希一致。Portable 的 ZIP 与解压程序均不得超过同批 Standalone；另保存改造前后的同条件体积对照。下载后可用 `Get-FileHash -Algorithm SHA256` 再核对。保留包清单、校验值和对应的验收日志。
 
 在隔离测试目录确认 Standalone 可以启动，Lite 有系统 .NET 时可以安装，缺少时在变更安装前给出提示。使用新版更新器验证两种资产、同类型更新、双向切换和三类 Hook。坏 SHA-256 和失效的 Guardian 必须在停止旧服务前被拒绝。新服务健康检查失败时，应恢复旧服务、配置和 Hook，并保留审批日志。
 

@@ -32,6 +32,26 @@ trap {
 }
 
 . (Join-Path $PSScriptRoot 'Review-Mode.ps1')
+. (Join-Path $PSScriptRoot 'Portable.ps1')
+$taskPortable = Get-PortableLayout
+if ($taskPortable) {
+    $taskSavedConnection=Read-PortableJson $taskPortable.manifest
+    if (!$PSBoundParameters.ContainsKey('GeminiRoot') -and $taskSavedConnection.geminiRoot) { $GeminiRoot=$taskSavedConnection.geminiRoot }
+    if (!$AntigravityPath -and $taskSavedConnection.antigravityPath) { $AntigravityPath=$taskSavedConnection.antigravityPath }
+    if ($WaitPid -gt 0) {
+        $waiting = Get-Process -Id $WaitPid -ErrorAction SilentlyContinue
+        if ($waiting -and !$waiting.WaitForExit(15000)) { throw 'Panel did not exit' }
+    }
+    $taskLock=$null
+    if (!$PlanOnly) {
+        New-Item -ItemType Directory -Path $taskPortable.data -Force | Out-Null
+        $taskLock=[IO.File]::Open((Join-Path $taskPortable.data 'maintenance.lock'),[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
+    }
+    try { Connect-Portable $taskPortable $GeminiRoot $AntigravityPath $PSBoundParameters }
+    finally { if ($taskLock) { $taskLock.Dispose() } }
+    if ($RelaunchPanel -and !$PlanOnly) { Start-Process -FilePath (Join-Path $taskPortable.root 'GravityGuardian.exe') -WorkingDirectory $taskPortable.root }
+    return
+}
 
 if ([string]::IsNullOrWhiteSpace($DataDirectory)) {
     $DataDirectory = Join-Path $GeminiRoot 'gravity-guardian-data'

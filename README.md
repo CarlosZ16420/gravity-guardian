@@ -27,6 +27,8 @@ Gravity Guardian 内置 Codex 原生审核宿主（Native Guardian），由它�
 
 **Standalone** 沿用原安装包文件名，自带 x64 .NET 10。**Lite** 的文件名带 `-lite-`，需要系统已安装 x64 .NET 10，可运行 `winget install Microsoft.DotNet.Runtime.10 --architecture x64` 安装。切换类型时，完整解压目标 ZIP，再从该目录运行「安装 / 修复插件」。下载后可对照同页的 `checksums.sha256` 核对 ZIP。升级或卸载前先完全退出 Antigravity。
 
+**Portable 免安装版** 的文件名带 `-portable-`，同样自带运行时。解压后打开面板，退出 Antigravity 并点击「连接 / 修复连接」；程序、插件配置和审批日志均保存在解压文件夹内。详见[免安装版说明](docs/portable.md)。
+
 在面板点击「完整卸载」，确认后会关闭面板，移除已安装的插件和开机启动项，并永久删除本地审批日志、统计、设置、缓存和备份。也可运行包内的 `scripts/Uninstall.ps1 -PurgeData`。手动下载的 ZIP 和解压目录可自行删除。
 
 ## 功能介绍

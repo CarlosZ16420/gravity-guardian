@@ -1,4 +1,4 @@
-[CmdletBinding(SupportsShouldProcess)]
+﻿[CmdletBinding(SupportsShouldProcess)]
 param(
     [string]$DataDirectory = (Join-Path $env:USERPROFILE '.gemini/gravity-guardian-data'),
     [switch]$PurgeData,
@@ -22,6 +22,21 @@ trap {
 }
 
 . (Join-Path $PSScriptRoot 'Review-Mode.ps1')
+. (Join-Path $PSScriptRoot 'Portable.ps1')
+$taskPortable = Get-PortableLayout
+if ($taskPortable) {
+    if ($PSCmdlet.ShouldProcess($taskPortable.root, 'Disconnect from Antigravity and preserve local settings and logs')) {
+        if ($WaitPid -gt 0) {
+            $waiting = Get-Process -Id $WaitPid -ErrorAction SilentlyContinue
+            if ($waiting -and !$waiting.WaitForExit(15000)) { throw 'Panel did not exit' }
+        }
+        $taskLock=[IO.File]::Open((Join-Path $taskPortable.data 'maintenance.lock'),[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
+        try { Disconnect-Portable $taskPortable }
+        finally { $taskLock.Dispose() }
+        Show-UninstallResult '已断开 Antigravity 连接，配置和审批日志保留在原文件夹。' $true
+    }
+    return
+}
 
 function Test-WithinDirectory([string]$Path, [string]$Directory) {
     $prefix = $Directory.TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar

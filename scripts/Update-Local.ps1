@@ -162,7 +162,8 @@ try {
 
     $taskShippedScripts = @(
         'scripts/Apply-Update.ps1', 'scripts/Install.ps1', 'scripts/Uninstall.ps1',
-        'scripts/Review-Mode.ps1', 'scripts/Resolve-Runtime.ps1'
+        'scripts/Review-Mode.ps1', 'scripts/Resolve-Runtime.ps1', 'scripts/Portable.ps1',
+        'scripts/Doctor.ps1', 'scripts/Analyze-Logs.ps1', 'scripts/Compact-Logs.ps1'
     )
     $taskHashes = [ordered]@{
         service = Get-InputsSha256 $taskRoot @('src/AgApproval') @('bin', 'obj')
@@ -452,13 +453,13 @@ try {
 
     $taskBundleScripts = Join-Path $taskBundle 'scripts'
     if ($taskStageScripts) {
-        foreach ($taskScript in @('Apply-Update.ps1', 'Install.ps1', 'Uninstall.ps1', 'Review-Mode.ps1', 'Resolve-Runtime.ps1')) {
+        foreach ($taskScript in @('Apply-Update.ps1', 'Install.ps1', 'Uninstall.ps1', 'Review-Mode.ps1', 'Resolve-Runtime.ps1', 'Portable.ps1', 'Doctor.ps1', 'Analyze-Logs.ps1', 'Compact-Logs.ps1')) {
             Copy-Item -LiteralPath (Join-Path $PSScriptRoot $taskScript) -Destination (Join-Path $taskStageScripts $taskScript) -Force
         }
         Copy-DirectoryContent $taskStageScripts $taskBundleScripts
     } else {
         New-Item -ItemType Directory -Path $taskBundleScripts -Force | Out-Null
-        foreach ($taskScript in @('Apply-Update.ps1', 'Install.ps1', 'Uninstall.ps1', 'Review-Mode.ps1', 'Resolve-Runtime.ps1')) {
+        foreach ($taskScript in @('Apply-Update.ps1', 'Install.ps1', 'Uninstall.ps1', 'Review-Mode.ps1', 'Resolve-Runtime.ps1', 'Portable.ps1', 'Doctor.ps1', 'Analyze-Logs.ps1', 'Compact-Logs.ps1')) {
             [void](Sync-FileIfChanged (Join-Path $PSScriptRoot $taskScript) (Join-Path $taskBundleScripts $taskScript))
         }
     }

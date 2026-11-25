@@ -1,6 +1,10 @@
 [CmdletBinding()]
 param([string]$DataDirectory=(Join-Path $env:USERPROFILE '.gemini/gravity-guardian-data'),[ValidatePattern('^\d{4}-\d{2}-\d{2}$')][string]$UtcDate)
 $ErrorActionPreference='Stop'
+. (Join-Path $PSScriptRoot 'Review-Mode.ps1')
+. (Join-Path $PSScriptRoot 'Portable.ps1')
+$taskPortable=Get-PortableLayout
+if ($taskPortable -and !$PSBoundParameters.ContainsKey('DataDirectory')) { $DataDirectory=$taskPortable.data }
 $taskLogs=Join-Path $DataDirectory 'logs'
 $taskRecords=[Collections.Generic.List[object]]::new()
 $taskInvalid=0

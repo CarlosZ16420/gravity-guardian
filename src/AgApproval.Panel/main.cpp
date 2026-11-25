@@ -55,6 +55,7 @@ constexpr COLORREF kBorder = RGB(232, 234, 239);
 constexpr COLORREF kDivider = RGB(232, 232, 235);
 
 struct PanelConfig {
+    std::wstring portableRoot;
     std::wstring geminiRoot;
     std::wstring dataDirectory;
     std::wstring pluginDirectory;
@@ -539,12 +540,25 @@ std::wstring GetUserProfileDir() {
 }
 
 std::wstring PanelSettingsPath(const PanelConfig& cfg) {
-    return JoinPath(cfg.dataDirectory, L"panel-settings.json");
+    return JoinPath(cfg.portableRoot.empty() ? cfg.dataDirectory : JoinPath(cfg.portableRoot, L"config"), L"panel-settings.json");
+}
+
+std::wstring ApprovalConfigPath(const PanelConfig& cfg) {
+    return cfg.portableRoot.empty() ? JoinPath(cfg.pluginDirectory, L"approval.json") : JoinPath(cfg.portableRoot, L"config\\approval.json");
+}
+
+bool PortableConnected(const PanelConfig& cfg) {
+    if (cfg.portableRoot.empty()) return true;
+    std::string raw;
+    JsonValue binding;
+    const auto path = JoinPath(cfg.geminiRoot, L"config\\plugins\\gravity-guardian\\binding.json");
+    return ReadFileUtf8(path, raw) && JsonValue::Parse(raw, binding) &&
+        binding.GetWide("storageMode") == L"portable" && _wcsicmp(binding.GetWide("portableRoot").c_str(), cfg.portableRoot.c_str()) == 0;
 }
 
 void SavePanelConfig(const PanelConfig& cfg) {
-    EnsureDirectoryTree(cfg.dataDirectory);
     std::wstring path = PanelSettingsPath(cfg);
+    EnsureDirectoryTree(GetDirectoryName(path));
 
     JsonValue doc;
     std::string existing;
@@ -569,14 +583,16 @@ void SavePanelConfig(const PanelConfig& cfg) {
         doc.objVal.insert_or_assign(k, std::move(j));
     };
 
-    setStr("geminiRoot", cfg.geminiRoot);
-    setStr("dataDirectory", cfg.dataDirectory);
-    setStr("pluginDirectory", cfg.pluginDirectory);
+    if (cfg.portableRoot.empty()) {
+        setStr("geminiRoot", cfg.geminiRoot);
+        setStr("dataDirectory", cfg.dataDirectory);
+        setStr("pluginDirectory", cfg.pluginDirectory);
+    }
     setStr("antigravityPath", cfg.antigravityPath);
     doc.objVal.erase("codexPath");
     setBool("autoCheckUpdates", cfg.autoCheckUpdates);
     setBool("autoUpdate", cfg.autoUpdate);
-    setBool("autostart", cfg.autostart);
+    if (cfg.portableRoot.empty()) setBool("autostart", cfg.autostart);
 
     WriteFileUtf8Atomic(path, doc.Dump(true));
 }
@@ -589,7 +605,7 @@ void LoadPanelPreferences(PanelConfig& cfg) {
     cfg.antigravityPath = doc.GetWide("antigravityPath");
     cfg.autoCheckUpdates = doc.GetBool("autoCheckUpdates", true);
     cfg.autoUpdate = doc.GetBool("autoUpdate", true);
-    cfg.autostart = doc.GetBool("autostart", false);
+    if (cfg.portableRoot.empty()) cfg.autostart = doc.GetBool("autostart", false);
 }
 
 void InitPathsAndConfig(const std::wstring& optPlugin, const std::wstring& optData, const std::wstring& optGemini) {
@@ -602,9 +618,64 @@ void InitPathsAndConfig(const std::wstring& optPlugin, const std::wstring& optDa
     cfg.dataDirectory = !optData.empty() ? optData : JoinPath(cfg.geminiRoot, L"gravity-guardian-data");
     cfg.pluginDirectory = !optPlugin.empty() ? optPlugin : JoinPath(cfg.geminiRoot, L"config\\plugins\\gravity-guardian");
 
+    if (FileExists(JoinPath(exeDir, L"portable.json"))) {
+        std::string raw;
+        JsonValue marker;
+        if (!ReadFileUtf8(JoinPath(exeDir, L"portable.json"), raw) || !JsonValue::Parse(raw, marker) ||
+            marker.GetWide("storageMode") != L"portable" || marker.GetInt64("layoutVersion", 0) != 1) {
+            MessageBoxW(nullptr, L"免安装版目录标记无效，请重新完整解压程序。", L"Gravity Guardian", MB_OK | MB_ICONERROR);
+            ExitProcess(1);
+        }
+        cfg.portableRoot = exeDir;
+        const auto transactionPath = JoinPath(exeDir, L"data\\update-transaction.json");
+        if (FileExists(transactionPath)) {
+            JsonValue transaction;
+            if (!ReadFileUtf8(transactionPath, raw) || !JsonValue::Parse(raw, transaction)) {
+                MessageBoxW(nullptr, L"更新恢复记录损坏，请保留 data 文件夹并重新解压程序文件。", L"更新恢复", MB_OK | MB_ICONERROR);
+                ExitProcess(1);
+            }
+            const auto workerPid = static_cast<DWORD>(transaction.GetInt64("workerPid", 0));
+            bool activeWorker = false;
+            if (HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, workerPid)) {
+                FILETIME created{}, exited{}, kernel{}, user{};
+                DWORD exitCode = 0;
+                if (GetExitCodeProcess(process, &exitCode) && exitCode == STILL_ACTIVE && GetProcessTimes(process, &created, &exited, &kernel, &user)) {
+                    const uint64_t started = (static_cast<uint64_t>(created.dwHighDateTime) << 32) | created.dwLowDateTime;
+                    activeWorker = std::to_wstring(started) == transaction.GetWide("workerStarted");
+                }
+                CloseHandle(process);
+            }
+            if (activeWorker) {
+                MessageBoxW(nullptr, L"程序正在更新，请等待更新完成。", L"Gravity Guardian", MB_OK | MB_ICONINFORMATION);
+                ExitProcess(0);
+            }
+            wchar_t system[MAX_PATH]{};
+            GetSystemDirectoryW(system, static_cast<DWORD>(std::size(system)));
+            const auto powershell = JoinPath(system, L"WindowsPowerShell\\v1.0\\powershell.exe");
+            const auto script = JoinPath(exeDir, L"data\\updates\\Apply-Update.ps1");
+            const auto args = L"-NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"" + script +
+                L"\" -RecoverPortable -RelaunchPanel -WaitPid " + std::to_wstring(GetCurrentProcessId()) +
+                L" -PluginDirectory \"" + JoinPath(exeDir, L"app") + L"\" -DataDirectory \"" + JoinPath(exeDir, L"data") + L"\"";
+            if (!FileExists(script) || !LaunchDetached(powershell, args, system, true)) {
+                MessageBoxW(nullptr, L"无法启动更新恢复。请保留 config 和 data 文件夹，重新解压程序文件。", L"更新恢复", MB_OK | MB_ICONERROR);
+                ExitProcess(1);
+            }
+            ExitProcess(0);
+        }
+        cfg.dataDirectory = JoinPath(exeDir, L"data");
+        cfg.pluginDirectory = JoinPath(exeDir, L"app");
+        cfg.bundleDirectory = cfg.pluginDirectory;
+        JsonValue installed;
+        if (ReadFileUtf8(JoinPath(cfg.dataDirectory, L"installation.json"), raw) && JsonValue::Parse(raw, installed)) {
+            cfg.geminiRoot = installed.GetWide("geminiRoot", cfg.geminiRoot);
+        }
+    }
+
     // Either distribution may be installed or opened as a portable panel.
     std::wstring nestedBundle = JoinPath(exeDir, L"artifacts\\gravity-guardian");
-    if (FileExists(JoinPath(cfg.pluginDirectory, L"scripts\\gravity-guardian.dll"))) {
+    if (!cfg.portableRoot.empty()) {
+        cfg.bundleDirectory = cfg.pluginDirectory;
+    } else if (FileExists(JoinPath(cfg.pluginDirectory, L"scripts\\gravity-guardian.dll"))) {
         cfg.bundleDirectory = cfg.pluginDirectory;
     } else if (FileExists(JoinPath(parentDir, L"scripts\\gravity-guardian.dll"))) {
         cfg.bundleDirectory = parentDir;
@@ -629,7 +700,9 @@ void InitPathsAndConfig(const std::wstring& optPlugin, const std::wstring& optDa
 
     // Synchronize registry autostart path if enabled
     std::wstring exePath = GetExecutablePath();
-    if (!GetAutostartCommand().empty()) {
+    if (!cfg.portableRoot.empty()) {
+        cfg.autostart = IsAutostartMatching(exePath);
+    } else if (!GetAutostartCommand().empty()) {
         cfg.autostart = true;
         if (!IsAutostartMatching(exePath)) {
             SetAutostart(true, exePath);
@@ -690,6 +763,10 @@ std::wstring GetAssemblyDll(const PanelConfig& cfg) {
 }
 
 std::wstring GetPricingJsonPath(const PanelConfig& cfg) {
+    if (!cfg.portableRoot.empty()) {
+        const auto overridePath = JoinPath(cfg.portableRoot, L"config\\pricing.json");
+        if (FileExists(overridePath)) return overridePath;
+    }
     std::wstring p1 = JoinPath(cfg.pluginDirectory, L"pricing.json");
     if (FileExists(p1)) return p1;
     return JoinPath(cfg.bundleDirectory, L"pricing.json");
@@ -832,7 +909,7 @@ void StartStatsWorker() {
 std::optional<bool> RunTakeoverCommand(const PanelConfig& cfg, std::optional<bool> enabled = std::nullopt) {
     const auto dotnet = GetBundleDotnet(cfg.pluginDirectory);
     const auto dll = JoinPath(cfg.pluginDirectory, L"scripts\\gravity-guardian.dll");
-    const auto approvalCfg = JoinPath(cfg.pluginDirectory, L"approval.json");
+    const auto approvalCfg = ApprovalConfigPath(cfg);
     std::wstring args = L"\"" + dll + L"\" takeover --config \"" + approvalCfg + L"\"";
     if (enabled.has_value()) args += *enabled ? L" --enabled true" : L" --enabled false";
     const auto result = RunHiddenCommand(dotnet, args, cfg.pluginDirectory, 4000);
@@ -845,9 +922,9 @@ std::optional<bool> RunTakeoverCommand(const PanelConfig& cfg, std::optional<boo
 }
 
 void QueryCoreSnapshot(const PanelConfig& cfg, RuntimeState& snap, bool runDetect, bool skipLoginCheck) {
-    std::wstring approvalCfg = JoinPath(cfg.pluginDirectory, L"approval.json");
+    std::wstring approvalCfg = ApprovalConfigPath(cfg);
     std::wstring pluginJson = JoinPath(cfg.pluginDirectory, L"plugin.json");
-    snap.pluginInstalled = FileExists(approvalCfg) && FileExists(pluginJson);
+    snap.pluginInstalled = FileExists(approvalCfg) && FileExists(pluginJson) && PortableConnected(cfg);
     snap.takeoverEnabled = snap.pluginInstalled ? RunTakeoverCommand(cfg) : std::nullopt;
 
     if (snap.pluginInstalled) {
@@ -987,7 +1064,7 @@ void SyncControlsToUi() {
     EnableWindow(g_app.btnRefresh, !g_app.busyRefresh);
     InvalidateRect(g_app.btnHeaderUpdate, nullptr, FALSE);
     InvalidateRect(g_app.btnRefresh, nullptr, FALSE);
-    SetWindowTextW(g_app.btnServiceAction, s.pluginInstalled ? (s.serviceRunning ? L"重启服务" : L"启动服务") : L"安装插件");
+    SetWindowTextW(g_app.btnServiceAction, s.pluginInstalled ? (s.serviceRunning ? L"重启服务" : L"启动服务") : (g_app.cfg.portableRoot.empty() ? L"安装插件" : L"连接 Antigravity"));
     EnableWindow(g_app.btnLaunchAg, !cfgCopy.antigravityPath.empty() && FileExists(cfgCopy.antigravityPath));
 
     // Update banner
@@ -1034,7 +1111,7 @@ void SyncControlsToUi() {
     else if (s.guardianAuthStatus == L"store_unavailable") authText = L"无法读取凭据存储";
     SetWindowTextW(g_app.lblGuardianAuth, authText);
 
-    EnableWindow(g_app.btnUninstall, FileExists(JoinPath(cfgCopy.dataDirectory, L"installation.json")));
+    EnableWindow(g_app.btnUninstall, FileExists(JoinPath(cfgCopy.dataDirectory, L"installation.json")) && PortableConnected(cfgCopy));
     UpdateTrayAppearance();
     ResizePanelToContent();
     SyncUpdatePopup();
@@ -1061,10 +1138,10 @@ void StartRefreshWorker(bool initialStartup, bool runDetect, bool skipLoginCheck
 
     std::thread([cfgCopy, baseSnap, initialStartup, runDetect, skipLoginCheck]() mutable {
         // On initial startup, ensure approval host if plugin is already installed
-        if (initialStartup && FileExists(JoinPath(cfgCopy.pluginDirectory, L"approval.json"))) {
+        if (initialStartup && PortableConnected(cfgCopy) && FileExists(ApprovalConfigPath(cfgCopy))) {
             std::wstring dotnet = GetDotnetExe(cfgCopy);
             std::wstring dll = GetAssemblyDll(cfgCopy);
-            std::wstring appCfg = JoinPath(cfgCopy.pluginDirectory, L"approval.json");
+            std::wstring appCfg = ApprovalConfigPath(cfgCopy);
             if (FileExists(dotnet) && FileExists(dll)) {
                 RunHiddenCommand(dotnet, L"\"" + dll + L"\" ensure --config \"" + appCfg + L"\"", cfgCopy.pluginDirectory, 15000);
             }
@@ -1110,7 +1187,7 @@ void StartCheckUpdateWorker(bool allowAutoApply) {
         res->snapshot = std::move(baseSnap);
         res->snapshot.updateChecked = true;
 
-        UpdateCheckResult check = CheckForUpdate(updCopy, currentVer, GetDistribution(cfgCopy.pluginDirectory));
+        UpdateCheckResult check = CheckForUpdate(updCopy, currentVer, cfgCopy.portableRoot.empty() ? GetDistribution(cfgCopy.pluginDirectory) : L"portable");
         if (!check.ok) {
             res->ok = false;
             res->message = check.error;
@@ -1263,7 +1340,7 @@ void StartDetailedLogsWorker(bool enable) {
     std::thread([cfgCopy, enable]() {
         std::wstring dotnet = GetDotnetExe(cfgCopy);
         std::wstring dll = GetAssemblyDll(cfgCopy);
-        std::wstring appCfg = JoinPath(cfgCopy.pluginDirectory, L"approval.json");
+        std::wstring appCfg = ApprovalConfigPath(cfgCopy);
         std::wstring args = L"\"" + dll + L"\" set-logging --config \"" + appCfg + L"\" --enabled " + (enable ? L"true" : L"false");
         CommandResult cr = RunHiddenCommand(dotnet, args, cfgCopy.pluginDirectory, 8000);
 
@@ -1289,7 +1366,7 @@ void StartProtectedDelegationWorker(bool enable) {
     std::thread([cfgCopy, enable]() {
         std::wstring dotnet = GetDotnetExe(cfgCopy);
         std::wstring dll = GetAssemblyDll(cfgCopy);
-        std::wstring appCfg = JoinPath(cfgCopy.pluginDirectory, L"approval.json");
+        std::wstring appCfg = ApprovalConfigPath(cfgCopy);
         std::wstring args = L"\"" + dll + L"\" set-protected-delegation --config \"" + appCfg + L"\" --enabled " + (enable ? L"true" : L"false");
         CommandResult cr = RunHiddenCommand(dotnet, args, cfgCopy.pluginDirectory, 8000);
 
@@ -1317,7 +1394,7 @@ void StartServiceWorker() {
     std::thread([cfgCopy, snapBase, alreadyRunning]() mutable {
         std::wstring dotnet = GetDotnetExe(cfgCopy);
         std::wstring dll = GetAssemblyDll(cfgCopy);
-        std::wstring appCfg = JoinPath(cfgCopy.pluginDirectory, L"approval.json");
+        std::wstring appCfg = ApprovalConfigPath(cfgCopy);
         if (alreadyRunning) {
             RunHiddenCommand(dotnet, L"\"" + dll + L"\" stop --config \"" + appCfg + L"\"", cfgCopy.pluginDirectory, 6000);
             Sleep(300);
@@ -1490,14 +1567,14 @@ void StartInstallScriptWorker() {
                             L"\" -DataDirectory \"" + cfgCopy.dataDirectory + L"\"";
         if (!cfgCopy.antigravityPath.empty()) args += L" -AntigravityPath \"" + cfgCopy.antigravityPath + L"\"";
 
-        CommandResult cr = RunHiddenCommand(psExe, args, workDir, 45000);
+        CommandResult cr = RunHiddenCommand(psExe, args, workDir, cfgCopy.portableRoot.empty() ? 45000 : 120000);
         QueryCoreSnapshot(cfgCopy, snapBase, false, true);
         auto res = std::make_unique<WorkResult>();
         res->kind = WorkKind::InstallOrRepair;
         res->ok = cr.started && !cr.timedOut && cr.exitCode == 0;
         res->snapshot = std::move(snapBase);
         if (res->ok) {
-            res->message = L"插件已成功安装并启用审批服务。";
+            res->message = cfgCopy.portableRoot.empty() ? L"插件已成功安装并启用审批服务。" : L"已连接 Antigravity，配置和审批日志保存在当前文件夹。";
         } else {
             res->message = L"安装失败：\n" + Utf8ToWide(cr.stderrUtf8 + "\n" + cr.stdoutUtf8);
         }
@@ -1528,8 +1605,8 @@ void StartUninstallAndExit(HWND hwnd) {
     }
     g_app.uninstallPromptOpen = true;
     const int answer = MessageBoxW(hwnd,
-        L"面板将退出。卸载会移除已安装的插件，并永久删除本地审批日志、统计、设置和备份。\n\n确认完整卸载吗？",
-        L"完整卸载 Gravity Guardian", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
+        cfg.portableRoot.empty() ? L"面板将退出。卸载会移除已安装的插件，并永久删除本地审批日志、统计、设置和备份。\n\n确认完整卸载吗？" : L"面板将退出并断开与 Antigravity 的连接。配置和审批日志会保留在当前文件夹。\n\n确认断开连接吗？",
+        cfg.portableRoot.empty() ? L"完整卸载 Gravity Guardian" : L"断开连接", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
     g_app.uninstallPromptOpen = false;
     if (answer != IDYES) return;
 
@@ -1537,7 +1614,7 @@ void StartUninstallAndExit(HWND hwnd) {
     GetSystemDirectoryW(systemDir, static_cast<DWORD>(std::size(systemDir)));
     std::wstring powershell = JoinPath(systemDir, L"WindowsPowerShell\\v1.0\\powershell.exe");
     std::wstring args = L"-NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"" + script +
-        L"\" -DataDirectory \"" + cfg.dataDirectory + L"\" -PurgeData -WaitPid " + std::to_wstring(GetCurrentProcessId()) +
+        L"\" -DataDirectory \"" + cfg.dataDirectory + L"\"" + (cfg.portableRoot.empty() ? L" -PurgeData" : L"") + L" -WaitPid " + std::to_wstring(GetCurrentProcessId()) +
         L" -PanelExecutablePath \"" + exePath + L"\" -ShowResult";
     if (!LaunchDetached(powershell, args, systemDir, true)) {
         MessageBoxW(hwnd, L"无法启动卸载程序。", L"完整卸载", MB_OK | MB_ICONERROR);
@@ -1562,7 +1639,7 @@ void LaunchAntigravityAction() {
         if (ensureService) {
             const auto dotnet = GetDotnetExe(cfgCopy);
             const auto dll = GetAssemblyDll(cfgCopy);
-            const auto appCfg = JoinPath(cfgCopy.pluginDirectory, L"approval.json");
+            const auto appCfg = ApprovalConfigPath(cfgCopy);
             RunHiddenCommand(dotnet, L"\"" + dll + L"\" ensure --config \"" + appCfg + L"\"", cfgCopy.pluginDirectory, 8000);
         }
         auto result = std::make_unique<WorkResult>();
@@ -1713,8 +1790,8 @@ void CreateChildControls(HWND hwnd) {
     g_app.lblGuardianTitle = label(L"审批账号");
     g_app.lblGuardianAuth = label(L"", SS_ENDELLIPSIS);
     g_app.btnDetectEnv = button(L"检测", ID_BTN_DETECT_ENV);
-    g_app.btnInstallRepair = button(L"安装 / 修复插件", ID_BTN_INSTALL_REPAIR);
-    g_app.btnUninstall = button(L"完整卸载", ID_BTN_UNINSTALL);
+    g_app.btnInstallRepair = button(g_app.cfg.portableRoot.empty() ? L"安装 / 修复插件" : L"连接 / 修复连接", ID_BTN_INSTALL_REPAIR);
+    g_app.btnUninstall = button(g_app.cfg.portableRoot.empty() ? L"完整卸载" : L"断开连接", ID_BTN_UNINSTALL);
 
     g_app.btnPreferences = button(L"偏好设置", ID_BTN_PREFERENCES);
     g_app.chkDetailedLogs = button(L"详细调试日志", ID_CHK_DETAILED_LOGS);
@@ -2874,6 +2951,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             break;
         case ID_BTN_OPEN_PRICING: {
             std::wstring pricing = GetPricingJsonPath(g_app.cfg);
+            if (!g_app.cfg.portableRoot.empty()) {
+                const auto target = JoinPath(g_app.cfg.portableRoot, L"config\\pricing.json");
+                EnsureDirectoryTree(GetDirectoryName(target));
+                if (!FileExists(target)) CopyFileW(pricing.c_str(), target.c_str(), TRUE);
+                pricing = target;
+            }
             if (FileExists(pricing)) OpenPathWithShell(pricing);
             else MessageBoxW(hwnd, L"未找到 pricing.json 文件。", L"计价配置", MB_OK | MB_ICONINFORMATION);
             break;
@@ -3070,9 +3153,16 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
     InitPathsAndConfig(optPlugin, optData, optGemini);
 
     std::wstring mutexName = L"Local\\GravityGuardianPanel";
+    std::wstring windowClass = kWindowClass;
+    if (!g_app.cfg.portableRoot.empty()) {
+        std::wstring identity;
+        ComputeBufferSha256Hex(g_app.cfg.portableRoot.data(), g_app.cfg.portableRoot.size() * sizeof(wchar_t), identity);
+        mutexName += L"_" + identity.substr(0, 16);
+        windowClass += L"_" + identity.substr(0, 16);
+    }
     HANDLE hMutex = CreateMutexW(nullptr, TRUE, mutexName.c_str());
     if (hMutex && GetLastError() == ERROR_ALREADY_EXISTS) {
-        HWND existing = FindWindowW(kWindowClass, nullptr);
+        HWND existing = FindWindowW(windowClass.c_str(), nullptr);
         if (existing) PostMessageW(existing, WM_APP_SHOW_EXISTING, 0, 0);
         CloseHandle(hMutex);
         return 0;
@@ -3092,7 +3182,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
     wc.hIconSm = static_cast<HICON>(LoadImageW(hInst, MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON,
         GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR | LR_SHARED));
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    wc.lpszClassName = kWindowClass;
+    wc.lpszClassName = windowClass.c_str();
     wc.hbrBackground = nullptr;
     RegisterClassExW(&wc);
 
@@ -3118,7 +3208,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
         return 1;
     }
     HWND hwnd = CreateWindowExW(
-        kPanelExStyle, kWindowClass, L"Gravity Guardian",
+        kPanelExStyle, windowClass.c_str(), g_app.cfg.portableRoot.empty() ? L"Gravity Guardian" : L"Gravity Guardian 免安装版",
         kPanelStyle, x, y, fullW, fullH,
         nullptr, nullptr, hInst, nullptr);
     if (!hwnd) {

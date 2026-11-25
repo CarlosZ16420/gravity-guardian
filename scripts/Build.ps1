@@ -103,7 +103,7 @@ try {
     New-Item -ItemType Directory -Path $taskPrograms -Force | Out-Null
     & $taskDotnet publish 'src/AgApproval/AgApproval.csproj' -c Release --no-restore --self-contained false -p:UseAppHost=false -p:DebugType=None -p:DebugSymbols=false -o $taskPrograms --nologo
     if ($LASTEXITCODE -ne 0) { throw 'Publish failed' }
-    foreach ($taskScript in @('Apply-Update.ps1', 'Install.ps1', 'Uninstall.ps1', 'Review-Mode.ps1', 'Resolve-Runtime.ps1')) {
+    foreach ($taskScript in @('Apply-Update.ps1', 'Install.ps1', 'Uninstall.ps1', 'Review-Mode.ps1', 'Resolve-Runtime.ps1', 'Portable.ps1', 'Doctor.ps1', 'Analyze-Logs.ps1', 'Compact-Logs.ps1')) {
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot $taskScript) -Destination (Join-Path $taskPrograms $taskScript) -Force
     }
 

@@ -26,36 +26,48 @@ if ($taskBundleGuardian.profile -cne 'Release') {
 $taskVersion = (Get-Content -Encoding UTF8 -LiteralPath (Join-Path $taskBundle 'plugin.json') -Raw | ConvertFrom-Json).version
 $taskStage = Join-Path $taskRoot ('artifacts/releases/stage-' + [Guid]::NewGuid().ToString('N'))
 
-function New-ReleaseArchive([ValidateSet('standalone','lite')][string]$Distribution) {
+function New-ReleaseArchive([ValidateSet('standalone','lite','portable')][string]$Distribution) {
+$taskPortable = $Distribution -eq 'portable'
 $taskRelease = Join-Path (Join-Path $taskStage $Distribution) ('gravity-guardian-' + $taskVersion)
-$taskPackageBundle = Join-Path $taskRelease 'artifacts/gravity-guardian'
+$taskBundleRelative = if ($taskPortable) { 'app' } else { 'artifacts/gravity-guardian' }
+$taskPackageBundle = Join-Path $taskRelease $taskBundleRelative
 
 New-Item -ItemType Directory -Path $taskPackageBundle -Force | Out-Null
 foreach ($item in (Get-ChildItem -LiteralPath $taskBundle -Force)) {
     if ($Distribution -eq 'lite' -and $item.Name -eq 'runtime') { continue }
+    if ($taskPortable -and $item.Name -eq 'app') { continue }
     Copy-Item -LiteralPath $item.FullName -Destination $taskPackageBundle -Recurse
 }
-@{ type = $Distribution } | ConvertTo-Json -Compress |
+@{ type = $(if ($taskPortable) { 'standalone' } else { $Distribution }) } | ConvertTo-Json -Compress |
     Set-Utf8NoBom -LiteralPath (Join-Path $taskPackageBundle 'distribution.json')
 Copy-Item -LiteralPath (Join-Path $taskBundle 'app/GravityGuardian.exe') -Destination (Join-Path $taskRelease 'GravityGuardian.exe') -Force
 
+if (!$taskPortable) {
 New-Item -ItemType Directory -Path (Join-Path $taskRelease 'scripts') -Force | Out-Null
-foreach ($taskName in @('Install.ps1','Uninstall.ps1','Review-Mode.ps1','Resolve-Runtime.ps1','Doctor.ps1','Analyze-Logs.ps1','Compact-Logs.ps1','Apply-Update.ps1','Test-Hooks.ps1')) {
+foreach ($taskName in @('Install.ps1','Uninstall.ps1','Review-Mode.ps1','Resolve-Runtime.ps1','Doctor.ps1','Analyze-Logs.ps1','Compact-Logs.ps1','Apply-Update.ps1','Test-Hooks.ps1','Portable.ps1')) {
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot $taskName) -Destination (Join-Path $taskRelease 'scripts')
 }
-
-New-Item -ItemType Directory -Path (Join-Path $taskRelease 'docs') -Force | Out-Null
-Copy-Item -LiteralPath (Join-Path $taskRoot "docs/release-$taskVersion.md") -Destination (Join-Path $taskRelease 'docs')
-foreach ($taskNote in @('guardian-0.172.0-validation.md', 'release-native-guardian.md')) {
-    Copy-Item -LiteralPath (Join-Path $taskRoot "docs/$taskNote") -Destination (Join-Path $taskRelease 'docs')
 }
 
-Copy-Item -LiteralPath (Join-Path $taskRoot 'LICENSE') -Destination (Join-Path $taskRelease 'LICENSE') -Force
-Copy-Item -LiteralPath (Join-Path $taskRoot 'NOTICE') -Destination (Join-Path $taskRelease 'NOTICE') -Force
+$taskDocs = if ($taskPortable) { Join-Path $taskPackageBundle 'docs' } else { Join-Path $taskRelease 'docs' }
+New-Item -ItemType Directory -Path $taskDocs -Force | Out-Null
+Copy-Item -LiteralPath (Join-Path $taskRoot "docs/release-$taskVersion.md") -Destination $taskDocs
+foreach ($taskNote in @('guardian-0.172.0-validation.md', 'release-native-guardian.md')) {
+    Copy-Item -LiteralPath (Join-Path $taskRoot "docs/$taskNote") -Destination $taskDocs
+}
+
+$taskLegal = if ($taskPortable) { $taskDocs } else { $taskRelease }
+Copy-Item -LiteralPath (Join-Path $taskRoot 'LICENSE') -Destination (Join-Path $taskLegal 'LICENSE') -Force
+Copy-Item -LiteralPath (Join-Path $taskRoot 'NOTICE') -Destination (Join-Path $taskLegal 'NOTICE') -Force
+if ($taskPortable) {
+    Copy-Item -LiteralPath (Join-Path $taskRoot 'docs/portable.md') -Destination (Join-Path $taskRelease 'README.md')
+    @{storageMode='portable';layoutVersion=1;distribution='standalone'} | ConvertTo-Json -Compress | Set-Utf8NoBom -LiteralPath (Join-Path $taskRelease 'portable.json')
+} else {
 foreach ($taskReadme in @('README.md', 'README.en.md')) {
     Copy-Item -LiteralPath (Join-Path $taskRoot $taskReadme) -Destination $taskRelease
 }
 Copy-Item -LiteralPath (Join-Path $taskRoot 'schemas') -Destination $taskRelease -Recurse
+}
 
 $taskReleaseFiles = @(Get-ChildItem -LiteralPath $taskRelease -Recurse -File -Force | Sort-Object FullName)
 $taskFiles = @($taskReleaseFiles | ForEach-Object {
@@ -64,10 +76,13 @@ $taskFiles = @($taskReleaseFiles | ForEach-Object {
         sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
     }
 })
-$taskPackageManifest = Join-Path $taskRelease 'package-manifest.json'
+$taskManifestRelative = if ($taskPortable) { 'app/package-manifest.json' } else { 'package-manifest.json' }
+$taskPackageManifest = Join-Path $taskRelease $taskManifestRelative
 @{
     version = $taskVersion
     distribution = $Distribution
+    storageMode = $(if ($taskPortable) { 'portable' } else { 'installed' })
+    layoutVersion = $(if ($taskPortable) { 1 } else { 0 })
     builtAt = [DateTime]::UtcNow.ToString('O')
     deploymentStatusSource = 'Use Doctor or GravityGuardian status; package metadata is not live deployment state'
     files = $taskFiles
@@ -75,9 +90,9 @@ $taskPackageManifest = Join-Path $taskRelease 'package-manifest.json'
 
 $taskExpectedFiles = [Collections.Generic.Dictionary[string,string]]::new([StringComparer]::Ordinal)
 foreach ($taskFile in $taskFiles) { $taskExpectedFiles.Add($taskFile.path, $taskFile.sha256) }
-$taskExpectedFiles.Add('package-manifest.json', (Get-FileHash -LiteralPath $taskPackageManifest -Algorithm SHA256).Hash.ToLowerInvariant())
+$taskExpectedFiles.Add($taskManifestRelative, (Get-FileHash -LiteralPath $taskPackageManifest -Algorithm SHA256).Hash.ToLowerInvariant())
 
-$taskSuffix = if ($Distribution -eq 'lite') { '-lite' } else { '' }
+$taskSuffix = if ($Distribution -eq 'standalone') { '' } else { '-'+$Distribution }
 $taskZipName = "gravity-guardian-$taskVersion$taskSuffix-windows-x64.zip"
 $taskStagedZip = Join-Path $taskStage $taskZipName
 $taskPrefix = (Split-Path $taskRelease -Leaf) + '/'
@@ -104,20 +119,22 @@ $taskArchive = [IO.Compression.ZipFile]::OpenRead($taskStagedZip)
 try {
     $taskRuntimeArchive = [IO.Compression.ZipFile]::OpenRead($taskRuntime.archivePath)
     try {
-        $taskExpectedRuntime = if ($Distribution -eq 'standalone') {
+        $taskExpectedRuntime = if ($Distribution -ne 'lite') {
             Get-LockedDotnetRuntimeFiles -Archive $taskRuntimeArchive -Version $taskRuntime.version
         } else { @{} }
-        $taskRuntimePrefix = 'artifacts/gravity-guardian/runtime/'
-        $taskNativeExe = 'artifacts/gravity-guardian/native/ag-guardian-host.exe'
-        $taskNativeManifest = 'artifacts/gravity-guardian/native/SOURCE.json'
+        $taskRuntimePrefix = $taskBundleRelative+'/runtime/'
+        $taskNativeExe = $taskBundleRelative+'/native/ag-guardian-host.exe'
+        $taskNativeManifest = $taskBundleRelative+'/native/SOURCE.json'
         $taskPanel = 'artifacts/gravity-guardian/app/GravityGuardian.exe'
         $taskRequiredFiles = @(
-            'GravityGuardian.exe', $taskNativeExe, $taskNativeManifest, $taskPanel
-            'artifacts/gravity-guardian/hooks.json'
-            'artifacts/gravity-guardian/scripts/gravity-guardian.dll'
-            'artifacts/gravity-guardian/scripts/gravity-guardian.deps.json'
-            'artifacts/gravity-guardian/scripts/gravity-guardian.runtimeconfig.json'
+            'GravityGuardian.exe', $taskNativeExe, $taskNativeManifest
+            ($taskBundleRelative+'/hooks.json')
+            ($taskBundleRelative+'/scripts/gravity-guardian.dll')
+            ($taskBundleRelative+'/scripts/gravity-guardian.deps.json')
+            ($taskBundleRelative+'/scripts/gravity-guardian.runtimeconfig.json')
         )
+        if (!$taskPortable) { $taskRequiredFiles += $taskPanel }
+        else { $taskRequiredFiles += 'portable.json' }
         foreach ($taskRequired in $taskRequiredFiles) {
             if (!$taskExpectedFiles.ContainsKey($taskRequired)) { throw "Missing required release file: $taskRequired" }
         }
@@ -172,7 +189,7 @@ try {
             $taskReader.Dispose()
         }
         if ($taskFileHashes[$taskNativeExe] -ne $taskGuardian.binarySha256) { throw 'Guardian SHA-256 differs from native/SOURCE.json' }
-        if ($taskFileHashes['GravityGuardian.exe'] -cne $taskFileHashes[$taskPanel]) { throw 'Panel entry points differ' }
+        if (!$taskPortable -and $taskFileHashes['GravityGuardian.exe'] -cne $taskFileHashes[$taskPanel]) { throw 'Panel entry points differ' }
     } finally {
         $taskRuntimeArchive.Dispose()
     }
@@ -189,8 +206,8 @@ $taskZipHash = (Get-FileHash -LiteralPath $taskStagedZip -Algorithm SHA256).Hash
     zipSha256 = $taskZipHash
     unpackedSizeBytes = $taskUnpackedBytes
     fileCount = $taskTree.Count
-    dotnetRuntimeVersion = $(if ($Distribution -eq 'standalone') { $taskRuntime.version })
-    dotnetRuntimeArchiveSha256 = $(if ($Distribution -eq 'standalone') { $taskRuntime.sha256 })
+    dotnetRuntimeVersion = $(if ($Distribution -ne 'lite') { $taskRuntime.version })
+    dotnetRuntimeArchiveSha256 = $(if ($Distribution -ne 'lite') { $taskRuntime.sha256 })
     guardianHostSha256 = $taskFileHashes[$taskNativeExe]
     files = $taskTree
 }
@@ -198,7 +215,10 @@ $taskZipHash = (Get-FileHash -LiteralPath $taskStagedZip -Algorithm SHA256).Hash
 
 $taskStandalone = New-ReleaseArchive 'standalone'
 $taskLite = New-ReleaseArchive 'lite'
-$taskBuilds = [ordered]@{ standalone = $taskStandalone; lite = $taskLite }
+$taskPortableBuild = New-ReleaseArchive 'portable'
+$taskBuilds = [ordered]@{ standalone = $taskStandalone; lite = $taskLite; portable = $taskPortableBuild }
+if ($taskPortableBuild.guardianHostSha256 -cne $taskStandalone.guardianHostSha256) { throw 'Portable Guardian differs from Standalone' }
+if ($taskPortableBuild.zipSizeBytes -gt $taskStandalone.zipSizeBytes -or $taskPortableBuild.unpackedSizeBytes -gt $taskStandalone.unpackedSizeBytes) { throw 'Portable package must not exceed the matching Standalone package size' }
 $taskSharedFiles = @{}
 foreach ($file in $taskStandalone.files) { $taskSharedFiles[$file.path] = $file.sha256 }
 foreach ($file in $taskLite.files) {
@@ -260,6 +280,7 @@ try {
 @{
     package = Join-Path $taskArtifacts $taskStandalone.assetName
     litePackage = Join-Path $taskArtifacts $taskLite.assetName
+    portablePackage = Join-Path $taskArtifacts $taskPortableBuild.assetName
     manifest = $taskManifestPath
     checksums = $taskChecksumsPath
     buildInfo = $taskBuildInfoPath

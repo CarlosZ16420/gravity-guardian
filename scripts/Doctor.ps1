@@ -1,9 +1,19 @@
 [CmdletBinding()]
 param([string]$DataDirectory=(Join-Path $env:USERPROFILE '.gemini/gravity-guardian-data'),[Alias('SkipCodexLoginCheck')][switch]$SkipGuardianAuthCheck)
 $ErrorActionPreference='Stop'
+. (Join-Path $PSScriptRoot 'Review-Mode.ps1')
+. (Join-Path $PSScriptRoot 'Portable.ps1')
+$taskPortable = Get-PortableLayout
+if ($taskPortable -and !$PSBoundParameters.ContainsKey('DataDirectory')) { $DataDirectory=$taskPortable.data }
 $taskManifest=Get-Content -Encoding UTF8 -LiteralPath (Join-Path $DataDirectory 'installation.json') -Raw | ConvertFrom-Json
-$taskPlugin=$taskManifest.pluginDirectory
-$taskConfig=Get-Content -Encoding UTF8 -LiteralPath (Join-Path $taskPlugin 'approval.json') -Raw | ConvertFrom-Json
+$taskPlugin=if ($taskPortable) { $taskPortable.app } else { $taskManifest.pluginDirectory }
+$taskConfigPath=if ($taskPortable) { $taskPortable.config } else { Join-Path $taskPlugin 'approval.json' }
+$taskConfig=Get-Content -Encoding UTF8 -LiteralPath $taskConfigPath -Raw | ConvertFrom-Json
+if ($taskPortable) {
+    Write-Host ('Portable application: '+$taskPortable.root)
+    if ($null -eq $taskConfig.reviewTimeoutSeconds) { $taskConfig | Add-Member -NotePropertyName reviewTimeoutSeconds -NotePropertyValue 90 }
+    if ($null -eq $taskConfig.hookTimeoutSeconds) { $taskConfig | Add-Member -NotePropertyName hookTimeoutSeconds -NotePropertyValue 100 }
+}
 . (Join-Path $PSScriptRoot 'Review-Mode.ps1')
 $taskNative=Get-Content -Encoding UTF8 -LiteralPath (Join-Path $taskManifest.configRoot 'config.json') -Raw|ConvertFrom-JsonHashtable
 $taskExpected=Get-CodexNativeSettings
@@ -40,14 +50,13 @@ if (Test-Path -LiteralPath $taskLedgerPath -PathType Leaf) {
     if ($taskLedger.ownedGrants) { $taskOwnedCount = @($taskLedger.ownedGrants).Count }
 }
 Write-Host ('Active delegated protected grants: '+$taskOwnedCount)
-$taskHooks=Get-Content -Encoding UTF8 -LiteralPath (Join-Path $taskPlugin 'hooks.json') -Raw|ConvertFrom-Json
+$taskHooks=Get-Content -Encoding UTF8 -LiteralPath (Join-Path $taskManifest.pluginDirectory 'hooks.json') -Raw|ConvertFrom-Json
 $taskOuterTimeout=$taskHooks.'gravity-guardian'.PreToolUse[0].hooks[0].timeout
 Write-Host ('Deadlines (review/client/native hook): '+$taskConfig.reviewTimeoutSeconds+'/'+$taskConfig.hookTimeoutSeconds+'/'+$taskOuterTimeout+' seconds')
 if($taskConfig.reviewTimeoutSeconds -ge $taskConfig.hookTimeoutSeconds -or $taskConfig.hookTimeoutSeconds -ge $taskOuterTimeout){Write-Warning 'Nested approval deadlines are out of order; the outer hook may discard the reviewer result.'}
 $taskRuntime = Resolve-ApprovalRuntime $taskPlugin -Installed
 Write-Host ('Distribution: ' + (Get-ApprovalDistribution $taskPlugin) + '; .NET: ' + $taskRuntime)
 $taskAssembly = Join-Path $taskPlugin 'scripts/gravity-guardian.dll'
-$taskConfigPath = Join-Path $taskPlugin 'approval.json'
 if(!$SkipGuardianAuthCheck){
     $taskDetectionRaw = & $taskRuntime $taskAssembly detect --config $taskConfigPath --gemini-root $taskManifest.geminiRoot --data-dir $DataDirectory
     if ($LASTEXITCODE -ne 0) { throw 'Native authentication probe failed' }

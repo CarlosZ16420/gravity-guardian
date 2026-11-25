@@ -59,6 +59,12 @@ jobs:
         shell: pwsh
         run: .\scripts\Test-Distributions.ps1
 
+      - name: Verify local portable workflows
+        shell: pwsh
+        run: |
+          $manifest = Get-Content artifacts/release-manifest.json -Raw | ConvertFrom-Json
+          .\scripts\Test-Portable.ps1 -PackageZip (Join-Path artifacts $manifest.distributions.portable.assetName)
+
       - name: Verify installed workflows never launch Codex CLI
         shell: pwsh
         run: .\scripts\Test-NoCli.ps1 -OutputDirectory .local\no-cli-release
