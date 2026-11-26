@@ -91,8 +91,15 @@ function Stop-PortableService($Layout) {
     $runtime = Resolve-ApprovalRuntime $Layout.app -Installed
     $assembly = Join-Path $Layout.app 'scripts/gravity-guardian.dll'
     $status = $null
-    $statusRaw = & $runtime $assembly status --config $Layout.config 2>$null
-    if ($LASTEXITCODE -ne 0 -or !$statusRaw) {
+    $query = & {
+        # Windows PowerShell 5.1 turns redirected native stderr into error records.
+        # A missing pipe is expected here; let the process check below decide safety.
+        $ErrorActionPreference = 'Continue'
+        $raw = & $runtime $assembly status --config $Layout.config 2>$null
+        @{ exitCode=$LASTEXITCODE; output=$raw }
+    }
+    $statusRaw = $query.output
+    if ($query.exitCode -ne 0 -or !$statusRaw) {
         # A stopped host has no pipe and status exits nonzero. Confirm using this exact
         # runtime, assembly and configuration; a failed query must abort the switch.
         Start-Sleep -Milliseconds 2200
