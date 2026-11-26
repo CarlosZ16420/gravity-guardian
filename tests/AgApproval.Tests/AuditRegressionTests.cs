@@ -10,6 +10,39 @@ public static class AuditRegressionTests
 
     public static async Task RunAsync(string scratch,Settings settings,ReviewInput input,Func<string,Func<Task>,Task> test)
     {
+        await test("R08 full pipe capacity preserves host and resumes status after connections close",async()=>{
+            var isolated=JsonNode.Parse(Json.Encode(settings))!;
+            isolated["dataDirectory"]=Path.Combine(scratch,"pipe-capacity");
+            isolated["pipeName"]="capacity-"+Guid.NewGuid().ToString("N");
+            isolated["delegateProtectedPaths"]=false;
+            var config=Path.Combine(scratch,"pipe-capacity.json");
+            await File.WriteAllTextAsync(config,isolated.ToJsonString());
+            var fixture=Settings.Load(config);
+            var host=AgApproval.Program.HostAsync(fixture,config);
+            var clients=new List<NamedPipeClientStream>();
+            using var timeout=new CancellationTokenSource(TimeSpan.FromSeconds(20));
+            try {
+                // Fifteen unfinished frames occupy handlers; the sixteenth must wait
+                // instead of provoking construction of a seventeenth server instance.
+                for(int i=0;i<15;i++) {
+                    var client=new NamedPipeClientStream(".",fixture.PipeName,PipeDirection.InOut,PipeOptions.Asynchronous);
+                    clients.Add(client);await client.ConnectAsync(timeout.Token);
+                }
+                var extra=new NamedPipeClientStream(".",fixture.PipeName,PipeDirection.InOut,PipeOptions.Asynchronous);
+                clients.Add(extra);var pending=extra.ConnectAsync(timeout.Token);
+                await Task.Delay(150,timeout.Token);
+                Check(!host.IsCompleted,"host exited at pipe capacity");
+                foreach(var client in clients.Take(15))client.Dispose();
+                await pending;
+                extra.Dispose();
+                var status=await AgApproval.Program.RequestAsync(fixture,new{operation="status"},TimeSpan.FromSeconds(5));
+                Check(Json.Text(JsonNode.Parse(status),"status")=="running","status did not recover after saturation");
+            } finally {
+                foreach(var client in clients)client.Dispose();
+                if(!host.IsCompleted) await AgApproval.Program.RequestAsync(fixture,new{operation="stop"},TimeSpan.FromSeconds(5));
+                await host.WaitAsync(timeout.Token);
+            }
+        });
         await test("F04 local frames preserve HTML and escaped strings and enforce exact UTF-8 bounds",async()=>{
             const int inputLimit=1048576;
             foreach(var text in new[]{new string('x',350000),string.Concat(Enumerable.Repeat("<p>内容</p>",35000)),"quotes \" and slash \\ and emoji 😀"})
@@ -128,12 +161,19 @@ public static class AuditRegressionTests
                 Check(UsageStats.Compute(data).Today.TotalRequests==before&&before==1,"statistics changed at "+point);
                 LogCompactor.Compact(data);
                 Check(Directory.GetFiles(logs,"*.jsonl").Single()==path&&UsageStats.Compute(data).Today.TotalRequests==1,"retry renamed or duplicated events");
+                Check(Directory.GetFiles(logs,"*.compact-*.tmp").Length==0,"retry left killed compactor candidates at "+point);
             }
             var legacy=Path.Combine(scratch,"compact-legacy");var old=Path.Combine(legacy,"logs","compact-stage-old","old-2020-01-01");Directory.CreateDirectory(old);
             var original=Path.Combine(old,"2020-01-01.000.jsonl");await File.WriteAllTextAsync(original,"original evidence");
             Directory.SetCreationTimeUtc(Path.GetDirectoryName(old)!,DateTime.UtcNow.AddHours(-1));
             bool blocked=false;try{LogCompactor.Compact(legacy);}catch(IOException){blocked=true;}
             Check(blocked&&File.ReadAllText(original)=="original evidence","legacy originals were removed or replayed");
+            var unknownData=Path.Combine(scratch,"compact-unknown");var unknownLogs=Path.Combine(unknownData,"logs");Directory.CreateDirectory(unknownLogs);
+            var unknown=Path.Combine(unknownLogs,"audit.jsonl.compact-not-a-guid.tmp");
+            var orphan=Path.Combine(unknownLogs,"missing.jsonl.compact-"+Guid.NewGuid().ToString("N")+".tmp");
+            await File.WriteAllTextAsync(unknown,"unknown evidence");await File.WriteAllTextAsync(orphan,"possibly only copy");
+            LogCompactor.Compact(unknownData);
+            Check(File.Exists(unknown)&&File.Exists(orphan),"cleanup removed an unknown candidate or the only remaining copy");
         });
     }
 }

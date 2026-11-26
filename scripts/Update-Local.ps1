@@ -83,6 +83,13 @@ function Get-FileSha256([string]$Path) {
 function Get-TextSha256([string]$Value) {
     [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($taskUtf8NoBom.GetBytes($Value))).ToLowerInvariant()
 }
+function Get-CompletedBuildHashes($CurrentHashes, $PreviousHashes, [string[]]$Completed) {
+    $saved = [ordered]@{}
+    foreach ($component in $CurrentHashes.Keys) {
+        $saved[$component] = if ($Completed -contains $component) { $CurrentHashes[$component] } else { $PreviousHashes.$component }
+    }
+    return $saved
+}
 function Get-InputsSha256([string]$BaseRoot, [string[]]$RelativePaths, [string[]]$ExcludedDirNames = @()) {
     $basePrefix = [IO.Path]::GetFullPath($BaseRoot).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
     $entries = [Collections.Generic.List[string]]::new()
@@ -487,7 +494,7 @@ try {
     $taskStateRecord = [ordered]@{
         version = $taskReleaseVersion
         updatedAt = [DateTime]::UtcNow.ToString('O')
-        hashes = $taskHashes
+        hashes = Get-CompletedBuildHashes $taskHashes $taskPrevState.hashes @($taskBuiltList)
         guardian = [ordered]@{
             profile = $taskResolvedGuardian.profile
             sha256 = $taskResolvedGuardian.sha256

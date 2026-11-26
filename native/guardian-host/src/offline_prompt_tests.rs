@@ -85,6 +85,30 @@ async fn run_final_native_prompt_roundtrip() -> anyhow::Result<()> {
         ensure!(turn2["assessment"]["outcome"] == "deny" && turn2["actionExecuted"] == false && turn2["approvalPublished"] == false, "unexpected turn2 output: {turn2}");
     }
 
+    // Real Responses SSE roundtrip: positive usage, omitted usage, unchanged
+    // positive usage, then a real threshold crossing. Missing usage must never
+    // lower the host's growth baseline or retire the fourth review's session.
+    {
+        let NewThread { thread_id, thread, .. } = manager.start_thread(StartThreadOptions::new(config.clone())).await?;
+        let (mut base, mut last) = (None, 0);
+        for (index, expected_input) in [100_000, 0, 100_000, 196_000].into_iter().enumerate() {
+            ensure!(!needs_checkpoint(index, base, last), "zero usage caused a false checkpoint before turn {}", index + 1);
+            let mut action = request.action.clone();
+            action["call_id"] = json!(format!("usage-probe-{index}"));
+            let history = if index == 0 { json!(request.history) } else { json!([]) };
+            let started = Instant::now();
+            let result = Box::pin(thread.assess_external_guardian(history, action, json!({"usageProbe":index}),
+                authorization.clone(), 15_000, CancellationToken::new())).await?;
+            println!("native_review_ms={:.3}", started.elapsed().as_secs_f64() * 1000.0);
+            ensure!(result["usage"]["input_tokens"] == expected_input, "unexpected usage delta: {result}");
+            record_review_input(&mut base, &mut last, result["usage"]["input_tokens"].as_i64(),
+                result["attemptCount"].as_i64(), result["inferenceDispatchCount"].as_i64());
+        }
+        ensure!(base == Some(100_000) && last == 196_000 && needs_checkpoint(4, base, last), "real growth no longer checkpoints");
+        retire(&manager, Parent { thread, id: thread_id, conversation_id: None, history: Vec::new(), policy: String::new(),
+            touched: Instant::now(), reviews: 4, base_input: base, last_input: last }).await;
+    }
+
     let mut oversized_auth = authorization.clone();
     oversized_auth["user_instructions"][0]["text"] = json!("complete authorization evidence ".repeat(55_000));
     let NewThread { thread_id, thread, .. } = manager.start_thread(StartThreadOptions::new(config.clone())).await?;

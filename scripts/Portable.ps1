@@ -61,6 +61,7 @@ function Assert-PortableHostStopped([string]$AntigravityPath = '', [string]$Conf
 
 function Invoke-PortableCore($Layout, [string]$Command, [string]$ConfigPath = '', [switch]$Quiet) {
     if (!$ConfigPath) { $ConfigPath = $Layout.config }
+    $runtime = Resolve-ApprovalRuntime $Layout.app -Installed
     if ($Command -eq 'ensure') {
         # A detached host inherits stdout handles. Capture startup to files, not a PS pipe
         # whose EOF would otherwise wait for the long-lived host to exit.
@@ -71,15 +72,15 @@ function Invoke-PortableCore($Layout, [string]$Command, [string]$ConfigPath = ''
         $output=Join-Path $logs ($id+'.stdout.log')
         $errors=Join-Path $logs ($id+'.stderr.log')
         $arguments=@(('"'+(Join-Path $Layout.app 'scripts/gravity-guardian.dll')+'"'),'ensure','--config',('"'+$ConfigPath+'"'))
-        $startup=Start-Process -FilePath (Join-Path $Layout.app 'runtime/dotnet.exe') -ArgumentList $arguments -WorkingDirectory $Layout.app -WindowStyle Hidden -RedirectStandardOutput $output -RedirectStandardError $errors -PassThru
+        $startup=Start-Process -FilePath $runtime -ArgumentList $arguments -WorkingDirectory $Layout.app -WindowStyle Hidden -RedirectStandardOutput $output -RedirectStandardError $errors -PassThru
         try {
             if (!$startup.WaitForExit(30000)) { $startup.Kill(); throw 'Approval service startup timed out' }
             if ($null -ne $startup.ExitCode -and $startup.ExitCode -ne 0) { throw ('Approval service startup failed: '+[IO.File]::ReadAllText($errors)) }
         } finally { $startup.Dispose() }
         return
     }
-    if ($Quiet) { $result = & (Join-Path $Layout.app 'runtime/dotnet.exe') (Join-Path $Layout.app 'scripts/gravity-guardian.dll') $Command --config $ConfigPath 2>$null }
-    else { $result = & (Join-Path $Layout.app 'runtime/dotnet.exe') (Join-Path $Layout.app 'scripts/gravity-guardian.dll') $Command --config $ConfigPath }
+    if ($Quiet) { $result = & $runtime (Join-Path $Layout.app 'scripts/gravity-guardian.dll') $Command --config $ConfigPath 2>$null }
+    else { $result = & $runtime (Join-Path $Layout.app 'scripts/gravity-guardian.dll') $Command --config $ConfigPath }
     if ($LASTEXITCODE -ne 0) { throw ('Approval command failed: ' + $Command) }
     return $result
 }
@@ -301,10 +302,12 @@ function Connect-Portable($Layout, [string]$GeminiRoot, [string]$AntigravityPath
         else { Remove-Item -LiteralPath $Layout.manifest -Force -ErrorAction SilentlyContinue }
         if ($legacy) {
             Remove-Item -LiteralPath (Join-Path $oldData 'uninstalled') -Force -ErrorAction SilentlyContinue
-            try { Invoke-PortableCore @{ app=$registration; config=(Join-Path $registration 'approval.json') } 'ensure' | Out-Null } catch {}
+            try { Invoke-PortableCore @{ app=$registration; config=(Join-Path $registration 'approval.json'); data=$oldData } 'ensure' | Out-Null }
+            catch { throw ('Portable connection failed: '+$failure.Exception.Message+'. Previous service recovery failed: '+$_.Exception.Message) }
         } elseif ($priorLocal -and $registrationChanged) {
             Remove-Item -LiteralPath (Join-Path $Layout.data 'uninstalled') -Force -ErrorAction SilentlyContinue
-            try { Invoke-PortableCore $Layout 'ensure' | Out-Null } catch {}
+            try { Invoke-PortableCore $Layout 'ensure' | Out-Null }
+            catch { throw ('Portable connection failed: '+$failure.Exception.Message+'. Previous service recovery failed: '+$_.Exception.Message) }
         }
         throw $failure
     }

@@ -453,6 +453,21 @@ public static class LogCompactor
             return new(logsDir, 0, 0, 0, 0, 0, 0, 0);
 
         using var lockStream = AcquireCompactionLock(logsDir);
+        // A killed process cannot run finally. Only discard our own candidates when
+        // their original still exists; unknown files and legacy originals stay intact.
+        foreach (var candidate in Directory.GetFiles(logsDir, "*.tmp", SearchOption.TopDirectoryOnly))
+        {
+            var match = Regex.Match(Path.GetFileName(candidate), @"\A(.+\.jsonl)\.compact-[a-f0-9]{32}\.tmp\z", RegexOptions.CultureInvariant);
+            if (!match.Success) continue;
+            var original = Path.Combine(logsDir, match.Groups[1].Value);
+            try
+            {
+                if (!File.Exists(original) || (File.GetAttributes(original) & FileAttributes.ReparsePoint) != 0 ||
+                    (File.GetAttributes(candidate) & FileAttributes.ReparsePoint) != 0) continue;
+                File.Delete(candidate);
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
+        }
         // Old multi-file stages may contain the only originals. Preserve them for inspection.
         if (Directory.GetDirectories(logsDir, "compact-stage-*", SearchOption.TopDirectoryOnly).Length != 0)
             throw new IOException("Unfinished legacy log compaction found. Original stage files were preserved; inspect them before compacting again.");

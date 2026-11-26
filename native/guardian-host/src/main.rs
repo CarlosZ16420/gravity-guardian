@@ -61,7 +61,8 @@ fn record_review_input(
     if attempts != Some(1) || dispatches != Some(1) {
         return;
     }
-    let Some(input) = usage_input.filter(|&value| value >= 0) else {
+    // A successful response without usage can appear as a zero cumulative delta.
+    let Some(input) = usage_input.filter(|&value| value > 0) else {
         return;
     };
     *last_input = input;
@@ -456,11 +457,21 @@ mod tests {
                 record_review_input(&mut base, &mut last, Some(50_000), attempts, dispatches);
                 assert_eq!((base, last), initial);
             }
-            for input in [None, Some(-1)] {
+            for input in [None, Some(-1), Some(0)] {
                 record_review_input(&mut base, &mut last, input, Some(1), Some(1));
                 assert_eq!((base, last), initial);
             }
         }
+    }
+    #[test] fn zero_usage_does_not_reset_a_positive_growth_baseline() {
+        let (mut base, mut last) = (None, 0);
+        for input in [200_000, 0, 200_000] {
+            record_review_input(&mut base, &mut last, Some(input), Some(1), Some(1));
+        }
+        assert_eq!((base, last), (Some(200_000), 200_000));
+        assert!(!needs_checkpoint(3, base, last));
+        record_review_input(&mut base, &mut last, Some(296_000), Some(1), Some(1));
+        assert!(needs_checkpoint(4, base, last));
     }
     #[test] fn wire_validation_admits_large_actions_to_elastic_budgeting() {
         let mut value=request();

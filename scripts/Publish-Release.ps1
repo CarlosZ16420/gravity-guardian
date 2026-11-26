@@ -56,6 +56,21 @@ foreach ($asset in $remote.assets) {
 }
 Write-Host "PASS verified draft: $($remote.html_url)"
 if ($Publish) {
+    # target_commitish cannot move an existing tag. Resolve it before making a draft public.
+    $tagQuery = & {
+        $ErrorActionPreference='Continue'
+        $output = & gh api "repos/$Repository/git/ref/tags/$tag" --include 2>&1
+        @{output=@($output);exitCode=$LASTEXITCODE}
+    }
+    if ($tagQuery.exitCode -ne 0) {
+        $statuses=[regex]::Matches(($tagQuery.output -join "`n"),'(?m)^HTTP/\S+\s+(\d{3})(?:\s|$)')
+        if (!$statuses.Count -or $statuses[$statuses.Count-1].Groups[1].Value -cne '404') {
+            throw 'Cannot verify release tag; draft was not published'
+        }
+    } else {
+        $existingTarget=Invoke-Gh api "repos/$Repository/commits/$tag" --jq '.sha'
+        if ($existingTarget -cne $accepted.commit) { throw 'Existing release tag target differs; draft was not published' }
+    }
     Invoke-Gh api --method PATCH "repos/$Repository/releases/$id" -F draft=false -f make_latest=true --jq '.html_url'
     $published=Invoke-Gh api "repos/$Repository/releases/$id" | ConvertFrom-Json
     $target=Invoke-Gh api "repos/$Repository/commits/$tag" --jq '.sha'

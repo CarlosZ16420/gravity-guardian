@@ -13,7 +13,7 @@ $assets=@(foreach ($name in $names) {
 $steps=@('Preflight and service tests','Build','Native prompt','Installation','Package','Update and rollback','Standalone and Lite','Portable','Zero CLI trace') | ForEach-Object { @{name=$_;result='success'} }
 $proof=@{commit=$commit;version=$version;sourceDirty=$false;result='success';steps=@($steps);assets=$assets}
 $proof | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $fixture 'release-acceptance.json') -Encoding utf8
-$global:GravityReleaseWorkflowTestMock=@{release=$null;uploads=0;publishes=0;creates=0}
+$global:GravityReleaseWorkflowTestMock=@{release=$null;uploads=0;publishes=0;creates=0;tagMode='correct'}
 function gh {
     $global:LASTEXITCODE=0
     $argv=@($args)
@@ -31,7 +31,18 @@ function gh {
             if ($argv -contains 'PATCH') { $global:GravityReleaseWorkflowTestMock.release.draft=$false; $global:GravityReleaseWorkflowTestMock.publishes++; 'https://example.invalid/release'; return }
             $global:GravityReleaseWorkflowTestMock.release | ConvertTo-Json -Depth 8; return
         }
-        if ($endpoint -eq 'repos/fixture/project/commits/v9.9.9') { $commit; return }
+        if ($endpoint -eq 'repos/fixture/project/git/ref/tags/v9.9.9') {
+            switch ($global:GravityReleaseWorkflowTestMock.tagMode) {
+                'missing' { $global:LASTEXITCODE=1; "HTTP/2.0 404 Not Found`n{}"; return }
+                'forbidden' { $global:LASTEXITCODE=1; "HTTP/2.0 403 Forbidden`n{}"; return }
+                'server-error' { $global:LASTEXITCODE=1; "HTTP/2.0 500 Server Error`n{}"; return }
+                'network' { $global:LASTEXITCODE=1; 'Network failure mentioning 404 without HTTP status'; return }
+                default { "HTTP/2.0 200 OK`n{}"; return }
+            }
+        }
+        if ($endpoint -eq 'repos/fixture/project/commits/v9.9.9') {
+            if ($global:GravityReleaseWorkflowTestMock.tagMode -eq 'mismatch') { '2'*40 } else { $commit }; return
+        }
     }
     if ($argv[0] -eq 'release' -and $argv[1] -eq 'create') {
         $global:GravityReleaseWorkflowTestMock.creates++
@@ -54,6 +65,17 @@ if ($global:GravityReleaseWorkflowTestMock.creates -ne 1 -or $global:GravityRele
 $failure=$null
 try { & (Join-Path $PSScriptRoot 'Publish-Release.ps1') -Directory $fixture -Repository fixture/project -Publish } catch { $failure=$_.Exception.Message }
 if ($failure -notlike 'Release already published*' -or $global:GravityReleaseWorkflowTestMock.publishes -ne 1) { throw 'Published release was not protected from overwrite' }
+foreach ($mode in @('mismatch','forbidden','server-error','network')) {
+    $global:GravityReleaseWorkflowTestMock.release.draft=$true
+    $global:GravityReleaseWorkflowTestMock.tagMode=$mode
+    $failure=$null
+    try { & (Join-Path $PSScriptRoot 'Publish-Release.ps1') -Directory $fixture -Repository fixture/project -Publish } catch { $failure=$_.Exception.Message }
+    if (!$failure -or !$global:GravityReleaseWorkflowTestMock.release.draft -or $global:GravityReleaseWorkflowTestMock.publishes -ne 1) { throw "Unsafe tag query published a release: $mode" }
+}
+$global:GravityReleaseWorkflowTestMock.tagMode='missing'
+& (Join-Path $PSScriptRoot 'Publish-Release.ps1') -Directory $fixture -Repository fixture/project -Publish
+if ($global:GravityReleaseWorkflowTestMock.release.draft -or $global:GravityReleaseWorkflowTestMock.publishes -ne 2) { throw 'Confirmed missing tag did not publish' }
+Write-Host 'PASS R07 existing wrong tag, permission/server/network errors stay draft; correct and confirmed absent tags publish'
 [IO.File]::AppendAllText((Join-Path $fixture $names[0]),'corrupt')
 $failure=$null
 try { & (Join-Path $PSScriptRoot 'Publish-Release.ps1') -Directory $fixture -ValidateOnly } catch { $failure=$_.Exception.Message }

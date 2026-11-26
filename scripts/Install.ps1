@@ -354,8 +354,7 @@ Remove-Item -LiteralPath $taskIncomplete -Force
     try {
         [IO.File]::WriteAllText((Join-Path $taskData 'uninstalled'), 'install rollback')
         if ($taskPluginCommitted -and !$NoStart) {
-            & $taskRuntime $taskAssembly stop --config $taskReviewConfig 2>$null | Out-Null
-            Start-Sleep -Milliseconds 2200
+            Stop-PortableService @{app=$taskPlugin;config=$taskReviewConfig;data=$taskData}
         }
         $taskRollbackJournal = Read-PortableJson (Join-Path $taskBackup 'review-mode/rollback.json')
         if ($taskRollbackJournal) { Restore-CodexReviewMode -ConfigRoot $taskConfigRoot -Changes @($taskRollbackJournal) }

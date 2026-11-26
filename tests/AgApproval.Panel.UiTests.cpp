@@ -1,8 +1,19 @@
 // Exercise the real native controls and window procedure without starting services,
 // checking the network, changing startup settings, or using the user's data.
+#include <windows.h>
+#include <shellapi.h>
+NOTIFYICONDATAW testTrayData{};
+DWORD testTrayAction = 0;
+BOOL TestShellNotifyIconW(DWORD action, PNOTIFYICONDATAW data) {
+    testTrayAction = action;
+    testTrayData = *data;
+    return TRUE;
+}
+#define Shell_NotifyIconW TestShellNotifyIconW
 #define wWinMain PanelApplicationEntry
 #include "../src/AgApproval.Panel/main.cpp"
 #undef wWinMain
+#undef Shell_NotifyIconW
 
 using namespace panel;
 
@@ -98,6 +109,38 @@ int wmain(int argc, wchar_t** argv) {
         WriteStdoutUtf8(std::string(ok ? "PASS " : "FAIL ") + label + "\n");
         if (!ok) ++failed;
     };
+    const auto fixture = JoinPath(GetDirectoryName(GetExecutablePath()), L"path-recovery");
+    const auto gemini = JoinPath(fixture, L"custom-gemini");
+    const auto plugin = JoinPath(gemini, L"config\\plugins\\gravity-guardian");
+    const auto data = JoinPath(fixture, L"custom-data");
+    EnsureDirectoryTree(plugin);
+    WriteFileUtf8Atomic(JoinPath(plugin, L"plugin.json"), "{\"name\":\"gravity-guardian\"}");
+    JsonValue approval;
+    JsonValue::Parse("{}", approval);
+    for (const auto& entry : {std::pair{"dataDirectory", data}, std::pair{"antigravityConfigDirectory", JoinPath(gemini, L"config")}}) {
+        JsonValue value; value.kind = JsonValue::Kind::String; value.strVal = WideToUtf8(entry.second);
+        approval.objVal[entry.first] = value;
+    }
+    WriteFileUtf8Atomic(JoinPath(plugin, L"approval.json"), approval.Dump());
+    PanelConfig recovered;
+    recovered.geminiRoot = JoinPath(fixture, L"default");
+    recovered.pluginDirectory = JoinPath(recovered.geminiRoot, L"config\\plugins\\gravity-guardian");
+    recovered.dataDirectory = L"default-data";
+    RestoreInstalledPanelPaths(recovered, JoinPath(plugin, L"app"), false, false, false);
+    check(SamePanelPath(recovered.geminiRoot, gemini) && SamePanelPath(recovered.dataDirectory, data) && SamePanelPath(recovered.pluginDirectory, plugin),
+          "R02 ordinary and minimized startup recover custom installation paths");
+    recovered.dataDirectory = L"explicit-data";
+    RestoreInstalledPanelPaths(recovered, JoinPath(plugin, L"app"), true, true, true);
+    check(recovered.dataDirectory == L"explicit-data", "R02 explicit data path wins over installed configuration");
+    PanelConfig wrong = recovered;
+    wrong.geminiRoot = JoinPath(fixture, L"other-root");
+    wrong.dataDirectory = L"sentinel";
+    RestoreInstalledPanelPaths(wrong, JoinPath(plugin, L"app"), true, false, true);
+    check(wrong.dataDirectory == L"sentinel", "R02 mismatched explicit Gemini root cannot adopt another installation");
+    g_app.nid.uFlags = NIF_ICON | NIF_TIP;
+    SendMessageW(hwnd, TaskbarCreatedMessage(), 0, 0);
+    check(testTrayAction == NIM_ADD && testTrayData.hWnd == hwnd && testTrayData.uCallbackMessage == WM_APP_TRAY &&
+          testTrayData.uFlags == (NIF_MESSAGE | NIF_ICON | NIF_TIP), "R11 taskbar recreation restores icon and mouse callback");
     auto rect = [&](HWND control) {
         RECT value{};
         GetWindowRect(control, &value);

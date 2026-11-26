@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([switch]$NoRebuild)
+param([switch]$NoRebuild, [switch]$StateOnly)
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'Review-Mode.ps1')
 
@@ -7,6 +7,33 @@ $taskRoot = Split-Path $PSScriptRoot -Parent
 $taskLocal = Join-Path $taskRoot '.local'
 $taskBuildGuardian = Join-Path $PSScriptRoot 'Build-Guardian.ps1'
 $taskUpdateLocal = Join-Path $PSScriptRoot 'Update-Local.ps1'
+
+# Exercise the production state merge and Auto's actual staleness expression
+# without building binaries: Service B must not hide an outstanding Panel B.
+$stateTokens=$null; $stateErrors=$null
+$stateAst=[Management.Automation.Language.Parser]::ParseFile($taskUpdateLocal,[ref]$stateTokens,[ref]$stateErrors)
+$stateFunction=$stateAst.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-CompletedBuildHashes'},$false)
+if (!$stateFunction) { throw 'Build state merge function not found' }
+. ([scriptblock]::Create($stateFunction.Extent.Text))
+& {
+    $taskHashes=[ordered]@{service='service-B';panel='panel-B';plugin='plugin-B';policy='policy-B'}
+    $old=[pscustomobject]@{service='service-A';panel='panel-A';plugin='plugin-A';policy='policy-A'}
+    $saved=Get-CompletedBuildHashes $taskHashes $old @('Service')
+    if ($saved.service -cne 'service-B' -or $saved.panel -cne 'panel-A' -or $saved.plugin -cne 'plugin-A' -or $saved.policy -cne 'policy-A') { throw 'Selective build marked unbuilt inputs complete' }
+    $taskPrevState=[pscustomobject]@{hashes=$saved}
+    $autoExpression=$stateAst.Find({param($node) $node -is [Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -eq '$taskPanelStale'},$true)
+    if (!$autoExpression) { throw 'Auto Panel staleness expression not found' }
+    . ([scriptblock]::Create($autoExpression.Extent.Text))
+    if (!$taskPanelStale) { throw 'Auto skipped Panel B after Service-only build' }
+    $saved=Get-CompletedBuildHashes $taskHashes $saved @('Panel','Plugin','Policy')
+    $taskPrevState=[pscustomobject]@{hashes=$saved}
+    . ([scriptblock]::Create($autoExpression.Extent.Text))
+    if ($taskPanelStale -or $saved.service -cne 'service-B') { throw 'Completed build did not settle Auto state' }
+    $empty=Get-CompletedBuildHashes $taskHashes $null @('Service')
+    if ($empty.panel) { throw 'Fresh selective build invented an unbuilt Panel hash' }
+}
+Write-Host 'PASS R09 selective Service build retains pending Panel changes; Auto detects them and completed Panel build settles state'
+if ($StateOnly) { $global:LASTEXITCODE=0; return }
 
 function Get-GuardianCacheInfo([string]$ProfileName) {
     $raw = & $taskBuildGuardian -Profile $ProfileName -PrintCacheKey

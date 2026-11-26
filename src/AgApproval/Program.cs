@@ -336,11 +336,26 @@ public static class Program
                 await Audit.AppendAsync(settings, new { at = DateTimeOffset.UtcNow, @event = "host_start", capabilities=Capabilities(settings,policy.NativeHash), policyHash = policy.NativeHash }, stop.Token);
                 while (!stop.IsCancellationRequested)
                 {
-                    var pipe = new NamedPipeServerStream(settings.PipeName, PipeDirection.InOut, 16, PipeTransmissionMode.Byte,
-                        PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
-                    try { await pipe.WaitForConnectionAsync(stop.Token); }
-                    catch (OperationCanceledException) { pipe.Dispose(); break; }
                     handlers.RemoveAll(t => t.IsCompleted);
+                    // The listener itself consumes one of the 16 Windows pipe instances.
+                    NamedPipeServerStream? pipe = null;
+                    try
+                    {
+                        if (handlers.Count >= 15) await Task.WhenAny(handlers).WaitAsync(stop.Token);
+                        handlers.RemoveAll(t => t.IsCompleted);
+                        pipe = new NamedPipeServerStream(settings.PipeName, PipeDirection.InOut, 16, PipeTransmissionMode.Byte,
+                            PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+                        await pipe.WaitForConnectionAsync(stop.Token);
+                    }
+                    catch (OperationCanceledException) { pipe?.Dispose(); break; }
+                    catch (IOException e)
+                    {
+                        pipe?.Dispose();
+                        Console.Error.WriteLine("Approval listener retry: " + e.Message);
+                        try { await Task.Delay(1000, stop.Token); }
+                        catch (OperationCanceledException) { break; }
+                        continue;
+                    }
                     handlers.Add(HandleAsync(pipe, settings, gate, stop,policy.NativeHash, configPath));
                 }
                 await Task.WhenAll(handlers);

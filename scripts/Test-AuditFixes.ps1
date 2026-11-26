@@ -80,6 +80,14 @@ try {
     Check-Audit ((Read-PortableJson (Join-Path $f.plugin 'approval.json')).dataDirectory -eq $f.data) 'F06 repair reset custom data'
     Check-Audit ((Read-PortableJson (Join-Path $f.data 'panel-settings.json')).dataDirectory -eq $f.data) 'F06 panel path reset'
     Check-Audit ((Test-Path -LiteralPath (Join-Path $f.data 'logs/history.jsonl')) -and (Test-Path -LiteralPath (Join-Path $f.data 'approval-takeover-paused'))) 'F06 history or pause state lost'
+    Remove-Item -LiteralPath (Join-Path $f.gemini 'config/projects/broken.json')
+    Invoke-AuditInstall $f -OmitData
+    Check-Audit (!(Test-Path -LiteralPath (Join-Path $f.gemini 'config/projects/broken.json'))) 'R03 repair recreated deleted project'
+    $repairManifest=Read-PortableJson (Join-Path $f.data 'installation.json')
+    Check-Audit (@($repairManifest.reviewModeChanges | Where-Object { $_.path -like '*broken.json' }).Count -eq 0) 'R03 deleted project retained as an active migration record'
+    try { Set-CodexReviewMode -ConfigRoot (Join-Path $f.gemini 'config') -PreviousChanges @(@{path=(Join-Path $f.root 'outside.json')}) -ValidateOnly; throw 'Expected outside-path rejection' }
+    catch { if ($_.Exception.Message -notlike '*outside the native configuration files*') { throw } }
+    Write-Host 'PASS R03 deleted historical project permits repair, remains absent, and outside paths remain rejected'
     & (Join-Path $auditScripts 'Uninstall.ps1') -DataDirectory $f.data|Out-Null
     Check-Audit ((Read-PortableJson $f.config).userSettings.permissionPreset -eq 'AGENT_PERMISSION_PRESET_REQUEST_REVIEW') 'Uninstall after retry lost first-install mode'
     Check-Audit (!(Read-PortableJson $f.config).sidecars.ContainsKey('gravity-guardian/reviewer')) 'Uninstall after retry lost initial sidecar state'
@@ -155,6 +163,45 @@ try {
         Disconnect-Portable $layout|Out-Null
         Check-Audit ((Read-PortableJson $f.config).userSettings.permissionPreset -eq 'AGENT_PERMISSION_PRESET_AUTO') 'D02 retry lost the disconnect restoration baseline'
         Write-Host 'PASS D02 portable connection failure restores this attempt, preserves later edits and retains disconnect recovery'
+    }
+
+    & {
+        $f=New-AuditFixture 'lite-recovery'
+        $registration=$f.plugin
+        $systemRuntime=Join-Path $f.root 'system-dotnet.exe'
+        [IO.File]::WriteAllText($systemRuntime,'inert runtime')
+        Write-PortableJson (Join-Path $registration 'plugin.json') @{name='gravity-guardian'}
+        Write-PortableJson (Join-Path $registration 'distribution.json') @{type='lite'}
+        Write-PortableJson (Join-Path $registration 'approval.json') @{dataDirectory=$f.data}
+        Write-PortableJson (Join-Path $registration 'sidecars/reviewer/sidecar.json') @{command=$systemRuntime}
+        $portableRoot=Join-Path $f.root 'portable'
+        New-Item -ItemType Directory -Path $portableRoot -Force | Out-Null
+        Copy-Item -LiteralPath $f.bundle -Destination (Join-Path $portableRoot 'app') -Recurse
+        $layout=@{root=$portableRoot;app=(Join-Path $portableRoot 'app');data=(Join-Path $portableRoot 'data');config=(Join-Path $portableRoot 'config/approval.json');manifest=(Join-Path $portableRoot 'data/installation.json')}
+        Write-PortableJson (Join-Path $layout.app 'native/SOURCE.json') @{binarySha256=(Get-FileHash -LiteralPath (Join-Path $layout.app 'native/ag-guardian-host.exe')).Hash}
+        function Stop-PortableService($Layout) {}
+        function Set-CodexReviewMode { throw 'injected Lite migration failure' }
+        $recoveryShouldFail=$false
+        $recoveryStarts=[Collections.Generic.List[string]]::new()
+        function Start-Process {
+            param($FilePath,$ArgumentList,$WorkingDirectory,$WindowStyle,$RedirectStandardOutput,$RedirectStandardError,[switch]$PassThru)
+            $recoveryStarts.Add($FilePath)
+            Check-Audit ($FilePath -eq $systemRuntime -and $RedirectStandardOutput.StartsWith((Join-Path $f.data 'service'))) 'R04 recovery used wrong runtime or log directory'
+            if ($recoveryShouldFail) { throw 'injected recovery startup failure' }
+            $process=[pscustomobject]@{ExitCode=0}
+            $process | Add-Member ScriptMethod WaitForExit { param($Milliseconds) return $true }
+            $process | Add-Member ScriptMethod Dispose {}
+            return $process
+        }
+        foreach ($recoveryShouldFail in @($false,$true)) {
+            try { Connect-Portable $layout $f.gemini $env:ComSpec @{NoStart=$true} | Out-Null; throw 'Expected Lite migration failure' }
+            catch {
+                Check-Audit ($_.Exception.Message -like '*injected Lite migration failure*') 'R04 lost original failure'
+                if ($recoveryShouldFail) { Check-Audit ($_.Exception.Message -like '*Previous service recovery failed*injected recovery startup failure*') 'R04 swallowed recovery failure' }
+            }
+        }
+        Check-Audit ($recoveryStarts.Count -eq 2 -and (Read-PortableJson (Join-Path $registration 'distribution.json')).type -eq 'lite') 'R04 did not restore Lite registration and start its runtime'
+        Write-Host 'PASS R04 failed Lite migration restores system runtime and original data logs; recovery errors remain visible'
     }
 
     $f=New-AuditFixture 'interrupted'

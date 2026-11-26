@@ -609,6 +609,44 @@ void LoadPanelPreferences(PanelConfig& cfg) {
     if (cfg.portableRoot.empty()) cfg.autostart = doc.GetBool("autostart", false);
 }
 
+bool SamePanelPath(const std::wstring& left, const std::wstring& right) {
+    auto full = [](const std::wstring& path) {
+        wchar_t buffer[MAX_PATH * 2]{};
+        const DWORD length = GetFullPathNameW(path.c_str(), static_cast<DWORD>(std::size(buffer)), buffer, nullptr);
+        if (path.empty() || length == 0 || length >= std::size(buffer)) return std::wstring{};
+        std::wstring value(buffer, length);
+        std::replace(value.begin(), value.end(), L'/', L'\\');
+        while (value.size() > 3 && value.back() == L'\\') value.pop_back();
+        return value;
+    };
+    const auto a = full(left), b = full(right);
+    return !a.empty() && !b.empty() && _wcsicmp(a.c_str(), b.c_str()) == 0;
+}
+
+void RestoreInstalledPanelPaths(PanelConfig& cfg, const std::wstring& exeDir,
+                                bool explicitPlugin, bool explicitData, bool explicitGemini) {
+    if (!cfg.portableRoot.empty()) return;
+    // An installed panel can locate its own custom Gemini root. Extracted bundles
+    // have no installation approval.json and cannot replace this identity check.
+    std::vector<std::wstring> candidates;
+    if (!explicitPlugin && !explicitGemini) candidates.push_back(GetDirectoryName(exeDir));
+    candidates.push_back(cfg.pluginDirectory);
+    for (const auto& plugin : candidates) {
+        std::string raw;
+        JsonValue identity, approval;
+        if (!ReadFileUtf8(JoinPath(plugin, L"plugin.json"), raw) || !JsonValue::Parse(raw, identity) ||
+            identity.GetWide("name") != L"gravity-guardian" ||
+            !ReadFileUtf8(JoinPath(plugin, L"approval.json"), raw) || !JsonValue::Parse(raw, approval)) continue;
+        const auto configRoot = approval.GetWide("antigravityConfigDirectory");
+        if (configRoot.empty() || !SamePanelPath(plugin, JoinPath(configRoot, L"plugins\\gravity-guardian"))) continue;
+        if (explicitGemini && !SamePanelPath(configRoot, JoinPath(cfg.geminiRoot, L"config"))) continue;
+        cfg.pluginDirectory = plugin;
+        if (!explicitGemini) cfg.geminiRoot = GetDirectoryName(configRoot);
+        if (!explicitData) cfg.dataDirectory = approval.GetWide("dataDirectory", JoinPath(cfg.geminiRoot, L"gravity-guardian-data"));
+        return;
+    }
+}
+
 void InitPathsAndConfig(const std::wstring& optPlugin, const std::wstring& optData, const std::wstring& optGemini) {
     std::wstring exeDir = GetDirectoryName(GetExecutablePath());
     std::wstring parentDir = GetDirectoryName(exeDir);
@@ -671,6 +709,8 @@ void InitPathsAndConfig(const std::wstring& optPlugin, const std::wstring& optDa
             cfg.geminiRoot = installed.GetWide("geminiRoot", cfg.geminiRoot);
         }
     }
+
+    RestoreInstalledPanelPaths(cfg, exeDir, !optPlugin.empty(), !optData.empty(), !optGemini.empty());
 
     // Either distribution may be installed or opened as a portable panel.
     std::wstring nestedBundle = JoinPath(exeDir, L"artifacts\\gravity-guardian");
@@ -2580,7 +2620,27 @@ void ShowStatsPeriodMenu(HWND hwnd) {
     SyncStatsToUi();
 }
 
+UINT TaskbarCreatedMessage() {
+    static const UINT message = RegisterWindowMessageW(L"TaskbarCreated");
+    return message;
+}
+
+void AddTrayIcon(HWND hwnd) {
+    g_app.nid.cbSize = sizeof(g_app.nid);
+    g_app.nid.hWnd = hwnd;
+    g_app.nid.uID = IDI_APP_ICON;
+    g_app.nid.uCallbackMessage = WM_APP_TRAY;
+    g_app.nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+    g_app.trayAdded = Shell_NotifyIconW(NIM_ADD, &g_app.nid) == TRUE;
+}
+
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    if (TaskbarCreatedMessage() != 0 && msg == TaskbarCreatedMessage()) {
+        g_app.trayAdded = false;
+        UpdateTrayAppearance();
+        AddTrayIcon(hwnd);
+        return 0;
+    }
     switch (msg) {
     case WM_CREATE: {
         g_app.hwnd = hwnd;
@@ -2591,14 +2651,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
         CreateChildControls(hwnd);
 
-        g_app.nid.cbSize = sizeof(g_app.nid);
-        g_app.nid.hWnd = hwnd;
-        g_app.nid.uID = IDI_APP_ICON;
-        g_app.nid.uCallbackMessage = WM_APP_TRAY;
         g_app.nid.hIcon = g_app.iconGray;
-        g_app.nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
         wcsncpy_s(g_app.nid.szTip, L"Gravity Guardian", _TRUNCATE);
-        g_app.trayAdded = Shell_NotifyIconW(NIM_ADD, &g_app.nid) == TRUE;
+        AddTrayIcon(hwnd);
 
         SyncControlsToUi();
         SetTimer(hwnd, ID_TIMER_REFRESH, 30000, nullptr);

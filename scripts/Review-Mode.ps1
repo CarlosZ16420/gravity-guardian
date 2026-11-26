@@ -47,7 +47,7 @@ function Get-CodexNativeSettings {
     }
 }
 
-function Assert-CodexModePath([string]$ConfigRoot,[string]$Path) {
+function Assert-CodexModePath([string]$ConfigRoot,[string]$Path,[switch]$AllowMissingProject) {
     $taskBase=[IO.Path]::GetFullPath($ConfigRoot)
     $taskFull=[IO.Path]::GetFullPath($Path)
     $taskGlobal=Join-Path $taskBase 'config.json'
@@ -55,13 +55,15 @@ function Assert-CodexModePath([string]$ConfigRoot,[string]$Path) {
     if($taskFull -ne $taskGlobal -and ((Split-Path $taskFull -Parent) -ne $taskProjects -or [IO.Path]::GetExtension($taskFull) -ne '.json')) {
         throw 'Review-mode path is outside the native configuration files'
     }
+    if($AllowMissingProject -and $taskFull -ne $taskGlobal -and !(Test-Path -LiteralPath $taskFull)){return}
     if((Get-Item -LiteralPath $taskFull).Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'Review-mode configuration is a reparse point'}
 }
 
 function Set-CodexReviewMode([string]$ConfigRoot,[string]$BackupDirectory,[object[]]$PreviousChanges=@(),[switch]$ValidateOnly) {
     $taskChanges=@{}
     foreach($taskChange in $PreviousChanges){
-        Assert-CodexModePath $ConfigRoot $taskChange.path
+        Assert-CodexModePath $ConfigRoot $taskChange.path -AllowMissingProject
+        if(!(Test-Path -LiteralPath $taskChange.path)){continue}
         $taskChanges[$taskChange.path]=$taskChange
     }
     $taskCandidates=@(@{path=(Join-Path $ConfigRoot 'config.json');section='userSettings';global=$true})

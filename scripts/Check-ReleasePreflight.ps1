@@ -31,6 +31,8 @@ foreach ($file in @('plugin/plugin.json','plugin/hooks.json','plugin/update-conf
 & (Join-Path $PSScriptRoot 'Test-ReleasePrivacy.ps1')
 & (Join-Path $PSScriptRoot 'Test-ReleaseWorkflow.ps1')
 & (Join-Path $PSScriptRoot 'Test-PortableServiceStop.ps1')
+& (Join-Path $PSScriptRoot 'Test-InstallRollback.ps1')
+& (Join-Path $PSScriptRoot 'Test-LocalBuild.ps1') -StateOnly
 Write-Host 'PASS preflight versions, release notes, source privacy, PowerShell/JavaScript syntax and JSON'
 if ($RunServiceTests) {
     $taskParent=Split-Path $taskRoot -Parent

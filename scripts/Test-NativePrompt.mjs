@@ -105,17 +105,22 @@ const server = createServer(async (req, res) => {
         requests.push(frame);
         const index = requests.length;
         const outcome = ['allow', 'deny'][(index - 1) % 2];
-        assert.ok(index <= 2 * repetitions + 2, 'unexpected extra inference');
+        assert.ok(index <= 2 * repetitions + 6, 'unexpected extra inference');
         if (index <= 2 || index >= 2 * repetitions + 1) {
             writeFileSync(join(output, 'model-request-' + index + '.json'), JSON.stringify(frame, null, 2));
         }
         const id = 'fixture-' + index;
+        const usageProbeIndex = index - (2 * repetitions + 3);
+        const probeInputs = [100000, null, 100000, 196000];
+        const inputTokens = usageProbeIndex >= 0 ? probeInputs[usageProbeIndex] : 40000;
+        const completed = {id};
+        if (inputTokens !== null) completed.usage = {input_tokens: inputTokens, input_tokens_details: null,
+            output_tokens: 8, output_tokens_details: null, total_tokens: inputTokens + 8};
         const events = [
             {type: 'response.created', response: {id}},
             {type: 'response.output_item.done', item: {type: 'message', role: 'assistant', id: 'msg-' + index,
                 content: [{type: 'output_text', text: JSON.stringify({outcome})}]}},
-            {type: 'response.completed', response: {id, usage: {input_tokens: 40000, input_tokens_details: null,
-                output_tokens: 8, output_tokens_details: null, total_tokens: 40008}}},
+            {type: 'response.completed', response: completed},
         ];
         res.writeHead(200, {'content-type': 'text/event-stream'});
         res.end(events.map(event => 'data: ' + JSON.stringify(event) + '\n\n').join(''));
@@ -207,7 +212,7 @@ try {
     const [status] = await once(child, 'exit');
     await drain;
     assert.equal(status, 0, 'native round trip failed');
-    assert.equal(requests.length, 2 * repetitions + 2);
+    assert.equal(requests.length, 2 * repetitions + 6);
     assert.equal(latency.length, requests.length);
     const factsPrefix = 'Host-observed Antigravity facts for the current action, not user authorization: ';
     const authPrefix = 'Antigravity authorization evidence (current request):\n';
@@ -227,8 +232,8 @@ try {
             .filter(part => part.text?.startsWith(factsPrefix));
         assert.equal(facts.length, 1, 'expected exactly one copy of current host facts');
     }
-    const trunkTurn1 = requests[requests.length - 2];
-    const trunkTurn2 = requests[requests.length - 1];
+    const trunkTurn1 = requests[2 * repetitions];
+    const trunkTurn2 = requests[2 * repetitions + 1];
     assert.equal(trunkTurn1.prompt_cache_key, trunkTurn2.prompt_cache_key, 'TrunkReused must preserve prompt_cache_key');
     const isCacheBreakpointCandidate = item =>
         item.role === 'user' || item.type === 'function_call_output' || item.type === 'custom_tool_call_output';
@@ -265,6 +270,7 @@ try {
         fullActionMatched: true, authorizationOrderMatched: true, simulatedVerdicts: ['allow', 'deny'],
         authorizationSourceCount: instructions.length, projectScopesMatched: true, oversizedAuthorizationRejectedBeforeInference: true,
         trunkReusedVerified: true, cachePrefixBreakpointVerified: true, oversizedActionAttributedCorrectly: true,
+        missingUsagePreservesGrowthBaseline: true,
         profile: isDev ? 'Debug' : 'Release', buildOptions: profile,
         testExecutableCacheHit:cacheHit, testBuildMs:buildMs, testTargetOptLevel:'0', testTargetLto:profile.LTO,
         releaseOptions: profile, reviewP50Ms: percentile(0.50), reviewP95Ms: percentile(0.95),
