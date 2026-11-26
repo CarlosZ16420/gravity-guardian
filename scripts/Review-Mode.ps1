@@ -6,23 +6,29 @@ function ConvertTo-HashtableDeep($InputObject) {
         foreach ($key in $InputObject.Keys) { $table[$key] = ConvertTo-HashtableDeep $InputObject[$key] }
         return $table
     }
-    if ($InputObject -is [PSCustomObject]) {
-        $table = @{}
-        foreach ($prop in $InputObject.PSObject.Properties) { $table[$prop.Name] = ConvertTo-HashtableDeep $prop.Value }
-        return $table
-    }
     if ($InputObject -is [Collections.IEnumerable] -and $InputObject -isnot [string]) {
         $items = [Collections.Generic.List[object]]::new()
         foreach ($element in $InputObject) { $items.Add((ConvertTo-HashtableDeep $element)) }
         return , $items.ToArray()
+    }
+    if ($InputObject -is [PSCustomObject]) {
+        $table = @{}
+        foreach ($prop in $InputObject.PSObject.Properties) { $table[$prop.Name] = ConvertTo-HashtableDeep $prop.Value }
+        return $table
     }
     return $InputObject
 }
 
 function ConvertFrom-JsonHashtable([Parameter(Mandatory,ValueFromPipeline)][string]$Json) {
     process {
-        if ($PSVersionTable.PSVersion.Major -ge 7) { return ($Json | Microsoft.PowerShell.Utility\ConvertFrom-Json -AsHashtable) }
-        return (ConvertTo-HashtableDeep ($Json | Microsoft.PowerShell.Utility\ConvertFrom-Json))
+        if ($PSVersionTable.PSVersion.Major -ge 7) {
+            return , (Microsoft.PowerShell.Utility\ConvertFrom-Json -InputObject $Json -AsHashtable -NoEnumerate -ErrorAction Stop)
+        }
+        # Validate the original JSON first; wrapping must not accept extra root values.
+        $null = Microsoft.PowerShell.Utility\ConvertFrom-Json -InputObject $Json -ErrorAction Stop
+        # WinPS 5.1 enumerates root arrays. A property preserves even [] and [null].
+        $wrapper = Microsoft.PowerShell.Utility\ConvertFrom-Json -InputObject ('{"value":' + $Json + '}') -ErrorAction Stop
+        return , (ConvertTo-HashtableDeep $wrapper.value)
     }
 }
 
@@ -59,10 +65,33 @@ function Assert-CodexModePath([string]$ConfigRoot,[string]$Path,[switch]$AllowMi
     if((Get-Item -LiteralPath $taskFull).Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'Review-mode configuration is a reparse point'}
 }
 
+function Assert-CodexReviewModeChange([string]$ConfigRoot,$Change) {
+    if ($Change -isnot [Collections.IDictionary] -or $Change.path -isnot [string] -or [string]::IsNullOrWhiteSpace($Change.path)) {
+        throw 'Invalid review-mode change record: expected a path and permission snapshot'
+    }
+    Assert-CodexModePath $ConfigRoot $Change.path -AllowMissingProject
+    $globalPath=Join-Path ([IO.Path]::GetFullPath($ConfigRoot)) 'config.json'
+    $section=if ([IO.Path]::GetFullPath($Change.path) -eq $globalPath) { 'userSettings' } else { 'settings' }
+    if ($Change.section -cne $section -or $Change.original -isnot [Collections.IDictionary] -or $Change.installed -isnot [Collections.IDictionary]) {
+        throw 'Invalid review-mode change record: expected section, original and installed snapshots'
+    }
+    $desired=Get-CodexNativeSettings
+    if ($Change.original.Count -ne $desired.Count -or $Change.installed.Count -ne $desired.Count) {
+        throw 'Invalid review-mode change record: incomplete permission snapshot'
+    }
+    foreach ($key in $desired.Keys) {
+        $prior=$Change.original[$key]
+        if (!$Change.installed.Contains($key) -or $Change.installed[$key] -cne $desired[$key] -or
+            $prior -isnot [Collections.IDictionary] -or !$prior.Contains('value') -or $prior.present -isnot [bool]) {
+            throw 'Invalid review-mode change record: malformed permission snapshot'
+        }
+    }
+}
+
 function Set-CodexReviewMode([string]$ConfigRoot,[string]$BackupDirectory,[object[]]$PreviousChanges=@(),[switch]$ValidateOnly) {
     $taskChanges=@{}
     foreach($taskChange in $PreviousChanges){
-        Assert-CodexModePath $ConfigRoot $taskChange.path -AllowMissingProject
+        Assert-CodexReviewModeChange $ConfigRoot $taskChange
         if(!(Test-Path -LiteralPath $taskChange.path)){continue}
         $taskChanges[$taskChange.path]=$taskChange
     }
@@ -122,6 +151,8 @@ function Set-CodexReviewMode([string]$ConfigRoot,[string]$BackupDirectory,[objec
 }
 
 function Restore-CodexReviewMode([string]$ConfigRoot,[object[]]$Changes=@()) {
+    # Validate the complete journal before restoring any file.
+    foreach($taskChange in $Changes){Assert-CodexReviewModeChange $ConfigRoot $taskChange}
     foreach($taskChange in $Changes){
         if(!(Test-Path -LiteralPath $taskChange.path)){continue}
         Assert-CodexModePath $ConfigRoot $taskChange.path

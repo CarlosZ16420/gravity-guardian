@@ -2,7 +2,7 @@
   "$schema": "https://antigravity.google/schemas/v1/plugin.json",
   "name": "gravity-guardian",
   "displayName": "Gravity Guardian",
-  "version": "0.6.7",
+  "version": "0.6.8",
   "license": "Apache-2.0",
   "description": "Review Antigravity tool requests with Codex Guardian while retaining native permission rules.",
   "keywords": ["approval", "codex", "permissions", "antigravity"]

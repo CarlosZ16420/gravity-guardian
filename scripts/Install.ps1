@@ -356,8 +356,12 @@ Remove-Item -LiteralPath $taskIncomplete -Force
         if ($taskPluginCommitted -and !$NoStart) {
             Stop-PortableService @{app=$taskPlugin;config=$taskReviewConfig;data=$taskData}
         }
-        $taskRollbackJournal = Read-PortableJson (Join-Path $taskBackup 'review-mode/rollback.json')
-        if ($taskRollbackJournal) { Restore-CodexReviewMode -ConfigRoot $taskConfigRoot -Changes @($taskRollbackJournal) }
+        $taskRollbackJournalPath = Join-Path $taskBackup 'review-mode/rollback.json'
+        if (Test-Path -LiteralPath $taskRollbackJournalPath -PathType Leaf) {
+            $taskRollbackJournal = Read-PortableJson $taskRollbackJournalPath
+            if ($taskRollbackJournal -isnot [array]) { throw 'Invalid review-mode rollback journal: expected an array' }
+            Restore-CodexReviewMode -ConfigRoot $taskConfigRoot -Changes $taskRollbackJournal
+        }
         $taskCurrentApp = Read-PortableJson $taskAppConfig
         if ($taskSidecarCommitted -and $taskCurrentApp.sidecars -and $taskCurrentApp.sidecars[$taskSidecarId].Count -eq 1 -and $taskCurrentApp.sidecars[$taskSidecarId].enabled -eq $true) { Set-PortableSidecar $taskConfigRoot $taskOldSidecar }
         if (($taskPluginCommitted -or $taskCopyStarted) -and (Test-Path -LiteralPath $taskPlugin)) {

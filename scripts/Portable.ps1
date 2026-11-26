@@ -27,7 +27,7 @@ function Write-PortableJson([string]$Path, $Value) {
 }
 
 function Read-PortableJson([string]$Path) {
-    if (Test-Path -LiteralPath $Path -PathType Leaf) { return (Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-JsonHashtable) }
+    if (Test-Path -LiteralPath $Path -PathType Leaf) { return , (Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-JsonHashtable) }
     return $null
 }
 
@@ -291,8 +291,12 @@ function Connect-Portable($Layout, [string]$GeminiRoot, [string]$AntigravityPath
         $failure = $_
         if ($registrationChanged) {
             try { Stop-PortableService $Layout; Clear-DelegatedProtectedGrants -ConfigRoot $configRoot -DataDirectory $Layout.data } catch {}
-            $journal = Read-PortableJson (Join-Path $backup 'review-mode/rollback.json')
-            if ($journal) { Restore-CodexReviewMode -ConfigRoot $configRoot -Changes @($journal) }
+            $journalPath = Join-Path $backup 'review-mode/rollback.json'
+            if (Test-Path -LiteralPath $journalPath -PathType Leaf) {
+                $journal = Read-PortableJson $journalPath
+                if ($journal -isnot [array]) { throw 'Invalid review-mode rollback journal: expected an array' }
+                Restore-CodexReviewMode -ConfigRoot $configRoot -Changes $journal
+            }
             Set-PortableSidecar $configRoot $oldSidecar
             Assert-PortablePath $registration
             if (Test-Path -LiteralPath $registration) { Remove-Item -LiteralPath $registration -Recurse -Force }
