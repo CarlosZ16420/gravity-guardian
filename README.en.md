@@ -18,7 +18,7 @@ Bundled Codex Native Guardian, review feedback, and usage statistics.
 
 Guardian reviews Antigravity tool requests using your instructions and project rules. Antigravity executes actions and retains its native permission constraints. **No separate Codex CLI installation is needed to run the plugin.**
 
-[![Approval overview and preferences with synthetic usage and status; the UI is in Simplified Chinese](assets/readme/panel-showcase.zh-CN.png)](assets/readme/panel-showcase.zh-CN.png)
+[![Approval overview with synthetic usage and status; the UI is in Simplified Chinese](assets/readme/panel-showcase.zh-CN.png)](assets/readme/panel-showcase.zh-CN.png)
 
 > This guide and the screenshots describe the **0.6.6 source**. Available downloads are listed in [Releases](https://github.com/CarlosZ16420/gravity-guardian/releases/latest); follow the matching release instructions for older versions. Screenshots use synthetic data and status.
 

@@ -20,7 +20,7 @@ Windows 上的 Antigravity 工具审批助手。<br>
 
 Antigravity 发起工具请求，Guardian 结合用户指令与项目规则进行审核，再由 Antigravity 执行并保留原生权限约束。**插件运行无需额外安装 Codex CLI。**
 
-[![审批总览与偏好设置：接管开关、用量、缓存命中率和估算费用，数据为演示值](assets/readme/panel-showcase.zh-CN.png)](assets/readme/panel-showcase.zh-CN.png)
+[![审批总览：接管开关、用量、缓存命中率和估算费用，数据为演示值](assets/readme/panel-showcase.zh-CN.png)](assets/readme/panel-showcase.zh-CN.png)
 
 > 本文与截图对应 **0.6.6 源码**，截图使用虚构统计与状态。可下载版本以 [Releases](https://github.com/CarlosZ16420/gravity-guardian/releases/latest) 为准；旧版请按对应发行说明安装。
 
