@@ -53,15 +53,19 @@ fn record_review_input(
     base_input: &mut Option<i64>,
     last_input: &mut i64,
     usage_input: Option<i64>,
+    attempts: Option<i64>,
     dispatches: Option<i64>,
 ) {
+    // Usage covers the final attempt, but dispatches covers the whole review.
+    // Only a single attempt with a single dispatch is an unambiguous sample.
+    if attempts != Some(1) || dispatches != Some(1) {
+        return;
+    }
     let Some(input) = usage_input.filter(|&value| value >= 0) else {
         return;
     };
-    let count = dispatches.unwrap_or(1).max(1);
-    let per_call = input / count;
-    *last_input = per_call;
-    *base_input = Some(base_input.map_or(per_call, |base| base.min(per_call)));
+    *last_input = input;
+    *base_input = Some(base_input.map_or(input, |base| base.min(input)));
 }
 struct NoUserInstructions;
 impl UserInstructionsProvider for NoUserInstructions {
@@ -360,6 +364,7 @@ async fn serve(config: Config, auth: Arc<AuthManager>, manager: Arc<ThreadManage
                 &mut parent.base_input,
                 &mut parent.last_input,
                 result["usage"]["input_tokens"].as_i64(),
+                result["attemptCount"].as_i64(),
                 result["inferenceDispatchCount"].as_i64(),
             );
             Ok::<_, anyhow::Error>(json!({"id":request.id,"ok":true,"result":result,"sessionReason":reset}))
@@ -415,22 +420,47 @@ mod tests {
         assert!(needs_checkpoint(64, Some(1_000), 1_000));
         assert!(needs_checkpoint(1, Some(150_000), 246_000));
     }
-    #[test] fn record_review_input_normalizes_dispatches_and_lowers_baseline() {
+    #[test] fn record_review_input_preserves_single_dispatch_growth() {
         let mut base = None;
         let mut last = 0;
-        record_review_input(&mut base, &mut last, Some(150_000), Some(1));
+        record_review_input(&mut base, &mut last, Some(150_000), Some(1), Some(1));
         assert_eq!((base, last), (Some(150_000), 150_000));
         assert!(!needs_checkpoint(1, base, last));
 
-        record_review_input(&mut base, &mut last, Some(60_000), Some(1));
+        record_review_input(&mut base, &mut last, Some(60_000), Some(1), Some(1));
         assert_eq!((base, last), (Some(60_000), 60_000));
-
-        record_review_input(&mut base, &mut last, Some(396_000), Some(3));
-        assert_eq!((base, last), (Some(60_000), 132_000));
+        record_review_input(&mut base, &mut last, Some(155_999), Some(1), Some(1));
         assert!(!needs_checkpoint(3, base, last));
-
-        record_review_input(&mut base, &mut last, None, Some(1));
-        assert_eq!((base, last), (Some(60_000), 132_000));
+        record_review_input(&mut base, &mut last, Some(156_000), Some(1), Some(1));
+        assert!(needs_checkpoint(4, base, last));
+        assert!(needs_checkpoint(64, None, 0));
+    }
+    #[test] fn retry_dispatches_do_not_create_false_input_growth() {
+        let mut base = None;
+        let mut last = 0;
+        record_review_input(&mut base, &mut last, Some(200_000), Some(1), Some(1));
+        // Both attempts sampled 200k, but only the final attempt's usage returns.
+        record_review_input(&mut base, &mut last, Some(200_000), Some(2), Some(2));
+        assert_eq!((base, last), (Some(200_000), 200_000));
+        record_review_input(&mut base, &mut last, Some(200_000), Some(1), Some(1));
+        assert!(!needs_checkpoint(3, base, last));
+    }
+    #[test] fn ambiguous_or_missing_samples_preserve_growth_state() {
+        for initial in [(None, 0), (Some(200_000), 200_000), (Some(1_000), 97_000)] {
+            let (mut base, mut last) = initial;
+            for (attempts, dispatches) in [
+                (Some(1), Some(2)), (Some(2), Some(1)), (Some(3), Some(3)),
+                (None, Some(1)), (Some(1), None), (Some(0), Some(1)), (Some(1), Some(0)),
+                (Some(-1), Some(1)), (Some(1), Some(-1)),
+            ] {
+                record_review_input(&mut base, &mut last, Some(50_000), attempts, dispatches);
+                assert_eq!((base, last), initial);
+            }
+            for input in [None, Some(-1)] {
+                record_review_input(&mut base, &mut last, input, Some(1), Some(1));
+                assert_eq!((base, last), initial);
+            }
+        }
     }
     #[test] fn wire_validation_admits_large_actions_to_elastic_budgeting() {
         let mut value=request();
