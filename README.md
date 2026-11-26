@@ -8,7 +8,7 @@
 Windows 上的 Antigravity 工具审批助手。<br>
 内置 Codex Native Guardian，审核请求、反馈原因、统计用量。
 
-![Source version](https://img.shields.io/badge/source-0.6.6-0071e3?style=flat-square)
+![Source version](https://img.shields.io/badge/source-0.6.7-0071e3?style=flat-square)
 ![Windows x64](https://img.shields.io/badge/Windows-x64-172a47?style=flat-square)
 ![Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-26735d?style=flat-square)
 
@@ -22,7 +22,7 @@ Antigravity 发起工具请求，Guardian 结合用户指令与项目规则进�
 
 [![审批总览：接管开关、用量、缓存命中率和估算费用，数据为演示值](assets/readme/panel-showcase.zh-CN.png)](assets/readme/panel-showcase.zh-CN.png)
 
-> 本文与截图对应 **0.6.6 源码**，截图使用虚构统计与状态。可下载版本以 [Releases](https://github.com/CarlosZ16420/gravity-guardian/releases/latest) 为准；旧版请按对应发行说明安装。
+> 本文与截图对应 **0.6.7 源码**，截图使用虚构统计与状态。可下载版本以 [Releases](https://github.com/CarlosZ16420/gravity-guardian/releases/latest) 为准；旧版请按对应发行说明安装。
 
 ## 快速开始
 
@@ -30,7 +30,7 @@ Antigravity 发起工具请求，Guardian 结合用户指令与项目规则进�
 2. 下载发行 ZIP，**完整解压到可写文件夹**。退出 Antigravity，打开 `GravityGuardian.exe`。
 3. Portable 点击 **「连接 / 修复连接」**；Standalone / Lite 点击 **「安装 / 修复插件」**。完成后重新打开 Antigravity。
 
-0.6.6 提供三种包型，使用相同的审核内核：
+0.6.7 提供三种包型，使用相同的审核内核：
 
 | 包型 | 如何选择 |
 | --- | --- |

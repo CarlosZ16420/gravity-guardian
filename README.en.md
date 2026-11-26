@@ -8,7 +8,7 @@
 Tool approvals for Antigravity on Windows.<br>
 Bundled Codex Native Guardian, review feedback, and usage statistics.
 
-![Source version](https://img.shields.io/badge/source-0.6.6-0071e3?style=flat-square)
+![Source version](https://img.shields.io/badge/source-0.6.7-0071e3?style=flat-square)
 ![Windows x64](https://img.shields.io/badge/Windows-x64-172a47?style=flat-square)
 ![Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-26735d?style=flat-square)
 
@@ -20,7 +20,7 @@ Guardian reviews Antigravity tool requests using your instructions and project r
 
 [![Approval overview with synthetic usage and status; the UI is in Simplified Chinese](assets/readme/panel-showcase.zh-CN.png)](assets/readme/panel-showcase.zh-CN.png)
 
-> This guide and the screenshots describe the **0.6.6 source**. Available downloads are listed in [Releases](https://github.com/CarlosZ16420/gravity-guardian/releases/latest); follow the matching release instructions for older versions. Screenshots use synthetic data and status.
+> This guide and the screenshots describe the **0.6.7 source**. Available downloads are listed in [Releases](https://github.com/CarlosZ16420/gravity-guardian/releases/latest); follow the matching release instructions for older versions. Screenshots use synthetic data and status.
 
 ## Quick start
 
@@ -28,7 +28,7 @@ Guardian reviews Antigravity tool requests using your instructions and project r
 2. Download a release ZIP and **fully extract it to a writable folder**. Exit Antigravity, then open `GravityGuardian.exe`.
 3. In Portable, choose **「连接 / 修复连接」** (Connect / Repair). In Standalone or Lite, choose **「安装 / 修复插件」** (Install / Repair). Reopen Antigravity.
 
-The 0.6.6 source supports three editions with the same review engine:
+The 0.6.7 source supports three editions with the same review engine:
 
 | Edition | Runtime and data |
 | --- | --- |
