@@ -14,15 +14,6 @@ $taskForbiddenPatterns = @(
 
 $taskSelfPath = [IO.Path]::GetFullPath($MyInvocation.MyCommand.Path)
 
-function Test-IgnoredDirectory([string]$FullPath) {
-    $rel = $FullPath.Substring([IO.Path]::GetFullPath($taskRoot).Length).TrimStart('\', '/')
-    $parts = $rel -split '[\\/]'
-    foreach ($p in $parts) {
-        if ($taskIgnoreDirs -contains $p) { return $true }
-    }
-    return $false
-}
-
 # 1. Forbidden directories/files check
 foreach ($forbiddenDir in @('.research')) {
     $candidate = Join-Path $taskRoot $forbiddenDir
@@ -33,7 +24,18 @@ foreach ($forbiddenDir in @('.research')) {
 
 # 2. Check all files under public-edition (excluding generated/ignored dirs)
 $taskTextExts = @('.cs', '.cpp', '.h', '.rc', '.manifest', '.csproj', '.ps1', '.psm1', '.mjs', '.js', '.json', '.md', '.txt', '.yml', '.yaml', '.toml', '.rs', '.patch', '.xml', '.config')
-$taskFiles = Get-ChildItem -LiteralPath $taskRoot -Recurse -File -Force | Where-Object { !(Test-IgnoredDirectory $_.FullName) }
+$taskFiles = [Collections.Generic.List[IO.FileInfo]]::new()
+$taskDirectories = [Collections.Generic.Stack[string]]::new()
+$taskDirectories.Push($taskRoot)
+while ($taskDirectories.Count) {
+    foreach ($entry in Get-ChildItem -LiteralPath $taskDirectories.Pop() -Force) {
+        if (!$entry.PSIsContainer) { $taskFiles.Add($entry); continue }
+        # Do not walk gigabytes of generated caches just to discard them later.
+        if ($entry.Name -notin $taskIgnoreDirs -and !($entry.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            $taskDirectories.Push($entry.FullName)
+        }
+    }
+}
 
 foreach ($file in $taskFiles) {
     $full = [IO.Path]::GetFullPath($file.FullName)

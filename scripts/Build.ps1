@@ -58,7 +58,6 @@ try {
     $taskRuntime = Get-LockedDotnetRuntime
     & node (Join-Path $PSScriptRoot 'Prepare-Policy.mjs')
     if ($LASTEXITCODE -ne 0) { throw 'Policy preparation failed' }
-    & (Join-Path $PSScriptRoot 'Build-Guardian.ps1') -Profile Release -ReleaseTuning $GuardianTuning
     & $taskDotnet restore 'tests/AgApproval.Tests/AgApproval.Tests.csproj' --configfile (Join-Path $taskRoot 'NuGet.Config') --nologo
     if ($LASTEXITCODE -ne 0) { throw 'Offline dependency restore failed' }
     & $taskDotnet build 'src/AgApproval/AgApproval.csproj' -c Release --no-restore --nologo
@@ -83,6 +82,9 @@ try {
     if ((Get-Item -LiteralPath $taskPanelBinary).VersionInfo.ProductVersion -cne "$taskReleaseVersion.0") {
         throw 'Built panel product version differs from the release version'
     }
+
+    # Fail the inexpensive service/panel checks before starting heavy Rust work.
+    & (Join-Path $PSScriptRoot 'Build-Guardian.ps1') -Profile Release -ReleaseTuning $GuardianTuning
 
     $taskBundle = Join-Path $taskRoot ('.local/build-bundle/' + [Guid]::NewGuid().ToString('N') + '/gravity-guardian')
     New-Item -ItemType Directory -Path $taskBundle -Force | Out-Null

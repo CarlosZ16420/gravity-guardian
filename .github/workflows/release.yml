@@ -6,9 +6,18 @@ on:
   pull_request:
     branches: [ main ]
   workflow_dispatch:
+    inputs:
+      publish_release:
+        description: Publish the verified release (leave off to only build artifacts)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 
 jobs:
   windows-build-and-test:
@@ -31,55 +40,90 @@ jobs:
       - name: Setup Rust stable
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Run public hygiene check
+      - name: Fast preflight and service regression
         shell: pwsh
-        run: .\scripts\Check-PublicHygiene.ps1
+        run: .\scripts\Run-Release.ps1 -EvidenceDirectory .local/release-checks/ci -PreflightOnly
 
-      - name: Build and run automated tests
-        shell: pwsh
-        run: .\scripts\Build.ps1
-
-      - name: Run isolated installation regression
-        shell: pwsh
-        run: .\scripts\Test-Installation.ps1
-
-      - name: Verify native prompt, authorization, and cache prefix
-        shell: pwsh
-        run: node .\scripts\Test-NativePrompt.mjs .local\prompt-release --release
-
-      - name: Package release artifacts
-        shell: pwsh
-        run: .\scripts\Package.ps1
-
-      - name: Run offline update & rollback regression
-        shell: pwsh
-        run: .\scripts\Test-Update.ps1
-
-      - name: Verify both distributions and rollback
-        shell: pwsh
-        run: .\scripts\Test-Distributions.ps1
-
-      - name: Verify local portable workflows
+      # Source pushes and PRs stop after inexpensive checks.
+      - name: Compute compiler and native source cache key
+        if: github.event_name == 'workflow_dispatch'
+        id: native-key
         shell: pwsh
         run: |
-          $manifest = Get-Content artifacts/release-manifest.json -Raw | ConvertFrom-Json
-          .\scripts\Test-Portable.ps1 -PackageZip (Join-Path artifacts $manifest.distributions.portable.assetName)
+          $cache = .\scripts\Get-CiCacheKey.ps1
+          "key=$($cache.key)" >> $env:GITHUB_OUTPUT
+          "prefix=$($cache.restorePrefix)" >> $env:GITHUB_OUTPUT
 
-      - name: Verify installed workflows never launch Codex CLI
+      - name: Restore verified native builds and Cargo dependencies
+        if: github.event_name == 'workflow_dispatch'
+        id: native-cache
+        uses: actions/cache/restore@v4
+        with:
+          key: ${{ steps.native-key.outputs.key }}
+          restore-keys: ${{ steps.native-key.outputs.prefix }}
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/src
+            ~/.cargo/git/db
+            ~/.cargo/git/checkouts
+            .local/guardian-host-upstream-*
+            .local/guardian-v8-source
+            .local/rusty-v8-*.tar.gz
+            .local/native-release-target
+            .local/guardian-host-build
+            .local/native-prompt-build
+            .local/runtime-downloads
+
+      - name: Build and verify one release artifact set
+        if: github.event_name == 'workflow_dispatch'
+        id: release
         shell: pwsh
-        run: .\scripts\Test-NoCli.ps1 -OutputDirectory .local\no-cli-release
+        run: .\scripts\Run-Release.ps1 -EvidenceDirectory .local/release-checks/ci -Resume
 
-      - name: Upload acceptance evidence
+      - name: Check compiler cache checkpoint
+        if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' }}
+        id: cache-checkpoint
+        shell: pwsh
+        run: |
+          $state = Get-Content .local/release-checks/ci/release-state.json -Raw | ConvertFrom-Json
+          $passed = @($state.steps | Where-Object result -eq success).name
+          if ('Build' -in $passed -and 'Native prompt' -in $passed) { 'ready=true' >> $env:GITHUB_OUTPUT }
+
+      # Preserve successful native work even if a later distribution check fails.
+      # Only trusted main-branch dispatches write caches; credentials are excluded.
+      - name: Save native compiler cache
+        if: ${{ !cancelled() && steps.cache-checkpoint.outputs.ready == 'true' && steps.native-cache.outputs.cache-hit != 'true' && github.ref == 'refs/heads/main' }}
+        uses: actions/cache/save@v4
+        with:
+          key: ${{ steps.native-key.outputs.key }}
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/src
+            ~/.cargo/git/db
+            ~/.cargo/git/checkouts
+            .local/guardian-host-upstream-*
+            .local/guardian-v8-source
+            .local/rusty-v8-*.tar.gz
+            .local/native-release-target
+            .local/guardian-host-build
+            .local/native-prompt-build
+            .local/runtime-downloads
+
+      - name: Upload acceptance evidence and timings
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: gravity-guardian-acceptance
           path: |
-            .local/prompt-release/summary.json
-            .local/no-cli-release/summary.json
+            .local/release-checks/ci/release-state.json
+            .local/release-checks/ci/prompt-*/summary.json
+            .local/release-checks/ci/no-cli-*/summary.json
           if-no-files-found: ignore
 
-      - name: Upload build artifacts
+      - name: Upload verified build artifacts
+        if: ${{ success() && github.event_name == 'workflow_dispatch' }}
         uses: actions/upload-artifact@v4
         with:
           name: gravity-guardian-windows-x64
@@ -88,4 +132,34 @@ jobs:
             artifacts/release-manifest.json
             artifacts/release-build-info.json
             artifacts/checksums.sha256
+            artifacts/release-acceptance.json
           if-no-files-found: error
+
+      - name: Summarize validation time
+        if: always()
+        shell: pwsh
+        run: |
+          if (Test-Path .local/release-checks/ci/release-state.json) {
+            $state = Get-Content .local/release-checks/ci/release-state.json -Raw | ConvertFrom-Json
+            '| Stage | Seconds |' >> $env:GITHUB_STEP_SUMMARY
+            '| --- | ---: |' >> $env:GITHUB_STEP_SUMMARY
+            foreach ($stage in $state.steps) { "| $($stage.name) | $($stage.seconds) |" >> $env:GITHUB_STEP_SUMMARY }
+          }
+
+  publish:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_release }}
+    needs: windows-build-and-test
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: gravity-guardian-windows-x64
+          path: release-inputs
+      - name: Publish the same verified artifacts
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: .\scripts\Publish-Release.ps1 -Directory release-inputs -Repository '${{ github.repository }}' -Publish

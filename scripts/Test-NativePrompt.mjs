@@ -7,6 +7,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as zlib from 'node:zlib';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 let requestedProfile = null;
@@ -49,7 +50,8 @@ const workspaceHost = join(workspace, 'ag-guardian-host');
 if (!existsSync(join(workspace, 'Cargo.lock')) || !existsSync(join(workspaceHost, 'Cargo.toml'))) {
     throw new Error('Guardian Cargo workspace is not prepared. Run .\\scripts\\Build-Guardian.ps1 -SyncWorkspaceOnly first.');
 }
-for (const rel of ['Cargo.toml', 'src/main.rs', 'src/bootstrap.rs', 'src/offline_prompt_tests.rs']) {
+const hostFiles = ['Cargo.toml', 'src/main.rs', 'src/bootstrap.rs', 'src/offline_prompt_tests.rs', 'tests/acceptance.rs'];
+for (const rel of hostFiles) {
     const srcPath = join(hostSource, rel);
     const dstPath = join(workspaceHost, rel);
     const srcBuf = readFileSync(srcPath);
@@ -143,10 +145,57 @@ try {
     }
     for (const [key, value] of Object.entries(profile)) env[cargoProfilePrefix + key] = value;
     for (const name of ['OPENAI_API_KEY','CODEX_API_KEY','CODEX_ACCESS_TOKEN','CODEX_AUTH_TOKEN','HTTP_PROXY','HTTPS_PROXY','ALL_PROXY']) delete env[name];
-    const cargoArgs = ['+stable', 'test', '--offline', '--locked'];
-    if (!isDev) cargoArgs.push('--release');
-    cargoArgs.push('--target', 'x86_64-pc-windows-msvc', '-p', 'ag-guardian-host', '--', '--include-ignored', '--nocapture');
-    const child = spawn('cargo', cargoArgs, {cwd: workspace, env, stdio: ['ignore','pipe','inherit']});
+    // Dependencies retain the exact release settings and compiled cache. Keep
+    // their required LTO linkage, but skip expensive optimization of the test target.
+    const cacheDir = join(root, '.local', isDev ? 'native-prompt-dev' : 'native-prompt-build');
+    const cachedExe = join(cacheDir, 'guardian-acceptance.exe');
+    const cacheManifest = join(cacheDir, 'manifest.json');
+    const keyHash = createHash('sha256');
+    for (const file of [...hostFiles.map(rel => join(hostSource, rel)), join(workspace, 'Cargo.lock'),
+        join(root, 'native/SOURCE.json'), join(root, 'native/patches/guardian-entry.patch'),
+        join(root, 'scripts/Release-Paths.ps1'), join(root, 'scripts/Build-Guardian.ps1'),
+        join(root, 'policy/upstream-codex/SOURCE.json'), join(workspace,'Cargo.toml'), fileURLToPath(import.meta.url)]) keyHash.update(readFileSync(file));
+    const compiler = spawnSync('rustc', ['+stable','--version','--verbose'], {encoding:'utf8'});
+    assert.equal(compiler.status, 0, 'cannot identify Rust compiler');
+    keyHash.update(compiler.stdout);
+    const relevantEnvironment = Object.fromEntries(Object.entries(env).filter(([name]) =>
+        /^(CARGO_(PROFILE_.*|BUILD_.*|TARGET_.*|ENCODED_RUSTFLAGS|INCREMENTAL)|RUST(C|C_WRAPPER|C_WORKSPACE_WRAPPER|FLAGS)|RUSTY_V8_.*|V8_FROM_SOURCE|CFLAGS.*|CXXFLAGS.*|CC.*|CXX.*)$/.test(name)).sort(([a],[b]) => a.localeCompare(b)));
+    keyHash.update(JSON.stringify({profile,target:'x86_64-pc-windows-msvc',environment:relevantEnvironment}));
+    const cacheKey = keyHash.digest('hex');
+    const digest = path => createHash('sha256').update(readFileSync(path)).digest('hex');
+    let cacheHit = false;
+    try {
+        const saved = JSON.parse(readFileSync(cacheManifest, 'utf8'));
+        cacheHit = saved.key === cacheKey && saved.sha256 === digest(cachedExe);
+    } catch { /* Rebuild missing or invalid test cache. */ }
+    const buildStarted = performance.now();
+    if (!cacheHit) {
+        const cargoArgs = ['+stable', 'rustc', '--offline', '--locked', '--message-format=json'];
+        if (!isDev) cargoArgs.push('--release');
+        cargoArgs.push('--target', 'x86_64-pc-windows-msvc', '-p', 'ag-guardian-host',
+            '--test', 'guardian-acceptance', '--', '-C', 'opt-level=0');
+        const build = spawn('cargo', cargoArgs, {cwd: workspace, env, stdio:['ignore','pipe','inherit']});
+        let executable = null;
+        const messages = createInterface({input:build.stdout});
+        const drainBuild = (async () => {
+            for await (const line of messages) {
+                const message = JSON.parse(line);
+                if (message.reason === 'compiler-message' && message.message?.rendered) process.stderr.write(message.message.rendered);
+                if (message.reason === 'compiler-artifact' && message.target.name === 'guardian-acceptance'
+                    && message.profile.test && message.executable) executable = message.executable;
+            }
+        })();
+        const [built] = await once(build, 'exit');
+        await drainBuild;
+        assert.equal(built, 0, 'native acceptance compilation failed');
+        assert.ok(executable, 'Cargo did not report an acceptance executable');
+        mkdirSync(cacheDir, {recursive:true});
+        copyFileSync(executable,cachedExe);
+        writeFileSync(cacheManifest,JSON.stringify({key:cacheKey,sha256:digest(cachedExe)}));
+    }
+    const buildMs = performance.now() - buildStarted;
+    console.log(cacheHit ? 'PASS verified native acceptance executable cache' : 'PASS native acceptance compiled with fast test-target optimization');
+    const child = spawn(cachedExe, ['--include-ignored','--nocapture'], {cwd:workspace, env, stdio:['ignore','pipe','inherit']});
     const lines = createInterface({ input: child.stdout });
     const drain = (async () => {
         for await (const line of lines) {
@@ -217,6 +266,7 @@ try {
         authorizationSourceCount: instructions.length, projectScopesMatched: true, oversizedAuthorizationRejectedBeforeInference: true,
         trunkReusedVerified: true, cachePrefixBreakpointVerified: true, oversizedActionAttributedCorrectly: true,
         profile: isDev ? 'Debug' : 'Release', buildOptions: profile,
+        testExecutableCacheHit:cacheHit, testBuildMs:buildMs, testTargetOptLevel:'0', testTargetLto:profile.LTO,
         releaseOptions: profile, reviewP50Ms: percentile(0.50), reviewP95Ms: percentile(0.95),
     }, null, 2));
     console.log('PASS final Responses bodies preserved the exact action, ordered user evidence, and separate project scope with zero tools');

@@ -296,7 +296,7 @@ $cargo = $cargo.Replace($v8Pin,('v8 = { path = "' + $v8 + '" }')).Replace($sampl
 Write-BuildInput (Join-Path $workspace 'Cargo.toml') $cargo
 $hostDirectory = Join-Path $workspace $name
 New-Item -ItemType Directory -Path (Join-Path $hostDirectory 'src') -Force | Out-Null
-foreach ($file in @('Cargo.toml','src/main.rs','src/bootstrap.rs','src/offline_prompt_tests.rs')) {
+foreach ($file in @('Cargo.toml','src/main.rs','src/bootstrap.rs','src/offline_prompt_tests.rs','tests/acceptance.rs')) {
     Sync-FileIfChanged (Join-Path $hostSource $file) (Join-Path $hostDirectory $file)
 }
 if ($SyncWorkspaceOnly) {

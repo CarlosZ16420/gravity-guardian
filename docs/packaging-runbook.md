@@ -15,6 +15,18 @@
 
 用 PowerShell 7 按顺序执行。任一步抛错时，修复后从该步继续。修改构建输入后，从构建重新开始。
 
+推荐统一入口，它会在重型 Rust 编译前完成版本、发布说明、脚本语法、源码卫生、产物扫描器回归、C#、Schema 与日志测试，再构建一次并完成所有分发验收：
+
+```powershell
+.\scripts\Run-Release.ps1 -EvidenceDirectory .local/release-checks/current
+# 同一份源码被中断后续跑；已通过阶段和未改变的附件不会重做
+.\scripts\Run-Release.ps1 -EvidenceDirectory .local/release-checks/current -Resume
+# 日常快速检查，不编 Rust、不打 ZIP
+.\scripts\Run-Release.ps1 -PreflightOnly
+```
+
+先定稿版本和发布说明并提交，再开始正式构建。源码、构建参数或已检查附件发生变化时，使用新的证据目录；不能复用旧验收记录。每步通过后会立即记录阶段耗时与附件哈希，完整通过后生成 `artifacts/release-acceptance.json`，供发布脚本校验。以下单步命令保留用于定位问题；使用统一入口后不必重复执行。
+
 ```powershell
 $ErrorActionPreference = 'Stop'
 .\scripts\Build.ps1
@@ -45,6 +57,7 @@ $previous = 'C:\release-inputs\gravity-guardian-0.6.5-windows-x64.zip'
 | `release-manifest.json` | 顶层资产指向 Standalone。`distributions` 分别记录三包的文件名、URL、字节数和 SHA-256。 |
 | `checksums.sha256` | 三条 ZIP 校验值与发布清单一致。 |
 | `release-build-info.json` | 审计留档。记录三包的文件清单、总大小、运行时版本和 Guardian 哈希。 |
+| `release-acceptance.json` | 统一入口的完整验收记录，绑定提交、构建输入、阶段结果与六个附件哈希；不放进用户 ZIP。 |
 
 `Package.ps1` 会重新读取三个 ZIP 并逐文件校验，检查无 PDB、ZIP 不超过 120 MiB、解压不超过 310 MiB，以及三包的 Guardian 哈希一致。Portable 的 ZIP 与解压程序均不得超过同批 Standalone；另保存改造前后的同条件体积对照。下载后可用 `Get-FileHash -Algorithm SHA256` 再核对。保留包清单、校验值和对应的验收日志。
 
@@ -61,13 +74,29 @@ node .\scripts\Test-NativePrompt.mjs .local\prompt-release
 
 ### 本地构建与云端构建
 
-两种方式使用相同的 `Build.ps1`、`Package.ps1` 和验收脚本，均可生成正式附件。云端可在 Actions 中手动运行 `Windows build`，或执行 `gh workflow run release.yml --ref main`，成功后下载 `gravity-guardian-windows-x64` 产物；本地执行上文完整构建与验收步骤后使用 `artifacts/` 内的产物。
+两种方式使用相同的 `Run-Release.ps1`、`Build.ps1`、`Package.ps1` 和验收脚本。普通 `main` 推送和 PR 只做快速预检及服务回归，方便先同步源码供审阅。完整云端构建需手动运行 `Windows build`，或执行 `gh workflow run release.yml --ref main`；成功后下载 `gravity-guardian-windows-x64` 产物。本地执行统一入口后使用 `artifacts/` 中的同一套附件。
+
+云端会缓存 Cargo 公开依赖、锁定上游/V8 源码、Rust 编译目录、经过指纹和哈希校验的 Guardian 与测试程序以及锁定运行时下载。缓存按编译器、Windows 镜像、编译参数、上游来源和本项目原生源码区分；源码改变可复用兼容依赖，程序不匹配会重建。只有可信 `main` 手动任务写缓存，凭据、安装设置和测试数据不缓存。首次填充、缓存被清理或工具链升级时仍可能需要冷编译。
+
+原生验收仍执行全部测试，并复用正式优化依赖；仅测试程序自身使用较低优化级别，保留依赖所需的 LTO 链接。测试程序按源码、锁文件、编译器与参数校验后复用，测试结果本身不会作为跨构建跳过的依据。正式 EXE 的 ThinSize、ThinLTO、完整内核与 V8 保持不变。
 
 正式构建会统一映射 Rust、C/C++ 与 C# 的编译路径；发布包的 `native/SOURCE.json` 只保留中性的构建目录。`Package.ps1` 会扫描实际分发文件中的本机工作区、用户目录和 Cargo 目录（含二进制、UTF-16 和 JSON 转义形式），通过后才生成 ZIP 与校验清单。源码卫生检查和产物检查是两道独立门禁。旧 Guardian 缓存若未启用路径映射，需重新执行正式构建，不能直接打包。
 
 本地完整构建位置仅保留在 `.local/` 的构建缓存与日志中。禁止通过修改已编译二进制或跳过产物扫描来发布。两种方式均使用下面的 Release 草稿、附件校验与公开流程。
 
 在 GitHub Releases 为已验收提交准备对应的 `v<版本>` 草稿，附上三个 ZIP、`checksums.sha256` 和 `release-manifest.json`，使用该版本的发布说明。核对远端附件名称、大小和 SHA-256 与本地验收产物一致后再公开。GitHub Actions 会归档产物，发布草稿单独处理。
+
+可用同一个发布脚本处理本地产物或下载的云端产物。默认只准备并核验草稿，`-Publish` 才公开；脚本按 REST ID 查询草稿，支持续传，拒绝修改已发布的版本：
+
+```powershell
+.\scripts\Publish-Release.ps1 -Directory artifacts -ValidateOnly
+.\scripts\Publish-Release.ps1 -Directory artifacts             # 草稿与附件校验
+.\scripts\Publish-Release.ps1 -Directory artifacts -Publish    # 校验后公开
+# 云端完整构建、验收并发布；请先提交新版本及发布说明
+gh workflow run release.yml --ref main -f publish_release=true
+```
+
+另一个仓库可通过 `-Repository owner/repository` 上传同一套附件，无需重新编译或打包。验收记录必须来自已提交的干净源码，附件被修改会在上传前被拒绝。此流程不会替换已有 Release 的附件。
 
 遇到升级故障，先备份升级后新增的日志。使用上一次更新备份恢复插件、配置及安装元数据，确认旧服务运行并复验 PreToolUse。
 
