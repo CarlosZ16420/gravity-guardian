@@ -203,6 +203,7 @@ struct App {
     bool statsRunning = false;
     bool statsPending = false;
     bool statsLoaded = false;
+    bool startupUpdatePending = true;
     StatsPeriod period = StatsPeriod::Today;
     std::optional<DateRange> customDates;
     StatsResult stats;
@@ -1154,6 +1155,12 @@ void StartRefreshWorker(bool initialStartup, bool runDetect, bool skipLoginCheck
         g_app.busyRefresh = false;
         PostWorkResult(std::move(res));
     }).detach();
+}
+
+bool TakeStartupUpdateCheck(WorkKind completedKind) {
+    if (completedKind != WorkKind::InitialRefresh || !g_app.startupUpdatePending) return false;
+    g_app.startupUpdatePending = false;
+    return g_app.cfg.autoCheckUpdates;
 }
 
 void StartCheckUpdateWorker(bool allowAutoApply) {
@@ -2596,9 +2603,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         SyncControlsToUi();
         SetTimer(hwnd, ID_TIMER_REFRESH, 30000, nullptr);
         StartRefreshWorker(true, true, false);
-        if (g_app.cfg.autoCheckUpdates) {
-            StartCheckUpdateWorker(true);
-        }
         return 0;
     }
     case WM_NCCALCSIZE:
@@ -2832,6 +2836,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             g_app.state.availableUpdate = updMan;
             g_app.state.downloadedZipPath = dlZip;
             SyncControlsToUi();
+            if (TakeStartupUpdateCheck(res->kind)) StartCheckUpdateWorker(true);
             if (res->kind == WorkKind::CompactLogs || res->kind == WorkKind::InstallOrRepair)
                 StartStatsWorker();
             if ((res->kind == WorkKind::CompactLogs || res->kind == WorkKind::InstallOrRepair || !res->ok) && !res->message.empty()) {

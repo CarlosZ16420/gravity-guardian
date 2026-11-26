@@ -68,14 +68,7 @@ $taskBundle = if (![string]::IsNullOrWhiteSpace($BundlePath)) {
         $candidate
     }
 }
-$taskData = [IO.Path]::GetFullPath($DataDirectory)
 $taskCleanupBundle = $false
-if ($CleanupBundlePath -and ![string]::IsNullOrWhiteSpace($BundlePath)) {
-    $taskRepairPrefix = [IO.Path]::GetFullPath((Join-Path $taskData 'updates')) + [IO.Path]::DirectorySeparatorChar
-    if ($taskBundle.StartsWith($taskRepairPrefix, [StringComparison]::OrdinalIgnoreCase) -and (Split-Path $taskBundle -Leaf) -like 'repair-*') {
-        $taskCleanupBundle = $true
-    }
-}
 
 try {
 if ($WaitPid -gt 0) {
@@ -94,6 +87,9 @@ $taskBundleAssembly = Join-Path $taskBundle 'scripts/gravity-guardian.dll'
 
 $taskConfigRoot = [IO.Path]::GetFullPath((Join-Path $GeminiRoot 'config'))
 $taskPlugin = [IO.Path]::GetFullPath((Join-Path $taskConfigRoot 'plugins/gravity-guardian'))
+$taskIncomplete = Join-Path $taskConfigRoot 'gravity-guardian-install-incomplete.json'
+if (Test-Path -LiteralPath $taskIncomplete) { throw ('Previous installation did not finish. Installation stopped before writing. Inspect the recovery backup recorded in ' + $taskIncomplete + ' and restore that attempt before retrying.') }
+if (Test-Path -LiteralPath (Join-Path $taskPlugin 'binding.json')) { throw '请先断开便携版连接：退出 Antigravity，在便携版面板点击“断开连接”，确认面板退出后再安装。仅退出托盘不会移除连接登记。' }
 $taskBundleRuntime = Resolve-ApprovalRuntime $taskBundle -Installed:($taskBundle -eq $taskPlugin)
 $taskRuntime = if ($taskDistribution -eq 'lite') { $taskBundleRuntime } else { Join-Path $taskPlugin 'runtime/dotnet.exe' }
 if ($taskPlugin -ne [IO.Path]::GetFullPath((Join-Path $taskConfigRoot 'plugins/gravity-guardian'))) { throw 'Invalid plugin target' }
@@ -109,6 +105,11 @@ $taskOldApproval = if (Test-Path -LiteralPath $taskOldApprovalPath) {
 }
 if ($taskOldApproval -and !$PSBoundParameters.ContainsKey('DataDirectory') -and $taskOldApproval.dataDirectory) {
     $DataDirectory = [string]$taskOldApproval.dataDirectory
+}
+$taskData = [IO.Path]::GetFullPath($DataDirectory)
+if ($CleanupBundlePath -and ![string]::IsNullOrWhiteSpace($BundlePath)) {
+    $taskRepairPrefix = [IO.Path]::GetFullPath((Join-Path $taskData 'updates')) + [IO.Path]::DirectorySeparatorChar
+    if ($taskBundle.StartsWith($taskRepairPrefix, [StringComparison]::OrdinalIgnoreCase) -and (Split-Path $taskBundle -Leaf) -like 'repair-*') { $taskCleanupBundle = $true }
 }
 if ($taskOldApproval -and !$PSBoundParameters.ContainsKey('Proxy')) { $Proxy = [string]$taskOldApproval.proxy }
 if ([string]::IsNullOrWhiteSpace($AntigravityPath)) {
@@ -163,10 +164,17 @@ New-Item -ItemType Directory -Path $taskData -Force | Out-Null
 $taskPreviousManifestPath = Join-Path $taskData 'installation.json'
 $taskPreviousManifest = if (Test-Path -LiteralPath $taskPreviousManifestPath) { Get-Content -Encoding UTF8 -LiteralPath $taskPreviousManifestPath -Raw | ConvertFrom-JsonHashtable } else { $null }
 if ($taskPreviousManifest -and [IO.Path]::GetFullPath($taskPreviousManifest.pluginDirectory) -ne $taskPlugin) { throw 'Existing install manifest belongs to another target' }
+if ($ReviewMode -eq 'Codex') { Set-CodexReviewMode -ConfigRoot $taskConfigRoot -ValidateOnly }
+$taskPanelPath = Join-Path $taskData 'panel-settings.json'
+$taskPanel = if (Test-Path -LiteralPath $taskPanelPath) { Get-Content -Encoding UTF8 -LiteralPath $taskPanelPath -Raw | ConvertFrom-JsonHashtable } else { @{} }
 
 $taskBackup = Join-Path $taskData ('backups/' + [DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss') + '-' + [Guid]::NewGuid().ToString('N').Substring(0,6))
 New-Item -ItemType Directory -Path $taskBackup -Force | Out-Null
 Copy-Item -LiteralPath $taskAppConfig -Destination (Join-Path $taskBackup 'config.json.original')
+foreach ($taskSavedFile in @('installation.json','panel-settings.json','uninstalled')) {
+    $taskSavedPath = Join-Path $taskData $taskSavedFile
+    if (Test-Path -LiteralPath $taskSavedPath -PathType Leaf) { Copy-Item -LiteralPath $taskSavedPath -Destination (Join-Path $taskBackup ($taskSavedFile+'.original')) }
+}
 
 $taskStage = Join-Path $taskData ('staging-' + [Guid]::NewGuid().ToString('N'))
 Copy-Item -LiteralPath $taskBundle -Destination $taskStage -Recurse
@@ -215,6 +223,12 @@ $taskAssembly = Join-Path $taskPlugin 'scripts/gravity-guardian.dll'
 $taskReviewConfig = Join-Path $taskPlugin 'approval.json'
 
 $taskHadPrevious = Test-Path -LiteralPath $taskPlugin
+$taskPluginCommitted = $false
+$taskSidecarCommitted = $false
+$taskCopyStarted = $false
+$taskReplacedPath = $null
+Write-PortableJson $taskIncomplete @{backupDirectory=$taskBackup;dataDirectory=$taskData;pluginDirectory=$taskPlugin;hadPreviousPlugin=[bool]$taskHadPrevious}
+try {
 if ($taskHadPrevious) {
     $taskExisting = Get-Content -Encoding UTF8 -LiteralPath (Join-Path $taskPlugin 'plugin.json') -Raw | ConvertFrom-Json
     if ($taskExisting.name -ne 'gravity-guardian') { throw 'Refusing to replace a different plugin' }
@@ -258,8 +272,6 @@ if ($taskHadPrevious) {
 }
 New-Item -ItemType Directory -Path (Split-Path $taskPlugin) -Force | Out-Null
 
-$taskCopyStarted = $false
-try {
     if ($UseVerifiedCopyCommit) {
         if (Test-Path -LiteralPath $taskPlugin) { throw 'Plugin target unexpectedly exists before verified copy' }
         $taskCopyStarted = $true
@@ -276,16 +288,7 @@ try {
     } else {
         Move-Item -LiteralPath $taskStage -Destination $taskPlugin
     }
-}
-catch {
-    if ($UseVerifiedCopyCommit -and $taskCopyStarted -and (Test-Path -LiteralPath $taskPlugin)) {
-        $taskFailedCopy = [IO.Path]::GetFullPath((Join-Path $taskBackup 'failed-plugin-copy'))
-        if ($taskPlugin -ne [IO.Path]::GetFullPath((Join-Path $taskConfigRoot 'plugins/gravity-guardian')) -or !$taskFailedCopy.StartsWith($taskBackup + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) { throw 'Rollback target escaped installation directories' }
-        Move-Item -LiteralPath $taskPlugin -Destination $taskFailedCopy
-    }
-    if ($taskHadPrevious -and !(Test-Path -LiteralPath $taskPlugin)) { Move-Item -LiteralPath $taskReplacedPath -Destination $taskPlugin }
-    throw
-}
+$taskPluginCommitted = $true
 
 if (!$taskAppState.sidecars) { $taskAppState.sidecars = @{} }
 $taskAppState.sidecars[$taskSidecarId] = @{ enabled = $true }
@@ -293,6 +296,7 @@ $taskTemp = $taskAppConfig + '.gravity-guardian.tmp'
 $taskAppState | ConvertTo-Json -Depth 100 | Set-Utf8NoBom -LiteralPath $taskTemp -Encoding utf8
 if ((Get-FileHash -LiteralPath $taskAppConfig -Algorithm SHA256).Hash -ne $taskConfigHash) { throw 'Application settings changed before commit; original backup is available' }
 Move-Item -LiteralPath $taskTemp -Destination $taskAppConfig -Force
+$taskSidecarCommitted = $true
 
 $taskStopMarker = Join-Path $taskData 'uninstalled'
 if (Test-Path -LiteralPath $taskStopMarker) { Remove-Item -LiteralPath $taskStopMarker }
@@ -320,8 +324,6 @@ foreach ($key in @('launcherPath', 'installedLauncherHash', 'launcherExisted')) 
 $taskManifest | ConvertTo-Json -Depth 20 | Set-Utf8NoBom -LiteralPath (Join-Path $taskData 'installation.json') -Encoding utf8
 
 # Sync panel-settings.json while preserving existing panel preferences.
-$taskPanelPath = Join-Path $taskData 'panel-settings.json'
-$taskPanel = if (Test-Path -LiteralPath $taskPanelPath) { Get-Content -Encoding UTF8 -LiteralPath $taskPanelPath -Raw | ConvertFrom-JsonHashtable } else { @{} }
 $taskPanel.pluginDirectory = $taskPlugin
 $taskPanel.dataDirectory = $taskData
 $taskPanel.geminiRoot = [IO.Path]::GetFullPath($GeminiRoot)
@@ -345,6 +347,43 @@ if (!$NoStart) {
     $taskPrevError = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
     try { $null = & $taskRuntime $taskAssembly status --config $taskReviewConfig 2>$null } finally { $ErrorActionPreference = $taskPrevError }
     if ($LASTEXITCODE -ne 0) { throw 'Installed, but approval service could not start; run Doctor.ps1' }
+}
+Remove-Item -LiteralPath $taskIncomplete -Force
+} catch {
+    $taskInstallFailure = $_
+    try {
+        [IO.File]::WriteAllText((Join-Path $taskData 'uninstalled'), 'install rollback')
+        if ($taskPluginCommitted -and !$NoStart) {
+            & $taskRuntime $taskAssembly stop --config $taskReviewConfig 2>$null | Out-Null
+            Start-Sleep -Milliseconds 2200
+        }
+        $taskRollbackJournal = Read-PortableJson (Join-Path $taskBackup 'review-mode/rollback.json')
+        if ($taskRollbackJournal) { Restore-CodexReviewMode -ConfigRoot $taskConfigRoot -Changes @($taskRollbackJournal) }
+        $taskCurrentApp = Read-PortableJson $taskAppConfig
+        if ($taskSidecarCommitted -and $taskCurrentApp.sidecars -and $taskCurrentApp.sidecars[$taskSidecarId].Count -eq 1 -and $taskCurrentApp.sidecars[$taskSidecarId].enabled -eq $true) { Set-PortableSidecar $taskConfigRoot $taskOldSidecar }
+        if (($taskPluginCommitted -or $taskCopyStarted) -and (Test-Path -LiteralPath $taskPlugin)) {
+            $taskFailedCopy = [IO.Path]::GetFullPath((Join-Path $taskBackup 'failed-plugin-copy'))
+            if ($taskPlugin -ne [IO.Path]::GetFullPath((Join-Path $taskConfigRoot 'plugins/gravity-guardian')) -or !$taskFailedCopy.StartsWith($taskBackup + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) { throw 'Rollback target escaped installation directories' }
+            Move-Item -LiteralPath $taskPlugin -Destination $taskFailedCopy
+        }
+        if ($taskReplacedPath -and (Test-Path -LiteralPath $taskReplacedPath) -and !(Test-Path -LiteralPath $taskPlugin)) { Move-Item -LiteralPath $taskReplacedPath -Destination $taskPlugin }
+        foreach ($taskSavedFile in @('installation.json','panel-settings.json','uninstalled')) {
+            $taskSavedPath = Join-Path $taskData $taskSavedFile
+            $taskOriginalPath = Join-Path $taskBackup ($taskSavedFile+'.original')
+            if (Test-Path -LiteralPath $taskOriginalPath) { Copy-Item -LiteralPath $taskOriginalPath -Destination $taskSavedPath -Force }
+            elseif (Test-Path -LiteralPath $taskSavedPath -PathType Leaf) { Remove-Item -LiteralPath $taskSavedPath -Force }
+        }
+        if ($taskHadPrevious -and $taskOldHostId -and !$NoStart) {
+            $taskRecoveryArgs = @(('"'+$taskAssembly+'"'), 'ensure', '--config', ('"'+$taskReviewConfig+'"'))
+            $taskRecovery = Start-Process -FilePath $taskOldRuntime -ArgumentList $taskRecoveryArgs -WorkingDirectory $taskPlugin -WindowStyle Hidden -RedirectStandardOutput (Join-Path $taskBackup 'recovery.stdout.log') -RedirectStandardError (Join-Path $taskBackup 'recovery.stderr.log') -PassThru
+            try {
+                if (!$taskRecovery.WaitForExit(30000)) { $taskRecovery.Kill(); throw 'Previous approval service recovery timed out' }
+                if ($null -ne $taskRecovery.ExitCode -and $taskRecovery.ExitCode -ne 0) { throw 'Previous approval service could not restart' }
+            } finally { $taskRecovery.Dispose() }
+        }
+        Remove-Item -LiteralPath $taskIncomplete -Force
+    } catch { throw ('Install failed and recovery is incomplete. Keep the backup at '+$taskBackup+'. Recovery error: '+$_.Exception.Message+'. Original error: '+$taskInstallFailure.Exception.Message) }
+    throw $taskInstallFailure
 }
 
 if ($RelaunchPanel) {

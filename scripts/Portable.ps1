@@ -88,10 +88,28 @@ function Stop-PortableService($Layout) {
     if (!(Test-Path -LiteralPath $Layout.config)) { return }
     New-Item -ItemType Directory -Path $Layout.data -Force | Out-Null
     [IO.File]::WriteAllText((Join-Path $Layout.data 'uninstalled'), 'service stopped')
+    $runtime = Resolve-ApprovalRuntime $Layout.app -Installed
+    $assembly = Join-Path $Layout.app 'scripts/gravity-guardian.dll'
     $status = $null
-    try { $status = (Invoke-PortableCore $Layout 'status' -Quiet) | ConvertFrom-Json } catch {}
+    $statusRaw = & $runtime $assembly status --config $Layout.config 2>$null
+    if ($LASTEXITCODE -ne 0 -or !$statusRaw) {
+        # A stopped host has no pipe and status exits nonzero. Confirm using this exact
+        # runtime, assembly and configuration; a failed query must abort the switch.
+        Start-Sleep -Milliseconds 2200
+        $matching = @(Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object {
+            $_.ExecutablePath -and $_.ExecutablePath -ieq $runtime -and $_.CommandLine -and
+            $_.CommandLine.IndexOf($assembly,[StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+            $_.CommandLine.IndexOf($Layout.config,[StringComparison]::OrdinalIgnoreCase) -ge 0
+        })
+        if ($matching.Count) { throw 'Cannot confirm approval service state; switching was stopped' }
+        return
+    }
+    $status = ($statusRaw -join [Environment]::NewLine) | ConvertFrom-Json
+    if ($status.status -notin @('running','stopped')) { throw 'Unknown approval service state; switching was stopped' }
+    if ($status.status -eq 'running' -and !$status.pid) { throw 'Approval service did not report its process; switching was stopped' }
     if ($status -and $status.pid) {
-        Invoke-PortableCore $Layout 'stop' | Out-Null
+        & $runtime $assembly stop --config $Layout.config | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw 'Approval service stop request failed; switching was stopped' }
         $process = Get-Process -Id ([int]$status.pid) -ErrorAction SilentlyContinue
         if ($process) { try { if (!$process.WaitForExit(15000)) { throw 'Approval service did not stop' } } finally { $process.Dispose() } }
     }
@@ -258,14 +276,14 @@ function Connect-Portable($Layout, [string]$GeminiRoot, [string]$AntigravityPath
         $runKey='HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
         $run=(Get-ItemProperty -LiteralPath $runKey -Name GravityGuardian -ErrorAction SilentlyContinue).GravityGuardian
         if ($legacy -and $run -and $run.StartsWith(('"'+(Join-Path $registration 'app/GravityGuardian.exe')+'"'),[StringComparison]::OrdinalIgnoreCase)) {
-            Set-ItemProperty -LiteralPath $runKey -Name GravityGuardian -Value ('"'+(Join-Path $Layout.root 'GravityGuardian.exe')+'" --tray')
+            Set-ItemProperty -LiteralPath $runKey -Name GravityGuardian -Value ('"'+(Join-Path $Layout.root 'GravityGuardian.exe')+'" --minimized')
         }
         @{ ok=$true; storageMode='portable'; programDirectory=$Layout.app; dataDirectory=$Layout.data; configuration=$Layout.config; registrationDirectory=$registration; migratedFrom=$oldData } | ConvertTo-Json
     } catch {
         $failure = $_
         if ($registrationChanged) {
             try { Stop-PortableService $Layout; Clear-DelegatedProtectedGrants -ConfigRoot $configRoot -DataDirectory $Layout.data } catch {}
-            $journal = Read-PortableJson (Join-Path $backup 'review-mode/changes.json')
+            $journal = Read-PortableJson (Join-Path $backup 'review-mode/rollback.json')
             if ($journal) { Restore-CodexReviewMode -ConfigRoot $configRoot -Changes @($journal) }
             Set-PortableSidecar $configRoot $oldSidecar
             Assert-PortablePath $registration

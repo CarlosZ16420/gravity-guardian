@@ -70,7 +70,19 @@ int wmain(int argc, wchar_t** argv) {
     ULONG_PTR graphicsToken = 0;
     if (Gdiplus::GdiplusStartup(&graphicsToken, &graphicsInput, nullptr) != Gdiplus::Ok) return 1;
     g_app.hInst = GetModuleHandleW(nullptr);
+    // Simulate a delayed initial snapshot. No worker/network starts before it arrives.
+    g_app.cfg.autoCheckUpdates = true;
+    g_app.startupUpdatePending = true;
+    g_app.state.pluginInstalled = false;
+    if (TakeStartupUpdateCheck(WorkKind::RefreshAll)) return 1;
+    g_app.state.pluginInstalled = true;
+    int startupChecks = 0;
+    if (TakeStartupUpdateCheck(WorkKind::InitialRefresh) && g_app.state.pluginInstalled) ++startupChecks;
+    if (TakeStartupUpdateCheck(WorkKind::InitialRefresh)) ++startupChecks;
+    if (startupChecks != 1) return 1;
+    WriteStdoutUtf8("PASS F09 startup update waits for the installed snapshot and is consumed exactly once\n");
     g_app.cfg.autoCheckUpdates = false;
+    g_app.state.pluginInstalled = false;
     g_app.cfg.dataDirectory = JoinPath(GetDirectoryName(GetExecutablePath()), L"unused-test-data");
     g_app.cfg.pluginDirectory = JoinPath(g_app.cfg.dataDirectory, L"unused-plugin");
     WNDCLASSEXW windowClass{sizeof(windowClass)};

@@ -58,7 +58,7 @@ function Assert-CodexModePath([string]$ConfigRoot,[string]$Path) {
     if((Get-Item -LiteralPath $taskFull).Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'Review-mode configuration is a reparse point'}
 }
 
-function Set-CodexReviewMode([string]$ConfigRoot,[string]$BackupDirectory,[object[]]$PreviousChanges=@()) {
+function Set-CodexReviewMode([string]$ConfigRoot,[string]$BackupDirectory,[object[]]$PreviousChanges=@(),[switch]$ValidateOnly) {
     $taskChanges=@{}
     foreach($taskChange in $PreviousChanges){
         Assert-CodexModePath $ConfigRoot $taskChange.path
@@ -70,6 +70,7 @@ function Set-CodexReviewMode([string]$ConfigRoot,[string]$BackupDirectory,[objec
         $taskCandidates+=@(Get-ChildItem -LiteralPath $taskProjectRoot -Filter '*.json' -File | ForEach-Object {@{path=$_.FullName;section='settings';global=$false}})
     }
     $taskDesired=Get-CodexNativeSettings
+    $taskPrepared=@()
     foreach($taskCandidate in $taskCandidates){
         $taskPath=$taskCandidate.path
         Assert-CodexModePath $ConfigRoot $taskPath
@@ -90,6 +91,12 @@ function Set-CodexReviewMode([string]$ConfigRoot,[string]$BackupDirectory,[objec
             $taskSection[$taskKey]=$taskDesired[$taskKey]
         }
         if(!$taskChanged){continue}
+        $taskPrepared+=@{path=$taskPath;hash=$taskHash;document=$taskDocument;candidate=$taskCandidate;original=$taskOriginal}
+    }
+    if($ValidateOnly){return}
+    $taskRollback=@()
+    foreach($taskEntry in $taskPrepared){
+        $taskPath=$taskEntry.path; $taskHash=$taskEntry.hash; $taskDocument=$taskEntry.document; $taskCandidate=$taskEntry.candidate; $taskOriginal=$taskEntry.original
         $taskModeBackup=Join-Path $BackupDirectory 'review-mode'
         New-Item -ItemType Directory -Path $taskModeBackup -Force|Out-Null
         $taskBackupName=if($taskCandidate.global){'global.json'}else{'project-'+[IO.Path]::GetFileName($taskPath)}
@@ -100,7 +107,12 @@ function Set-CodexReviewMode([string]$ConfigRoot,[string]$BackupDirectory,[objec
             $taskChanges[$taskPath]=@{path=$taskPath;section=$taskCandidate.section;original=$taskOriginal;installed=$taskDesired}
         }
         # Journal before committing each file, so a partial installation has an exact recovery record.
-        ConvertTo-Json -InputObject @($taskChanges.Values) -Depth 20|Set-Utf8NoBom -LiteralPath (Join-Path $taskModeBackup 'changes.json') -Encoding utf8
+        $taskRollback+=@{path=$taskPath;section=$taskCandidate.section;original=$taskOriginal;installed=$taskDesired}
+        foreach($taskJournal in @(@{name='changes.json';entries=@($taskChanges.Values)},@{name='rollback.json';entries=@($taskRollback)})){
+            $taskJournalPath=Join-Path $taskModeBackup $taskJournal.name
+            ConvertTo-Json -InputObject @($taskJournal.entries) -Depth 20|Set-Utf8NoBom -LiteralPath ($taskJournalPath+'.tmp') -Encoding utf8
+            Move-Item -LiteralPath ($taskJournalPath+'.tmp') -Destination $taskJournalPath -Force
+        }
         if((Get-FileHash -LiteralPath $taskPath -Algorithm SHA256).Hash -ne $taskHash){throw 'Native settings changed during review-mode migration'}
         Move-Item -LiteralPath $taskTemporary -Destination $taskPath -Force
     }

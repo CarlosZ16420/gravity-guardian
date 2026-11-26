@@ -61,6 +61,8 @@ Reviews send the required context to Codex. Detailed logs are off by default; wh
 
 **How do I update or remove it?** The panel checks and downloads verified updates; upgrades preserve settings and history. Portable's 「断开连接」 disconnects Antigravity and keeps local data. Exit related processes before deleting the folder. Standalone/Lite's 「完整卸载」 removes the plugin, startup entry, and all local logs, statistics, settings, caches, and backups. Fully exit Antigravity first.
 
+To switch from Portable to an installed edition: exit Antigravity, click 「断开连接」 in Portable, confirm the panel has exited, then run the installer. Closing the window or exiting the tray does not disconnect it. Keep the Portable folder as a backup if needed; its history is not automatically merged into the installed edition.
+
 ## Development and license
 
 Build on Windows x64 with PowerShell 7, .NET 10 SDK, Node.js 22+, stable Rust, and MSVC C++ tools:

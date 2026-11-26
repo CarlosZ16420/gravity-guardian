@@ -223,8 +223,8 @@ public static class Program
         {
             if (command == "review")
             {
-                var failure = e is InvalidDataException && e.Message == "Input too large" && failureSettings != null
-                    ? GateResponse.OversizedForAgentRetry("", "", $"Hook payload exceeds {failureSettings.MaxInputBytes} byte single-request limit")
+                var failure = e is InvalidDataException && (e.Message is "Input too large" or "IPC message too large") && failureSettings != null
+                    ? GateResponse.OversizedForAgentRetry("", "", $"Hook payload or encoded local frame exceeds the single-request limit ({failureSettings.MaxInputBytes} input bytes)")
                     : failurePayload != null
                         ? GateResponse.Failure("", "", "Approval service unavailable or invalid host response.","reviewer_unavailable")
                         : GateResponse.Failure("", "", "Invalid Hook input or configuration.");
@@ -253,12 +253,22 @@ public static class Program
     }
     private static async Task<string> RequestAsync(Settings settings,object request,CancellationToken ct)
     {
+        var frame = EncodeIpcFrame(request, settings.MaxInputBytes);
         using var pipe = new NamedPipeClientStream(".", settings.PipeName, PipeDirection.InOut, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
         await pipe.ConnectAsync(ct);
         using var writer = new StreamWriter(pipe, new UTF8Encoding(false), 4096, true) { AutoFlush = true };
         using var reader = new StreamReader(pipe, Encoding.UTF8, false, 4096, true);
-        await writer.WriteLineAsync(System.Text.Json.JsonSerializer.Serialize(request,Json.PromptOptions).AsMemory(), ct);
-        return await ReadLineAsync(reader, settings.MaxInputBytes + 16384, ct);
+        await writer.WriteLineAsync(frame.AsMemory(), ct);
+        return await ReadLineAsync(reader, IpcFrameLimit(settings.MaxInputBytes), ct);
+    }
+
+    public static int IpcFrameLimit(int maxInputBytes) => checked(maxInputBytes + 16384);
+    public static string EncodeIpcFrame(object request, int maxInputBytes)
+    {
+        var frame = System.Text.Json.JsonSerializer.Serialize(request, Json.IpcOptions);
+        if (Encoding.UTF8.GetByteCount(frame) > IpcFrameLimit(maxInputBytes))
+            throw new InvalidDataException("IPC message too large");
+        return frame;
     }
 
     public static async Task<string> ReadLineAsync(StreamReader reader, int maxBytes, CancellationToken ct)
@@ -352,7 +362,7 @@ public static class Program
             using var writer = new StreamWriter(pipe, new UTF8Encoding(false), 4096, true) { AutoFlush = true };
             try
             {
-                var message = JsonNode.Parse(await ReadLineAsync(reader, settings.MaxInputBytes+16384, deadline.Token));
+                var message = JsonNode.Parse(await ReadLineAsync(reader, IpcFrameLimit(settings.MaxInputBytes), deadline.Token));
                 if(Json.Text(message,"operation")=="review"&&message?["deadlineUnixMs"] is JsonValue absolute&&absolute.TryGetValue<long>(out var unixMs))
                 {
                     var remaining=Math.Clamp(unixMs-DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()-500,1,settings.HookTimeoutSeconds*1000);
@@ -367,7 +377,7 @@ public static class Program
                     "review" => await gate.ReviewAsync(message?["payload"] ?? throw new InvalidDataException("Missing payload"), deadline.Token),
                     _ => throw new InvalidDataException("Unknown IPC operation")
                 };
-                await writer.WriteLineAsync(Json.Encode(result).AsMemory(), deadline.Token);
+                await writer.WriteLineAsync(EncodeIpcFrame(result, settings.MaxInputBytes).AsMemory(), deadline.Token);
                 if (Json.Text(message, "operation") == "stop") stop.Cancel();
             }
             catch (Exception e) when (e is IOException or InvalidDataException or OperationCanceledException or System.Text.Json.JsonException)

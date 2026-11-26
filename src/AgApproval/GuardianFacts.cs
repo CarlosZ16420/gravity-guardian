@@ -45,11 +45,11 @@ public static class GuardianFacts
                     proposals[step+j+1]=(callId,call);
                 }
             }
-            else if(proposals.TryGetValue(step,out var proposal)&&(Json.Text(row,"content")??Json.Text(row,"error")) is string output)
+            else if(proposals.TryGetValue(step,out var proposal)&&(row["content"]!=null||row["error"]!=null||row["status"]!=null))
             {
                 units.Add([
                     HistoricalAction(proposal.Call,proposal.Id),
-                    new JsonObject{["type"]="function_call_output",["call_id"]=proposal.Id,["output"]=BoundHistoricalText(output,MaxHistoricalToolBytes,"tool output")}
+                    new JsonObject{["type"]="function_call_output",["call_id"]=proposal.Id,["output"]=HistoricalOutput(row)}
                 ]);
             }
             else
@@ -104,6 +104,38 @@ public static class GuardianFacts
     }
 
     public static JsonObject Message(string role,string text)=>new(){["type"]="message",["role"]=role,["content"]=new JsonArray(new JsonObject{["type"]="input_text",["text"]=text})};
+
+    private static string HistoricalOutput(JsonObject row)
+    {
+        // Keep failure evidence separate from the body, so a long body cannot hide it.
+        var content=Json.Text(row,"content");
+        var error=Json.Text(row,"error");
+        var status=Json.Text(row,"status");
+        var output=new JsonObject {
+            ["status"]=null, ["content"]=null, ["error"]=null,
+            ["truncation"]=row["truncation"]?.DeepClone(),
+            ["bridge_content_truncated"]=false, ["bridge_error_truncated"]=false,
+            ["bridge_status_truncated"]=false
+        };
+        // Account for JSON escaping as well as text bytes, within the existing tool budget.
+        foreach(var field in new[]{"status","error","content"})
+        {
+            var text=field=="status"?status:field=="error"?error:content;
+            if(text==null)continue;
+            output[field]="";
+            int available=Math.Max(0,MaxHistoricalToolBytes-Encoding.UTF8.GetByteCount(output.ToJsonString(Json.PromptOptions))-128);
+            int low=0,high=Math.Min(Encoding.UTF8.GetByteCount(text),Math.Min(available,field=="status"?512:field=="error"?2048:MaxHistoricalToolBytes));
+            while(low<high) {
+                int mid=(low+high+1)/2;
+                if(Encoding.UTF8.GetByteCount(System.Text.Json.JsonSerializer.Serialize(TruncateUtf8(text,mid),Json.PromptOptions))<=available)low=mid;
+                else high=mid-1;
+            }
+            string preview=TruncateUtf8(text,low);
+            output[field]=preview;
+            output["bridge_"+field+"_truncated"]=preview!=text;
+        }
+        return output.ToJsonString(Json.PromptOptions);
+    }
 
     private static JsonObject Action(JsonNode call,string id)
     {

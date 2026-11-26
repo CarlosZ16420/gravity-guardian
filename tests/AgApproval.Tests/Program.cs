@@ -3,6 +3,16 @@ using System.Text.Json.Nodes;
 using System.Diagnostics;
 using System.IO.Pipes;
 
+if (args.Length == 4 && args[0] == "--compact-audit-child")
+{
+    LogCompactor.Compact(args[1], point => {
+        if (point != args[2]) return;
+        File.WriteAllText(args[3], point);
+        Thread.Sleep(Timeout.Infinite);
+    });
+    return 0;
+}
+
 if (args.Length == 2 && args[0] == "--serve-guardian-outage")
 {
     var fixture = Settings.Load(args[1]);
@@ -131,6 +141,7 @@ async Task Test(string name, Func<Task> body)
 }
 void Check(bool condition, string message) { if (!condition) throw new Exception(message); }
 if(args.Contains("--test-native-only")){await NativeGuardianTests.RunAsync(settings,policy,Test);Console.WriteLine($"{passed} native tests passed.");return 0;}
+if(args.Contains("--test-audit-only")){await AuditRegressionTests.RunAsync(scratch,settings,await ReviewContext.BuildAsync(Payload(),settings,default),Test);Console.WriteLine($"{passed} audit tests passed.");return 0;}
 
 var sourceFile=Path.Combine(scratch,"source.cjs");await File.WriteAllTextAsync(sourceFile,"console.log('source');");
 var sourceDirectory=Path.Combine(scratch,"code");Directory.CreateDirectory(sourceDirectory);
@@ -822,6 +833,7 @@ await Test("authorized denials escalate to force_ask while lower authorizations 
     var stats = UsageStats.Compute(Path.Combine(scratch, "escalate-critical-high"));
     Check(stats.Today.Denied == 1 && stats.Today.Failed == 0, "escalated denial counted as technical failure instead of denial");
 });
+await AuditRegressionTests.RunAsync(scratch,settings,await ReviewContext.BuildAsync(Payload(),settings,default),Test);
 await NativeGuardianTests.RunAsync(settings,policy,Test);
 await PanelCoreTests.RunAsync(settings,scratch,Test);
 Console.WriteLine($"{passed} tests passed.");

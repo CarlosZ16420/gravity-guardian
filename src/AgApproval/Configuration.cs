@@ -119,6 +119,10 @@ public static class Json
     public static readonly JsonSerializerOptions PromptOptions = new(JsonSerializerDefaults.Web) {
         WriteIndented = false, Encoder = JavaScriptEncoder.Create(UnicodeRanges.All)
     };
+    // Local pipe frames are never embedded in HTML. Keep this separate from display JSON.
+    public static readonly JsonSerializerOptions IpcOptions = new(JsonSerializerDefaults.Web) {
+        WriteIndented = false, Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+    };
     public static string Encode(object value) => JsonSerializer.Serialize(value, Options);
     public static string Hash(string text) => Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(text)));
     public static string? Text(JsonNode? node, string key) => node?[key]?.GetValue<string>();
